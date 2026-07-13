@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.11 |
+| 版本 | v1.12 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -43,8 +43,8 @@ mindmap
 目标结论：
 
 ```text
-Extension 元数据 = id + 可选 name（默认等于 id）
-Command 公开接口 = name + description + argumentCompleter + handler
+Extension 元数据 = id
+Command 公开接口 = commandName + description + argumentCompleter + handler
 框架内部模型     = Command 公开接口 + ownerId
 sourceInfo        = 不进入 Java Extension Command 设计
 ```
@@ -165,7 +165,6 @@ classDiagram
     class Extension {
         <<interface>>
         +String id()
-        +String name()
         +void initialize(ExtensionApi api)
         +void onLoad()
         +void onUnload()
@@ -173,7 +172,7 @@ classDiagram
 
     class ExtensionApi {
         <<interface>>
-        +void registerCommand(String name, SlashCommandOptions options)
+        +void registerCommand(String commandName, SlashCommandOptions options)
     }
 
     class SlashCommandOptions {
@@ -230,10 +229,6 @@ classDiagram
 public interface Extension {
     String id();
 
-    default String name() {
-        return id();
-    }
-
     void initialize(ExtensionApi api);
 
     default void onLoad() {}
@@ -241,6 +236,8 @@ public interface Extension {
     default void onUnload() {}
 }
 ```
+
+Extension 只保留稳定机器身份 `id`。当前 Registry、所有权、日志和错误诊断均可使用 `id`，因此不预留没有实际消费者的 `name()`。如果未来出现 Extension 管理界面或本地化展示需求，再通过明确的 `displayName` 元数据扩展。
 
 #### 4.2.1 Extension ID 约束
 
@@ -324,37 +321,17 @@ campusagent-coding-git-tools
 
 不强制 ID 包含连字符或具有固定段数。唯一性由 Registry 保证，段数不承担命名空间或冲突检测职责。
 
-#### 4.2.2 Extension Name 约束
-
-`name` 是可选的管理与诊断展示名称，不参与 Registry 身份、所有权或冲突判断。普通命令用户通常只看到 `/deploy` 和 Command description，不会看到 Extension name；当前范围内 `/help` 和命令补全也不展示它。
-
-| 约束项 | 规则 |
-|---|---|
-| 必填性 | 开发者无需覆盖；默认返回 `id` |
-| 使用场景 | 注册日志、错误诊断及未来的 Extension 管理界面 |
-| 命令体验 | 不用于命令调用、`/help`、命令补全或冲突判断 |
-| 覆盖后的长度 | 1～80 个字符，包含边界 |
-| 覆盖后的字符 | 允许 Unicode、空格和大小写；禁止换行符和控制字符 |
-| 覆盖后的空白 | 不允许首尾空白，框架不隐式 trim |
-| 唯一性 | 不要求唯一 |
-| 稳定性 | 允许调整，不影响 Extension 身份 |
-
-示例：
-
-```text
-Space Deployment
-代码审查
-```
-
-只有需要改善管理或诊断信息时才覆盖 `name()`；否则使用 `id()` 的默认值。
-
-#### 4.2.3 注册 API
+#### 4.2.2 注册 API
 
 ```java
 public interface ExtensionApi {
-    void registerCommand(String name, SlashCommandOptions options);
+    void registerCommand(
+            String commandName,
+            SlashCommandOptions options);
 }
 ```
+
+`commandName` 是用户调用的 Slash Command 名称。例如，`commandName` 为 `deploy` 时，用户通过 `/deploy` 调用。
 
 ### 4.3 Command Options
 
@@ -411,7 +388,7 @@ public record SlashCommandCompletion(
 | pi TypeScript | Java 设计 |
 |---|---|
 | Extension factory | `Extension.initialize(ExtensionApi)` |
-| `pi.registerCommand(name, options)` | `api.registerCommand(name, options)` |
+| `pi.registerCommand(name, options)` | `api.registerCommand(commandName, options)` |
 | options object | `SlashCommandOptions` record |
 | `getArgumentCompletions(prefix)` | `argumentCompleter.complete(prefix, context)` |
 | `async handler(args, ctx)` | `CompletionStage<Void> handle(args, context)` |
@@ -435,7 +412,7 @@ classDiagram
     class RegisteredSlashCommand {
         <<internal>>
         String ownerId
-        String name
+        String commandName
         String description
         argumentCompleter
         handler
@@ -450,7 +427,7 @@ classDiagram
 
     class SlashCommandRegistry {
         <<internal service>>
-        +find(name)
+        +find(commandName)
         +getAll()
         +replaceOwnerCommands(ownerId, commands)
         +removeOwner(ownerId)
@@ -464,7 +441,7 @@ classDiagram
 ```java
 record RegisteredSlashCommand(
         String ownerId,
-        String name,
+        String commandName,
         String description,
         SlashCommandArgumentCompleter argumentCompleter,
         SlashCommandHandler handler) {}
@@ -497,8 +474,8 @@ sequenceDiagram
     L->>A: create(extensionId)
     L->>E: initialize(A)
     E->>A: registerCommand("deploy", options)
-    A->>S: stage(ownerId, name, options)
-    S->>S: validate name/options/duplicates
+    A->>S: stage(ownerId, commandName, options)
+    S->>S: validate commandName/options/duplicates
 
     alt validation success
         S->>R: replaceOwnerCommands(ownerId, staged)
@@ -569,7 +546,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    start["registerCommand(name, options)"] --> validName{"名称合法?"}
+    start["registerCommand(commandName, options)"] --> validName{"Command name 合法?"}
     validName -- 否 --> rejectName["拒绝：INVALID_NAME"]
     validName -- 是 --> builtin{"与内置命令同名?"}
     builtin -- 是 --> rejectBuiltin["拒绝：BUILTIN_RESERVED"]
@@ -583,7 +560,7 @@ flowchart TD
     allValid -- 是 --> publish["原子发布新 Snapshot"]
 ```
 
-### 7.2 名称规则
+### 7.2 Command Name 规则
 
 ```text
 ^[a-z][a-z0-9-]*$
@@ -664,7 +641,7 @@ sequenceDiagram
 
 ```java
 public record SlashCommandInvocation(
-        String name,
+        String commandName,
         String arguments) {}
 ```
 
@@ -761,8 +738,7 @@ sequenceDiagram
 | 元数据 | 示例 | 含义 |
 |---|---|---|
 | Extension ID | `space-deploy` | 稳定 Registry 身份，框架派生 `extension:space-deploy` |
-| Extension name | `space-deploy` | 示例未覆盖 `name()`，因此默认等于 ID |
-| Command name | `deploy` | 用户通过 `/deploy` 调用 |
+| Command name | `deploy` | `registerCommand` 的 `commandName`，用户通过 `/deploy` 调用 |
 
 ```java
 public final class DeployExtension implements Extension {
@@ -811,15 +787,6 @@ public final class DeployExtension implements Extension {
 }
 ```
 
-如果未来的 Extension 管理界面需要更友好的展示名称，可以选择性覆盖：
-
-```java
-@Override
-public String name() {
-    return "Space Deployment";
-}
-```
-
 ```mermaid
 flowchart LR
     code["DeployExtension.initialize"] --> register["registerCommand deploy"]
@@ -836,10 +803,10 @@ flowchart LR
 | ID | 需求 | 验证方式 |
 |---|---|---|
 | FR-001 | Extension 通过 `initialize(ExtensionApi)` 注册命令 | API 单测 |
-| FR-002 | `registerCommand` 只接收 `name` 和 `options` | 编译检查 |
+| FR-002 | `registerCommand` 只接收 `commandName` 和 `options` | 编译检查 |
 | FR-003 | 公开 Command API 不包含 `sourceInfo`、`ownerId` | API 审查 |
-| FR-004 | Command `name`、`handler` 必填；description/completer 可选 | 校验单测 |
-| FR-005 | 名称必须符合 `^[a-z][a-z0-9-]*$` | 参数化测试 |
+| FR-004 | Command `commandName`、`handler` 必填；description/completer 可选 | 校验单测 |
+| FR-005 | Command name 必须符合 `^[a-z][a-z0-9-]*$` | 参数化测试 |
 | FR-006 | Built-in 名称对 Extension 保留 | 冲突测试 |
 | FR-007 | 同名命令不得静默覆盖 | 冲突测试 |
 | FR-008 | Extension 命令以 owner 为单位原子提交 | Snapshot 测试 |
@@ -863,7 +830,6 @@ flowchart LR
 | FR-026 | Extension ID 长度为 1～64，且符合 `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
 | FR-027 | Extension ID 禁止宿主保留名称和前缀 | 参数化测试 |
 | FR-028 | Extension ID 全局唯一，冲突时注册失败，不静默替换 | Registry 测试 |
-| FR-029 | Extension name 可选且默认等于 ID；不参与命令体验、身份和冲突判断 | API/Registry 测试 |
 
 ---
 
@@ -1031,7 +997,7 @@ sequenceDiagram
 | AC-09 | 架构统一 | Built-in 与 Extension 使用同一 Registry/Dispatcher |
 | AC-10 | 无旁路 | `InteractiveMode` 不按具体命令名处理副作用 |
 | AC-11 | 测试 | 新增单元和集成测试全部通过 |
-| AC-12 | Extension 元数据 | ID 校验符合约束；name 未覆盖时等于 ID；重复 ID 不改变现有 Registry |
+| AC-12 | Extension ID | ID 校验符合约束；重复 ID 不改变现有 Registry |
 
 ---
 
@@ -1053,7 +1019,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     developer["Extension Developer"]
-    publicApi["name + description\n+ argumentCompleter + handler"]
+    publicApi["commandName + description\n+ argumentCompleter + handler"]
     scopedApi["Scoped ExtensionApi"]
     internal["ownerId + RegisteredCommand"]
     runtime["统一帮助、补全、执行、卸载"]
@@ -1066,7 +1032,7 @@ Java Extension Command 采用 pi 语义一致的注册模型：
 
 ```text
 Extension.initialize(ExtensionApi)
-  → registerCommand(name, SlashCommandOptions)
+  → registerCommand(commandName, SlashCommandOptions)
   → Registry 内部绑定 extensionId
   → 原子发布命令快照
   → 统一帮助、补全、执行和卸载
