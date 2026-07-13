@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.8 |
+| 版本 | v1.9 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -545,7 +545,7 @@ sequenceDiagram
     else handler failure
         H-->>D: exceptional completion
         D-->>I: FAILED(error summary)
-        I->>T: render error; session remains usable
+        I->>T: render error, session remains usable
     end
 ```
 
