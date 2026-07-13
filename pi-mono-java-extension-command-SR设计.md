@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.9 |
+| 版本 | v1.10 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -43,9 +43,10 @@ mindmap
 目标结论：
 
 ```text
-开发者公开接口 = name + description + argumentCompleter + handler
-框架内部模型   = 公开接口 + ownerId
-sourceInfo      = 不进入 Java Extension Command 设计
+Extension 元数据 = id + name
+Command 公开接口 = name + description + argumentCompleter + handler
+框架内部模型     = Command 公开接口 + ownerId
+sourceInfo        = 不进入 Java Extension Command 设计
 ```
 
 ### 1.1 范围
@@ -239,6 +240,110 @@ public interface Extension {
 }
 ```
 
+#### 4.2.1 Extension ID 约束
+
+`id` 是 Extension 在 Registry 中的稳定机器身份，并用于派生内部 `ownerId`。开发者直接提供 `id`，框架不根据路径生成，也不进行 trim、大小写转换或其他隐式规范化。
+
+| 约束项 | 规则 |
+|---|---|
+| 长度 | 1～64 个 ASCII 字符，包含边界 |
+| 允许字符 | 小写英文字母 `a-z`、数字 `0-9`、连字符 `-` |
+| 起始字符 | 必须是小写英文字母 |
+| 结束字符 | 必须是小写英文字母或数字 |
+| 连字符 | 不能出现在开头、结尾或连续出现 |
+| 大小写 | 不允许大写字母 |
+| 保留名称 | 禁止 `builtin`、`system`、`internal` |
+| 保留前缀 | 禁止 `builtin-`、`system-`、`internal-` |
+| 稳定性 | ID 发布后不得修改；修改 ID 视为删除旧 Extension 并注册新 Extension |
+| 唯一性 | 在 Extension Registry 中全局唯一；冲突时注册失败，不得静默替换 |
+
+语法正则：
+
+```regex
+^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
+```
+
+Java 使用严格输入边界，并单独检查长度和保留名称，以便返回明确的校验错误：
+
+```java
+private static final Pattern EXTENSION_ID_PATTERN = Pattern.compile(
+        "\\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\z");
+
+private static final Set<String> RESERVED_EXTENSION_IDS = Set.of(
+        "builtin", "system", "internal");
+
+private static final List<String> RESERVED_EXTENSION_ID_PREFIXES = List.of(
+        "builtin-", "system-", "internal-");
+
+public static boolean isValidExtensionId(String id) {
+    if (id == null || id.length() < 1 || id.length() > 64) {
+        return false;
+    }
+    if (!EXTENSION_ID_PATTERN.matcher(id).matches()) {
+        return false;
+    }
+    if (RESERVED_EXTENSION_IDS.contains(id)) {
+        return false;
+    }
+    return RESERVED_EXTENSION_ID_PREFIXES.stream()
+            .noneMatch(id::startsWith);
+}
+```
+
+正确示例：
+
+```text
+a
+deploy
+space-deploy
+space-memory2
+campusagent-coding-git-tools
+```
+
+长度下限 1 只定义语法边界。开发者仍应选择能够表达功能或领域的 ID，不应为了缩短名称而使用无意义的单字符 ID。
+
+错误示例：
+
+| ID | 错误原因 |
+|---|---|
+| 空字符串 | 少于 1 个字符 |
+| 65 个连续的 `a` | 超过 64 个字符 |
+| `12345` | 首字符不是字母 |
+| `Campusagent-space` | 包含大写字母 |
+| `-campusagent-space` | 以连字符开头 |
+| `campusagent-space-` | 以连字符结尾 |
+| `campusagent--space` | 包含连续连字符 |
+| `campusagent.space.deploy` | 包含点号 |
+| `campusagent_space_deploy` | 包含下划线 |
+| `campusagent space` | 包含空格 |
+| `campusagent/space` | 包含斜杠 |
+| `部署命令` | 包含非 ASCII 字符 |
+| `builtin-deploy` | 使用宿主保留前缀 |
+
+不强制 ID 包含连字符或具有固定段数。唯一性由 Registry 保证，段数不承担命名空间或冲突检测职责。
+
+#### 4.2.2 Extension Name 约束
+
+`name` 是面向用户和诊断信息的展示名称，不参与 Registry 身份、所有权或冲突判断。
+
+| 约束项 | 规则 |
+|---|---|
+| 必填性 | 非 `null`、非空、非纯空白 |
+| 长度 | 1～80 个字符，包含边界 |
+| 字符 | 允许 Unicode、空格和大小写；禁止换行符和控制字符 |
+| 空白 | 不允许首尾空白，框架不隐式 trim |
+| 唯一性 | 不要求唯一 |
+| 稳定性 | 允许调整，不影响 Extension 身份 |
+
+示例：
+
+```text
+Space Deployment
+代码审查
+```
+
+#### 4.2.3 注册 API
+
 ```java
 public interface ExtensionApi {
     void registerCommand(String name, SlashCommandOptions options);
@@ -364,7 +469,7 @@ record RegisteredSlashCommand(
 | 命令来源 | `ownerId` 示例 | 开发者是否提供 |
 |---|---|---|
 | 内置命令 | `builtin` | 否 |
-| Extension | `extension:deploy-extension` | 否，由 scoped API 绑定 |
+| Extension | `extension:space-deploy` | 否，由 scoped API 根据 Extension ID 绑定 |
 
 `RegisteredSlashCommand`、`ownerId` 和 Registry Snapshot 均为内部实现，不属于 Extension SDK。
 
@@ -647,17 +752,23 @@ sequenceDiagram
 
 以下是目标 API 示例，不是当前仓库已存在接口。
 
+| 元数据 | 示例 | 含义 |
+|---|---|---|
+| Extension ID | `space-deploy` | 稳定 Registry 身份，框架派生 `extension:space-deploy` |
+| Extension name | `Space Deployment` | 用户可见展示名称 |
+| Command name | `deploy` | 用户通过 `/deploy` 调用 |
+
 ```java
 public final class DeployExtension implements Extension {
 
     @Override
     public String id() {
-        return "deploy-extension";
+        return "space-deploy";
     }
 
     @Override
     public String name() {
-        return "Deploy Extension";
+        return "Space Deployment";
     }
 
     @Override
@@ -739,6 +850,10 @@ flowchart LR
 | FR-023 | 命令快照顺序稳定 | Registry 测试 |
 | FR-024 | Context 每次执行创建，Extension 不缓存 | 生命周期测试/文档 |
 | FR-025 | 核心层不依赖 TUI，预留 RPC 复用 | 依赖检查 |
+| FR-026 | Extension ID 长度为 1～64，且符合 `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
+| FR-027 | Extension ID 禁止宿主保留名称和前缀 | 参数化测试 |
+| FR-028 | Extension ID 全局唯一，冲突时注册失败，不静默替换 | Registry 测试 |
+| FR-029 | Extension name 满足展示名称约束，且不参与身份和冲突判断 | API/Registry 测试 |
 
 ---
 
@@ -906,6 +1021,7 @@ sequenceDiagram
 | AC-09 | 架构统一 | Built-in 与 Extension 使用同一 Registry/Dispatcher |
 | AC-10 | 无旁路 | `InteractiveMode` 不按具体命令名处理副作用 |
 | AC-11 | 测试 | 新增单元和集成测试全部通过 |
+| AC-12 | Extension 元数据 | ID/name 校验符合公开约束；重复 ID 不改变现有 Registry |
 
 ---
 
