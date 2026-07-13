@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.12 |
+| 版本 | v1.13 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -44,7 +44,7 @@ mindmap
 
 ```text
 Extension 元数据 = id
-Command 公开接口 = commandName + description + argumentCompleter + handler
+Command 公开接口 = name + description + argumentCompleter + handler
 框架内部模型     = Command 公开接口 + ownerId
 sourceInfo        = 不进入 Java Extension Command 设计
 ```
@@ -172,7 +172,7 @@ classDiagram
 
     class ExtensionApi {
         <<interface>>
-        +void registerCommand(String commandName, SlashCommandOptions options)
+        +void registerCommand(String name, SlashCommandOptions options)
     }
 
     class SlashCommandOptions {
@@ -326,12 +326,12 @@ campusagent-coding-git-tools
 ```java
 public interface ExtensionApi {
     void registerCommand(
-            String commandName,
+            String name,
             SlashCommandOptions options);
 }
 ```
 
-`commandName` 是用户调用的 Slash Command 名称。例如，`commandName` 为 `deploy` 时，用户通过 `/deploy` 调用。
+`name` 是用户调用的 Slash Command 名称。例如，`name` 为 `deploy` 时，用户通过 `/deploy` 调用。它是 `registerCommand` 的方法参数，不是 Extension 元数据。
 
 ### 4.3 Command Options
 
@@ -388,7 +388,7 @@ public record SlashCommandCompletion(
 | pi TypeScript | Java 设计 |
 |---|---|
 | Extension factory | `Extension.initialize(ExtensionApi)` |
-| `pi.registerCommand(name, options)` | `api.registerCommand(commandName, options)` |
+| `pi.registerCommand(name, options)` | `api.registerCommand(name, options)` |
 | options object | `SlashCommandOptions` record |
 | `getArgumentCompletions(prefix)` | `argumentCompleter.complete(prefix, context)` |
 | `async handler(args, ctx)` | `CompletionStage<Void> handle(args, context)` |
@@ -412,7 +412,7 @@ classDiagram
     class RegisteredSlashCommand {
         <<internal>>
         String ownerId
-        String commandName
+        String name
         String description
         argumentCompleter
         handler
@@ -427,7 +427,7 @@ classDiagram
 
     class SlashCommandRegistry {
         <<internal service>>
-        +find(commandName)
+        +find(name)
         +getAll()
         +replaceOwnerCommands(ownerId, commands)
         +removeOwner(ownerId)
@@ -441,7 +441,7 @@ classDiagram
 ```java
 record RegisteredSlashCommand(
         String ownerId,
-        String commandName,
+        String name,
         String description,
         SlashCommandArgumentCompleter argumentCompleter,
         SlashCommandHandler handler) {}
@@ -474,8 +474,8 @@ sequenceDiagram
     L->>A: create(extensionId)
     L->>E: initialize(A)
     E->>A: registerCommand("deploy", options)
-    A->>S: stage(ownerId, commandName, options)
-    S->>S: validate commandName/options/duplicates
+    A->>S: stage(ownerId, name, options)
+    S->>S: validate name/options/duplicates
 
     alt validation success
         S->>R: replaceOwnerCommands(ownerId, staged)
@@ -546,7 +546,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    start["registerCommand(commandName, options)"] --> validName{"Command name 合法?"}
+    start["registerCommand(name, options)"] --> validName{"Command name 合法?"}
     validName -- 否 --> rejectName["拒绝：INVALID_NAME"]
     validName -- 是 --> builtin{"与内置命令同名?"}
     builtin -- 是 --> rejectBuiltin["拒绝：BUILTIN_RESERVED"]
@@ -641,7 +641,7 @@ sequenceDiagram
 
 ```java
 public record SlashCommandInvocation(
-        String commandName,
+        String name,
         String arguments) {}
 ```
 
@@ -667,7 +667,7 @@ public enum SlashCommandDispatchStatus {
 ```java
 public record SlashCommandDispatchResult(
         SlashCommandDispatchStatus status,
-        String commandName,
+        String name,
         String errorMessage) {}
 ```
 
@@ -738,7 +738,7 @@ sequenceDiagram
 | 元数据 | 示例 | 含义 |
 |---|---|---|
 | Extension ID | `space-deploy` | 稳定 Registry 身份，框架派生 `extension:space-deploy` |
-| Command name | `deploy` | `registerCommand` 的 `commandName`，用户通过 `/deploy` 调用 |
+| Command name | `deploy` | `registerCommand` 的 `name`，用户通过 `/deploy` 调用 |
 
 ```java
 public final class DeployExtension implements Extension {
@@ -803,9 +803,9 @@ flowchart LR
 | ID | 需求 | 验证方式 |
 |---|---|---|
 | FR-001 | Extension 通过 `initialize(ExtensionApi)` 注册命令 | API 单测 |
-| FR-002 | `registerCommand` 只接收 `commandName` 和 `options` | 编译检查 |
+| FR-002 | `registerCommand` 只接收 `name` 和 `options` | 编译检查 |
 | FR-003 | 公开 Command API 不包含 `sourceInfo`、`ownerId` | API 审查 |
-| FR-004 | Command `commandName`、`handler` 必填；description/completer 可选 | 校验单测 |
+| FR-004 | Command `name`、`handler` 必填；description/completer 可选 | 校验单测 |
 | FR-005 | Command name 必须符合 `^[a-z][a-z0-9-]*$` | 参数化测试 |
 | FR-006 | Built-in 名称对 Extension 保留 | 冲突测试 |
 | FR-007 | 同名命令不得静默覆盖 | 冲突测试 |
@@ -844,7 +844,7 @@ flowchart LR
 | NFR-005 | 一致性 | Registry 使用不可变快照或 copy-on-write 等价机制 |
 | NFR-006 | 可靠性 | 单个 Extension 失败不影响其他命令和当前会话 |
 | NFR-007 | 日志 | INFO 不记录完整命令参数 |
-| NFR-008 | 诊断 | 日志使用 `ownerId/commandName` 标识命令 |
+| NFR-008 | 诊断 | 日志使用 `ownerId/name` 标识命令 |
 | NFR-009 | 安全 | 文档明确 Extension Command 拥有宿主进程权限 |
 | NFR-010 | 测试 | Parser、Registry、Dispatcher 可脱离 Spring/TUI 单测 |
 
@@ -1019,7 +1019,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     developer["Extension Developer"]
-    publicApi["commandName + description\n+ argumentCompleter + handler"]
+    publicApi["name + description\n+ argumentCompleter + handler"]
     scopedApi["Scoped ExtensionApi"]
     internal["ownerId + RegisteredCommand"]
     runtime["统一帮助、补全、执行、卸载"]
@@ -1032,7 +1032,7 @@ Java Extension Command 采用 pi 语义一致的注册模型：
 
 ```text
 Extension.initialize(ExtensionApi)
-  → registerCommand(commandName, SlashCommandOptions)
+  → registerCommand(name, SlashCommandOptions)
   → Registry 内部绑定 extensionId
   → 原子发布命令快照
   → 统一帮助、补全、执行和卸载
