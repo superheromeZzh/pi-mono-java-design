@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.14 |
+| 版本 | v1.15 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -333,13 +333,58 @@ public interface ExtensionApi {
 
 `name` 是用户调用的 Slash Command 名称。例如，`name` 为 `deploy` 时，用户通过 `/deploy` 调用。它是 `registerCommand` 的方法参数，不是 Extension 元数据。
 
+通用正则：
+
+```regex
+^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
+```
+
+Java 使用严格输入边界：
+
+```java
+private static final Pattern COMMAND_NAME_PATTERN = Pattern.compile(
+        "\\A(?=.{1,64}\\z)[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\z");
+```
+
+| 约束项 | 规则 |
+|---|---|
+| 长度 | 1～64 个 ASCII 字符，长度由正则限定 |
+| 起始字符 | 必须是小写英文字母 |
+| 允许字符 | 小写英文字母 `a-z`、数字 `0-9`、连字符 `-` |
+| 连字符 | 不能出现在开头、结尾或连续出现 |
+| Slash | `name` 不包含调用前缀 `/` |
+| 归一化 | 不进行 trim 或大小写转换 |
+
+| 允许 | 拒绝 | 原因 |
+|---|---|---|
+| `deploy` | `/deploy` | 名称不包含 `/` |
+| `scoped-models` | `Deploy` | 不隐式转换大小写 |
+| `review2` | `skill:review` | 不允许冒号 |
+| `git-status` | `git status` | 不允许空白 |
+| `a` | `deploy-` | 不允许结尾连字符 |
+| `deploy-prod` | `deploy--prod` | 不允许连续连字符 |
+| 64 个连续的 `a` | 65 个连续的 `a` | 超过长度上限 |
+
 ### 4.3 Command Options
+
+`description` 的正则应用于 `strip()` 处理后的文本。
+
+通用形式（正则引擎需支持 Unicode General Category）：
+
+```regex
+^(?=.{1,1024}$)[^\p{Cc}\p{Zl}\p{Zp}]+$
+```
+
+Java 使用严格输入边界：
 
 ```java
 public record SlashCommandOptions(
         String description,
         SlashCommandArgumentCompleter argumentCompleter,
         SlashCommandHandler handler) {
+
+    private static final Pattern COMMAND_DESCRIPTION_PATTERN = Pattern.compile(
+            "\\A(?=.{1,1024}\\z)[^\\p{Cc}\\p{Zl}\\p{Zp}]+\\z");
 
     public SlashCommandOptions {
         Objects.requireNonNull(description, "description");
@@ -351,9 +396,9 @@ public record SlashCommandOptions(
             throw new IllegalArgumentException(
                     "description must contain 1 to 1024 Unicode code points");
         }
-        if (description.codePoints().anyMatch(Character::isISOControl)) {
+        if (!COMMAND_DESCRIPTION_PATTERN.matcher(description).matches()) {
             throw new IllegalArgumentException(
-                    "description must not contain control characters");
+                    "description must be single-line text without control characters");
         }
         argumentCompleter = argumentCompleter == null
                 ? SlashCommandArgumentCompleter.none()
@@ -369,8 +414,8 @@ public record SlashCommandOptions(
 |---|---|
 | 必填性 | 必填，不允许 `null` |
 | 归一化 | 校验前使用 `strip()` 删除首尾 Unicode 空白 |
-| 长度 | 归一化后 1～1024 个 Unicode 码点，包含边界 |
-| 字符 | 允许 Unicode；禁止换行符、其他 ISO 控制字符和 ANSI 转义字符 |
+| 长度 | 归一化后 1～1024 个 Unicode 码点，正则包含长度断言，`codePointCount()` 负责精确校验 |
+| 字符 | 允许 Unicode；正则排除控制字符 `Cc`、行分隔符 `Zl` 和段落分隔符 `Zp`，因此同时拒绝换行和 ANSI ESC |
 | 稳定性 | 允许修改，不影响 Command 身份 |
 
 ### 4.4 Handler 与 Completer
@@ -584,41 +629,7 @@ flowchart TD
     allValid -- 是 --> publish["原子发布新 Snapshot"]
 ```
 
-### 7.2 Command Name 规则
-
-通用正则：
-
-```regex
-^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
-```
-
-Java 使用严格输入边界：
-
-```java
-private static final Pattern COMMAND_NAME_PATTERN = Pattern.compile(
-        "\\A(?=.{1,64}\\z)[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\z");
-```
-
-| 约束项 | 规则 |
-|---|---|
-| 长度 | 1～64 个 ASCII 字符，长度由正则限定 |
-| 起始字符 | 必须是小写英文字母 |
-| 允许字符 | 小写英文字母 `a-z`、数字 `0-9`、连字符 `-` |
-| 连字符 | 不能出现在开头、结尾或连续出现 |
-| Slash | `name` 不包含调用前缀 `/` |
-| 归一化 | 不进行 trim 或大小写转换 |
-
-| 允许 | 拒绝 | 原因 |
-|---|---|---|
-| `deploy` | `/deploy` | 名称不包含 `/` |
-| `scoped-models` | `Deploy` | 不隐式转换大小写 |
-| `review2` | `skill:review` | 不允许冒号 |
-| `git-status` | `git status` | 不允许空白 |
-| `a` | `deploy-` | 不允许结尾连字符 |
-| `deploy-prod` | `deploy--prod` | 不允许连续连字符 |
-| 64 个连续的 `a` | 65 个连续的 `a` | 超过长度上限 |
-
-### 7.3 冲突策略
+### 7.2 冲突策略
 
 | 场景 | 结果 |
 |---|---|
@@ -875,7 +886,7 @@ flowchart LR
 | FR-026 | Extension ID 长度为 1～64，且符合 `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
 | FR-027 | Extension ID 禁止宿主保留名称和前缀 | 参数化测试 |
 | FR-028 | Extension ID 全局唯一，冲突时注册失败，不静默替换 | Registry 测试 |
-| FR-029 | Command description 经 `strip()` 后长度为 1～1024 个 Unicode 码点，且不包含控制字符 | 参数化测试 |
+| FR-029 | Command description 经 `strip()` 后必须匹配 `^(?=.{1,1024}$)[^\p{Cc}\p{Zl}\p{Zp}]+$`，并通过 1～1024 个 Unicode 码点精确校验 | 参数化测试 |
 
 ---
 
