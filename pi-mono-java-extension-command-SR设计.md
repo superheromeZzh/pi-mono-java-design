@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.13 |
+| 版本 | v1.14 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -342,7 +342,19 @@ public record SlashCommandOptions(
         SlashCommandHandler handler) {
 
     public SlashCommandOptions {
-        description = description == null ? "" : description.trim();
+        Objects.requireNonNull(description, "description");
+        description = description.strip();
+        int descriptionLength = description.codePointCount(
+                0,
+                description.length());
+        if (descriptionLength < 1 || descriptionLength > 1024) {
+            throw new IllegalArgumentException(
+                    "description must contain 1 to 1024 Unicode code points");
+        }
+        if (description.codePoints().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException(
+                    "description must not contain control characters");
+        }
         argumentCompleter = argumentCompleter == null
                 ? SlashCommandArgumentCompleter.none()
                 : argumentCompleter;
@@ -350,6 +362,16 @@ public record SlashCommandOptions(
     }
 }
 ```
+
+`description` 用于 `/help` 和命令补全展示，不参与命令身份或冲突判断。
+
+| 约束项 | 规则 |
+|---|---|
+| 必填性 | 必填，不允许 `null` |
+| 归一化 | 校验前使用 `strip()` 删除首尾 Unicode 空白 |
+| 长度 | 归一化后 1～1024 个 Unicode 码点，包含边界 |
+| 字符 | 允许 Unicode；禁止换行符、其他 ISO 控制字符和 ANSI 转义字符 |
+| 稳定性 | 允许修改，不影响 Command 身份 |
 
 ### 4.4 Handler 与 Completer
 
@@ -548,7 +570,9 @@ stateDiagram-v2
 flowchart TD
     start["registerCommand(name, options)"] --> validName{"Command name 合法?"}
     validName -- 否 --> rejectName["拒绝：INVALID_NAME"]
-    validName -- 是 --> builtin{"与内置命令同名?"}
+    validName -- 是 --> validOptions{"description/handler 合法?"}
+    validOptions -- 否 --> rejectOptions["拒绝：INVALID_OPTIONS"]
+    validOptions -- 是 --> builtin{"与内置命令同名?"}
     builtin -- 是 --> rejectBuiltin["拒绝：BUILTIN_RESERVED"]
     builtin -- 否 --> sameBatch{"本次初始化重复?"}
     sameBatch -- 是 --> rejectBatch["拒绝：DUPLICATE_IN_EXTENSION"]
@@ -562,16 +586,37 @@ flowchart TD
 
 ### 7.2 Command Name 规则
 
-```text
-^[a-z][a-z0-9-]*$
+通用正则：
+
+```regex
+^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
 ```
+
+Java 使用严格输入边界：
+
+```java
+private static final Pattern COMMAND_NAME_PATTERN = Pattern.compile(
+        "\\A(?=.{1,64}\\z)[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\z");
+```
+
+| 约束项 | 规则 |
+|---|---|
+| 长度 | 1～64 个 ASCII 字符，长度由正则限定 |
+| 起始字符 | 必须是小写英文字母 |
+| 允许字符 | 小写英文字母 `a-z`、数字 `0-9`、连字符 `-` |
+| 连字符 | 不能出现在开头、结尾或连续出现 |
+| Slash | `name` 不包含调用前缀 `/` |
+| 归一化 | 不进行 trim 或大小写转换 |
 
 | 允许 | 拒绝 | 原因 |
 |---|---|---|
 | `deploy` | `/deploy` | 名称不包含 `/` |
 | `scoped-models` | `Deploy` | 不隐式转换大小写 |
-| `review2` | `skill:review` | `skill:` 为保留命名空间 |
+| `review2` | `skill:review` | 不允许冒号 |
 | `git-status` | `git status` | 不允许空白 |
+| `a` | `deploy-` | 不允许结尾连字符 |
+| `deploy-prod` | `deploy--prod` | 不允许连续连字符 |
+| 64 个连续的 `a` | 65 个连续的 `a` | 超过长度上限 |
 
 ### 7.3 冲突策略
 
@@ -805,8 +850,8 @@ flowchart LR
 | FR-001 | Extension 通过 `initialize(ExtensionApi)` 注册命令 | API 单测 |
 | FR-002 | `registerCommand` 只接收 `name` 和 `options` | 编译检查 |
 | FR-003 | 公开 Command API 不包含 `sourceInfo`、`ownerId` | API 审查 |
-| FR-004 | Command `name`、`handler` 必填；description/completer 可选 | 校验单测 |
-| FR-005 | Command name 必须符合 `^[a-z][a-z0-9-]*$` | 参数化测试 |
+| FR-004 | Command `name`、`description`、`handler` 必填；completer 可选 | 校验单测 |
+| FR-005 | Command name 必须符合 `^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
 | FR-006 | Built-in 名称对 Extension 保留 | 冲突测试 |
 | FR-007 | 同名命令不得静默覆盖 | 冲突测试 |
 | FR-008 | Extension 命令以 owner 为单位原子提交 | Snapshot 测试 |
@@ -830,6 +875,7 @@ flowchart LR
 | FR-026 | Extension ID 长度为 1～64，且符合 `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
 | FR-027 | Extension ID 禁止宿主保留名称和前缀 | 参数化测试 |
 | FR-028 | Extension ID 全局唯一，冲突时注册失败，不静默替换 | Registry 测试 |
+| FR-029 | Command description 经 `strip()` 后长度为 1～1024 个 Unicode 码点，且不包含控制字符 | 参数化测试 |
 
 ---
 
@@ -953,6 +999,7 @@ flowchart TB
 |---|---|
 | `SlashCommandParserTest` | 非命令、空命令、参数拆分、未知命令 |
 | `SlashCommandRegistryTest` | 合法注册、非法名称、稳定顺序、冲突 |
+| `SlashCommandOptionsTest` | description 空值、空白、长度边界、控制字符和 Unicode 码点 |
 | `SlashCommandRegistryReloadTest` | 原子替换、失败保留、卸载清理 |
 | `SlashCommandDispatcherTest` | 四种状态、异步成功和失败 |
 | `SlashCommandArgumentCompleterTest` | 候选、异常、超时、过期结果 |
@@ -998,6 +1045,7 @@ sequenceDiagram
 | AC-10 | 无旁路 | `InteractiveMode` 不按具体命令名处理副作用 |
 | AC-11 | 测试 | 新增单元和集成测试全部通过 |
 | AC-12 | Extension ID | ID 校验符合约束；重复 ID 不改变现有 Registry |
+| AC-13 | Command 元数据 | name 长度与格式、description 长度与字符校验符合约束 |
 
 ---
 
