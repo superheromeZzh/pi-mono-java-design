@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.10 |
+| 版本 | v1.11 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 
 ---
@@ -43,7 +43,7 @@ mindmap
 目标结论：
 
 ```text
-Extension 元数据 = id + name
+Extension 元数据 = id + 可选 name（默认等于 id）
 Command 公开接口 = name + description + argumentCompleter + handler
 框架内部模型     = Command 公开接口 + ownerId
 sourceInfo        = 不进入 Java Extension Command 设计
@@ -230,7 +230,9 @@ classDiagram
 public interface Extension {
     String id();
 
-    String name();
+    default String name() {
+        return id();
+    }
 
     void initialize(ExtensionApi api);
 
@@ -324,14 +326,16 @@ campusagent-coding-git-tools
 
 #### 4.2.2 Extension Name 约束
 
-`name` 是面向用户和诊断信息的展示名称，不参与 Registry 身份、所有权或冲突判断。
+`name` 是可选的管理与诊断展示名称，不参与 Registry 身份、所有权或冲突判断。普通命令用户通常只看到 `/deploy` 和 Command description，不会看到 Extension name；当前范围内 `/help` 和命令补全也不展示它。
 
 | 约束项 | 规则 |
 |---|---|
-| 必填性 | 非 `null`、非空、非纯空白 |
-| 长度 | 1～80 个字符，包含边界 |
-| 字符 | 允许 Unicode、空格和大小写；禁止换行符和控制字符 |
-| 空白 | 不允许首尾空白，框架不隐式 trim |
+| 必填性 | 开发者无需覆盖；默认返回 `id` |
+| 使用场景 | 注册日志、错误诊断及未来的 Extension 管理界面 |
+| 命令体验 | 不用于命令调用、`/help`、命令补全或冲突判断 |
+| 覆盖后的长度 | 1～80 个字符，包含边界 |
+| 覆盖后的字符 | 允许 Unicode、空格和大小写；禁止换行符和控制字符 |
+| 覆盖后的空白 | 不允许首尾空白，框架不隐式 trim |
 | 唯一性 | 不要求唯一 |
 | 稳定性 | 允许调整，不影响 Extension 身份 |
 
@@ -341,6 +345,8 @@ campusagent-coding-git-tools
 Space Deployment
 代码审查
 ```
+
+只有需要改善管理或诊断信息时才覆盖 `name()`；否则使用 `id()` 的默认值。
 
 #### 4.2.3 注册 API
 
@@ -755,7 +761,7 @@ sequenceDiagram
 | 元数据 | 示例 | 含义 |
 |---|---|---|
 | Extension ID | `space-deploy` | 稳定 Registry 身份，框架派生 `extension:space-deploy` |
-| Extension name | `Space Deployment` | 用户可见展示名称 |
+| Extension name | `space-deploy` | 示例未覆盖 `name()`，因此默认等于 ID |
 | Command name | `deploy` | 用户通过 `/deploy` 调用 |
 
 ```java
@@ -764,11 +770,6 @@ public final class DeployExtension implements Extension {
     @Override
     public String id() {
         return "space-deploy";
-    }
-
-    @Override
-    public String name() {
-        return "Space Deployment";
     }
 
     @Override
@@ -810,6 +811,15 @@ public final class DeployExtension implements Extension {
 }
 ```
 
+如果未来的 Extension 管理界面需要更友好的展示名称，可以选择性覆盖：
+
+```java
+@Override
+public String name() {
+    return "Space Deployment";
+}
+```
+
 ```mermaid
 flowchart LR
     code["DeployExtension.initialize"] --> register["registerCommand deploy"]
@@ -828,7 +838,7 @@ flowchart LR
 | FR-001 | Extension 通过 `initialize(ExtensionApi)` 注册命令 | API 单测 |
 | FR-002 | `registerCommand` 只接收 `name` 和 `options` | 编译检查 |
 | FR-003 | 公开 Command API 不包含 `sourceInfo`、`ownerId` | API 审查 |
-| FR-004 | `name`、`handler` 必填；description/completer 可选 | 校验单测 |
+| FR-004 | Command `name`、`handler` 必填；description/completer 可选 | 校验单测 |
 | FR-005 | 名称必须符合 `^[a-z][a-z0-9-]*$` | 参数化测试 |
 | FR-006 | Built-in 名称对 Extension 保留 | 冲突测试 |
 | FR-007 | 同名命令不得静默覆盖 | 冲突测试 |
@@ -853,7 +863,7 @@ flowchart LR
 | FR-026 | Extension ID 长度为 1～64，且符合 `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` | 参数化测试 |
 | FR-027 | Extension ID 禁止宿主保留名称和前缀 | 参数化测试 |
 | FR-028 | Extension ID 全局唯一，冲突时注册失败，不静默替换 | Registry 测试 |
-| FR-029 | Extension name 满足展示名称约束，且不参与身份和冲突判断 | API/Registry 测试 |
+| FR-029 | Extension name 可选且默认等于 ID；不参与命令体验、身份和冲突判断 | API/Registry 测试 |
 
 ---
 
@@ -1021,7 +1031,7 @@ sequenceDiagram
 | AC-09 | 架构统一 | Built-in 与 Extension 使用同一 Registry/Dispatcher |
 | AC-10 | 无旁路 | `InteractiveMode` 不按具体命令名处理副作用 |
 | AC-11 | 测试 | 新增单元和集成测试全部通过 |
-| AC-12 | Extension 元数据 | ID/name 校验符合公开约束；重复 ID 不改变现有 Registry |
+| AC-12 | Extension 元数据 | ID 校验符合约束；name 未覆盖时等于 ID；重复 ID 不改变现有 Registry |
 
 ---
 
