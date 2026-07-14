@@ -87,8 +87,12 @@ S -> A : skill block plus args
 @enduml
 
 @startuml 04-current-java-flow
+' Java source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/InteractiveMode.java:1520-1542
+' Java source: frontend/src/chat/slashCommands.ts:33-76
+' Java source: frontend/src/App.vue:112-140
 ' Java current-state diagram; pi source is not applicable.
-' Design reason: expose the mutable registry and separate completion/expansion paths that must be aligned with pi.
+' Observed behavior: the legacy TUI maps Skills dynamically while the GUI uses a static slash-command list.
+' Design reason: expose both migration gaps without treating the legacy TUI as a target surface.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -99,23 +103,28 @@ title Current Java Skill Command Flow
 left to right direction
 rectangle SkillLoader as A
 rectangle "Mutable SkillRegistry" as B
-rectangle InteractiveMode as C
+rectangle "Legacy InteractiveMode" as C
 rectangle CommandSuggestion as D
 rectangle SkillExpander as E
 rectangle "AgentSession Prompt" as F
+rectangle "GUI Static Slash Registry" as G
+rectangle "GUI Slash Suggestions" as H
 
 A --> B
 B --> C
 C --> D
 B --> E
 E --> F
+G --> H
 @enduml
 
 @startuml 05-target-architecture
 ' pi source: packages/coding-agent/src/core/resource-loader.ts:333-410,603-624
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:555-570
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
-' Design reason: preserve pi behavior while using immutable Java results and one AgentSession expansion path.
+' Java source: frontend/src/App.vue:112-180
+' Java product constraint: GUI is the only target presentation surface.
+' Design reason: preserve pi behavior while using immutable Java results, GUI completion, and one AgentSession expansion path.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -127,8 +136,8 @@ rectangle "Package and Settings Resolver" as PM
 rectangle DefaultResourceLoader as RL
 rectangle SkillLoader as LS
 rectangle "Immutable SkillLoadResult" as LR
-rectangle InteractiveMode as IM
-rectangle CombinedAutocompleteProvider as AP
+rectangle GuiCommandCompletionAdapter as GUI
+rectangle CommandCompletionService as CS
 rectangle AgentSession as AS
 rectangle SkillCommandExpander as SE
 rectangle Agent as AG
@@ -136,8 +145,9 @@ rectangle Agent as AG
 PM --> RL
 RL --> LS
 LS --> LR
-LR --> IM
-IM --> AP
+LR --> CS
+GUI --> CS : query
+CS --> GUI : suggestions
 LR --> AS
 AS --> SE
 SE --> AG
@@ -146,6 +156,8 @@ SE --> AG
 @startuml 06-reload
 ' pi source: packages/coding-agent/src/core/agent-session.ts:2435-2456
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:5099-5125
+' Java source: frontend/src/App.vue:112-140
+' Java product divergence: reload refreshes GUI completion instead of a TUI provider.
 ' Design reason: publish a complete SkillLoadResult before rebuilding completion, never expose clear-then-register intermediate state.
 !theme plain
 !pragma layout smetana
@@ -159,9 +171,10 @@ actor User as U
 participant AgentSession as S
 participant ResourceLoader as R
 participant SkillLoader as L
-participant InteractiveMode as T
+participant "GUI Completion Adapter" as T
 
-U -> S : /reload
+U -> T : Invoke /reload
+T -> S : dispatch /reload
 S -> R : reload
 R -> L : load resolved skills
 L --> R : complete SkillLoadResult
@@ -204,6 +217,7 @@ endif
 @startuml 08-end-to-end-invocation
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
 ' Java platform mapping: SkillsManager owns skill-domain behavior; ResourceManager is the only database access boundary.
+' Java product constraint: the client and interaction UI are GUI components.
 ' Design reason: retain pi parsing, free-text args, envelope, and fail-open behavior across the Java platform components.
 !theme plain
 !pragma layout smetana
@@ -215,8 +229,8 @@ hide footbox
 autonumber
 title Skill Command End-to-End Invocation Sequence
 
-participant "Client" as Client
-participant "Agent Interaction\nUI" as UI
+participant "GUI Client" as Client
+participant "Agent Interaction\nGUI" as UI
 participant "Agent\nGW" as Gateway
 participant "Agent\nRuntime" as Runtime
 participant "Skills\nManager" as SkillsManager
@@ -310,7 +324,8 @@ deactivate Client
 @startuml 09-class-relationships
 ' pi source: packages/coding-agent/src/core/resource-loader.ts:603-624
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
-' Design reason: express the Java implementation boundary without installing Skill handlers in the static CommandRegistry.
+' Java source: frontend/src/App.vue:112-140
+' Design reason: express the Java GUI implementation boundary without installing Skill handlers in the static CommandRegistry.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -332,11 +347,11 @@ class SkillLoader {
 class SkillCommandExpander {
   + expand(text, skills): String
 }
-class CombinedAutocompleteProvider {
+class CommandCompletionService {
   + getSuggestions(prefix): List
 }
-class InteractiveMode {
-  + createAutocompleteProvider()
+class GuiCommandCompletionAdapter {
+  + getSuggestions(prefix): List
 }
 class AgentSession {
   - expandUserInput(text): String
@@ -346,6 +361,6 @@ ResourceLoader <|.. DefaultResourceLoader
 DefaultResourceLoader --> SkillLoader
 AgentSession --> ResourceLoader
 AgentSession --> SkillCommandExpander
-InteractiveMode --> ResourceLoader
-InteractiveMode --> CombinedAutocompleteProvider
+CommandCompletionService --> ResourceLoader
+GuiCommandCompletionAdapter --> CommandCompletionService
 @enduml

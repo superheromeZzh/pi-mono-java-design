@@ -20,7 +20,7 @@ rectangle "pi Execution\nInteractiveMode branches" as Execution
 rectangle "pi Runtime Rules\nworkflow control flow" as RuntimeRules
 rectangle "Java CommandDefinition" as Definition
 rectangle "Registry + Dispatcher\n+ ExecutionGate" as Core
-rectangle "TUI and App Adapters" as Clients
+rectangle "Java GUI Adapter" as Clients
 
 Metadata --> Definition
 Completion --> Definition
@@ -60,8 +60,11 @@ RuntimeRouting --> Agent
 
 @startuml 03-target-architecture
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:499-570,2541-2674
+' Java source: frontend/src/App.vue:112-180
+' Java source: frontend/src/chat/slashCommands.ts:13-122
 ' Java product constraint: all commands are implemented by trusted internal developers and installed once at startup.
-' Design reason: use one command core for core and feature commands without owner or dynamic extension lifecycle state.
+' Java product constraint: GUI is the only target presentation surface.
+' Design reason: use one command core behind GUI chat input, command palette, and buttons.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -97,14 +100,16 @@ package "Command Implementation" {
   Gate --> Handler
 }
 
-package "Clients" {
-  component "Interactive TUI" as TUI
-  component "App Client" as App
-  component HelpCommand as Help
-  Completion --> TUI
-  Completion --> App
-  TUI --> Parser
-  App --> Dispatcher
+package "GUI Presentation" {
+  component "GUI Adapter" as GUI
+  component "Chat Input" as ChatInput
+  component "Command Palette\nand Buttons" as Actions
+  component "Help View" as Help
+  Completion --> GUI
+  ChatInput --> GUI
+  Actions --> GUI
+  GUI --> Parser : text command
+  GUI --> Dispatcher : structured invocation
   Snapshot --> Help
 }
 
@@ -116,7 +121,7 @@ Installer --> Snapshot : publish once
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:499-533,2541-2674
 ' Observed behavior: pi Built-in behavior consists of metadata, optional completion, workflow execution, and implicit runtime rules.
 ' Design reason: represent the complete Java command contract with one definition and no Built-in or Extension subtype.
-' Java architecture change: shared and exclusive command concurrency is explicit because TUI and App share one dispatcher.
+' Java architecture change: shared and exclusive command concurrency is explicit because GUI entry points and async callbacks can overlap.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -256,45 +261,46 @@ end
 
 @startuml 06-input-routing
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:2541-2715
-' Observed behavior: Built-in commands run before Bash, Skill, Prompt Template, and ordinary prompt handling.
-' Design reason: preserve pi routing priority while replacing command-name branches with registry lookup.
+' pi source: packages/coding-agent/src/modes/rpc/rpc-types.ts:50-53
+' pi source: packages/coding-agent/src/modes/rpc/rpc-mode.ts:548-559
+' Java source: frontend/src/App.vue:112-180
+' Java source: frontend/src/types/ws.ts:96-108
+' Observed behavior: pi TUI parses Bash prefixes while pi RPC accepts a structured Bash request.
+' Java product divergence: the GUI-only target has no Shell capability and does not parse Bash prefixes.
+' Design reason: route GUI text through registered commands, Skills, templates, and ordinary prompts only.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Unified Input Routing
+title Java GUI Input Routing
 
 start
-:User input;
+:GUI text input;
 if (Registered command?) then (yes)
   :CommandDispatcher;
   :Return command result\nand finish input routing;
   stop
 else (no)
-  if (Starts with !?) then (yes)
-    :Bash input mode;
-    stop
+  if (Skill Command?) then (yes)
+    :Expand Skill;
   else (no)
-    if (Skill Command?) then (yes)
-      :Expand Skill;
+    if (Prompt Template?) then (yes)
+      :Expand Template;
     else (no)
-      if (Prompt Template?) then (yes)
-        :Expand Template;
-      else (no)
-        :Ordinary Prompt;
-      endif
+      :Ordinary Prompt;
     endif
-    :Agent;
-    stop
   endif
+  :Agent;
+  stop
 endif
 @enduml
 
 @startuml 07-dispatch-sequence
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:2541-2674
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1641-1645
-' Design reason: centralize parsing, runtime admission, cancellation, failures, and refresh semantics for TUI and App clients.
+' Java source: frontend/src/App.vue:142-180
+' Design reason: centralize parsing, runtime admission, cancellation, failures, and refresh semantics for the Java GUI.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -305,7 +311,7 @@ autonumber
 title Unified Command Dispatch Sequence
 
 actor User
-participant "Client Adapter" as Client
+participant "GUI Adapter" as Client
 participant CommandParser as Parser
 participant CommandDispatcher as Dispatcher
 participant "Catalog Snapshot" as Catalog
@@ -369,7 +375,8 @@ SHUTDOWN --> Terminal
 @startuml 09-completion-flow
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:499-570
 ' Observed behavior: pi maps Built-in metadata into completion DTOs and attaches model argument completion separately.
-' Design reason: Java binds optional argument completion to CommandDefinition and exposes one catalog to all clients.
+' Java source: frontend/src/App.vue:112-140
+' Design reason: Java binds optional argument completion to CommandDefinition and exposes one catalog to all GUI command views.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -383,33 +390,33 @@ rectangle "Command Name Filter" as NameFilter
 rectangle "Resolved Command" as Resolved
 rectangle CommandArgumentCompleter as Completer
 rectangle "Completion Version Check" as VersionCheck
-rectangle "TUI Suggestions" as TUI
-rectangle "App Command Palette" as App
+rectangle "GUI Slash Suggestions" as Suggestions
+rectangle "GUI Command Palette" as Palette
 
 Catalog --> NameFilter
-NameFilter --> TUI : command-name stage
-NameFilter --> App : command-name stage
+NameFilter --> Suggestions : command-name stage
+NameFilter --> Palette : command-name stage
 Catalog --> Resolved : argument stage
 Resolved --> Completer
 Completer --> VersionCheck
-VersionCheck --> TUI : latest request results
-VersionCheck --> App : latest request results
+VersionCheck --> Suggestions : latest request results
+VersionCheck --> Palette : latest request results
 @enduml
 
 @startuml 10-client-adaptation
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:2541-2674
-' Java architecture change: Command handlers must not construct concrete TUI or App components.
-' Design reason: clients share command behavior while adapting interaction, output, and refresh rendering.
+' Java source: frontend/src/App.vue:142-180
+' Java architecture change: Command handlers must not construct Vue, WebSocket, browser, or desktop-container components.
+' Design reason: keep command behavior independent from GUI rendering and runtime capabilities.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Client-Independent Command Execution
+title GUI Command Adaptation
 
 left to right direction
-component "TUI Adapter" as TUI
-component "App Adapter" as App
+component "GUI Adapter" as GUI
 component CommandDispatcher as Dispatcher
 component CommandHandler as Handler
 component CommandInteraction as Interaction
@@ -417,15 +424,13 @@ component CommandOutput as Output
 component CommandExecutionResult as Result
 component "Application Services" as Services
 
-TUI --> Dispatcher
-App --> Dispatcher
+GUI --> Dispatcher
 Dispatcher --> Handler
 Handler --> Interaction
 Handler --> Output
 Handler --> Services
 Handler --> Result
-Result --> TUI : apply refresh hints
-Result --> App : apply refresh hints
+Result --> GUI : apply refresh hints
 @enduml
 
 @startuml 11-new-command-development
@@ -446,7 +451,7 @@ rectangle "CommandDefinition" as Definition
 rectangle "CommandContributor Bean" as Contributor
 rectangle "Startup Validation" as Validation
 rectangle "Command Catalog" as Catalog
-rectangle "TUI and App" as Clients
+rectangle "Java GUI" as Clients
 
 Service --> Handler : constructor injection
 Handler --> Definition
@@ -473,7 +478,7 @@ rectangle "M2\nInstaller + Dispatcher + Gate" as M2
 rectangle "M3\nCatalog Completion + Help" as M3
 rectangle "M4\nInteraction + Output + Refresh" as M4
 rectangle "M5\nRuntime Transition Workflows" as M5
-rectangle "M6\nRemove Legacy Router and Types" as M6
+rectangle "M6\nRemove Frontend Registry and Switch" as M6
 
 M1 --> M2
 M2 --> M3
@@ -496,7 +501,7 @@ title Unified Command Test Strategy
 rectangle "Unit Tests\nDefinition, Parser, Gate, Dispatcher" as Unit
 rectangle "Catalog Contract Tests\nNames, Order, Policies, Conflicts" as Contract
 rectangle "Handler Tests\nFake Services and Ports" as Handler
-rectangle "Client Integration Tests\nTUI and App" as Integration
+rectangle "GUI Integration Tests\nInput, Palette, and Buttons" as Integration
 rectangle "Interactive Acceptance\nCompletion, Execution, Refresh" as Acceptance
 
 Unit --> Contract
