@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.4  
+> 版本：v2.5  
 > 规范基线：pi TypeScript 当前实现  
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
 > 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
@@ -24,7 +24,7 @@ Skill 是 Resource Loader 管理的资源。Skill Command 是已加载 Skill 在
 flowchart LR
     A[Resource Loader] --> B[Loaded Skill List]
     B --> C[Autocomplete Mapping]
-    C --> D[/skill:name]
+    C --> D["/skill:name"]
     B --> E[Skill Command Expansion]
     E --> F[Expanded User Message]
 ```
@@ -768,9 +768,9 @@ flowchart TD
 
 ### 10.2 端到端调用时序
 
-[![Skill Command 端到端调用时序](./assets/skill-command-invocation.svg)](./assets/skill-command-invocation.svg)
+[![Skill Command 端到端调用时序](./assets/skill-command-invocation.png)](./assets/skill-command-invocation.png)
 
-预览使用 PlantUML 生成的 SVG，保持 GitHub 页面缩放后的文字清晰度；[PNG 兼容版本](./assets/skill-command-invocation.png)同步保留。PlantUML 源码保留如下，修改时应重新生成两个预览文件。
+GitHub 不原生执行 PlantUML，主预览使用 PlantUML 生成的 PNG；[SVG 高清版本](./assets/skill-command-invocation.svg)同步保留。PlantUML 源码用于安装了 PlantUML 插件的编辑器，修改时应重新生成两个预览文件。
 
 <details>
 <summary>PlantUML 源码</summary>
@@ -1479,3 +1479,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.2 | 2026-07-14 | 新增包含客户、Agent交互UI、Agent GW、Agent Runtime、模型、Skills、Tools、资源和数据库管理组件的 Skill 调用 PlantUML 时序图 |
 | v2.3 | 2026-07-14 | 保留 PlantUML 源码并嵌入生成的 PNG 预览，兼容不支持 PlantUML fenced block 的 Markdown 侧边栏 |
 | v2.4 | 2026-07-14 | 调整 PlantUML 参与者顺序和消息长度，降低 GitHub 页面压缩；使用 SVG 作为主预览并保留 PNG 兼容版本 |
+| v2.5 | 2026-07-14 | 修复 `/skill:name` 节点的 Mermaid 语法；GitHub 主预览切回 PNG，SVG 仅作为高清链接 |
