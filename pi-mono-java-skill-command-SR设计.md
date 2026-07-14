@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.6  
+> 版本：v2.7  
 > 规范基线：pi TypeScript 当前实现  
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
 > 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
@@ -18,7 +18,7 @@
 
 Java Skill Command 必须复现 pi 当前实现的行为，而不是重新发明一套 Skill 命令框架。
 
-Skill 是 Resource Loader 管理的资源。Skill Command 是已加载 Skill 在补全层的动态投影，以及用户提交后在 AgentSession 中执行的文本展开规则。
+在 pi 内核中，Skill 是 Resource Loader 管理的资源。Skill Command 是已加载 Skill 在补全层的动态投影，以及用户提交后在 AgentSession 中执行的文本展开规则。Java 平台层不照搬这一组件边界：Skills管理器负责 Skill 查看、启用、停用和执行，资源管理器负责统一访问数据库；两层必须保持相同的命令解析和展开行为。
 
 ```mermaid
 flowchart LR
@@ -59,7 +59,7 @@ flowchart LR
 
 以下能力不是 pi 当前 Skill Command 的组成部分，不进入本期核心设计：
 
-- Skill Service 和数据库资源。
+- 独立 Skill Service 协议，以及对通用资源数据库 Schema 的重新设计。
 - `SkillContentRef`、资源 URI、ETag 或正文版本协议。
 - `SkillCatalogSnapshot`、generation 和跨请求版本绑定。
 - 未知 Skill 的 fail-closed 协议。
@@ -68,7 +68,7 @@ flowchart LR
 - Skill 专属 Sandbox 策略。
 - Skill Command 专属指标和复杂可观测性平台。
 
-这些能力如有产品需求，应单独立项，不得以“对齐 pi”的名义进入本期。
+本期允许复用 Java 平台既有的 Skills管理器、资源管理器和数据库，但不在本 SR 中重新设计通用资源存储协议。其他能力如有产品需求，应单独立项，不得以“对齐 pi”的名义进入本期。
 
 ### 1.4 阅读和决策框架
 
@@ -788,10 +788,10 @@ autonumber
 participant "客户" as Client
 participant "Agent交互\nUI" as UI
 participant "Agent\nGW" as Gateway
-participant "数据库" as Database
 participant "Agent\nRuntime" as Runtime
-participant "资源\n管理器" as ResourceManager
 participant "Skills\n管理器" as SkillsManager
+participant "资源\n管理器" as ResourceManager
+participant "数据库" as Database
 participant "模型\n管理器" as ModelManager
 participant "Tools\n管理器" as ToolsManager
 
@@ -800,40 +800,35 @@ Client -> UI: 提交 /skill:review-pr 123
 activate UI
 UI -> Gateway: 提交 Prompt
 activate Gateway
-Gateway -> Database: 读取 Agent 配置/会话
+Gateway -> ResourceManager: 读取 Agent 配置/会话资源
+activate ResourceManager
+ResourceManager -> Database: 查询资源数据
 activate Database
-Database --> Gateway: 配置/上下文
+Database --> ResourceManager: Agent 配置/会话
 deactivate Database
+ResourceManager --> Gateway: 配置/上下文
+deactivate ResourceManager
 Gateway -> Runtime: prompt(context, text)
 activate Runtime
 
-Runtime -> ResourceManager: 获取 SkillLoadResult
-activate ResourceManager
-ResourceManager --> Runtime: skills + diagnostics
-deactivate ResourceManager
-Runtime -> SkillsManager: expand(text, skills)
+Runtime -> SkillsManager: execute(text)
 activate SkillsManager
-SkillsManager -> SkillsManager: 解析名称和参数\n按名称查找 Skill
+SkillsManager -> SkillsManager: 解析名称和参数\n构造资源查询条件
+SkillsManager -> ResourceManager: 读取 Skill 资源
+activate ResourceManager
+ResourceManager -> Database: 按名称查询 Skill
+activate Database
+Database --> ResourceManager: Skill 数据 / not found
+deactivate Database
+ResourceManager --> SkillsManager: SkillResource / not found / error
+deactivate ResourceManager
+SkillsManager -> SkillsManager: 校验 Skill 启停状态
 
-alt Skill 不存在
+alt Skill 不存在、已停用或读取失败
     SkillsManager --> Runtime: 返回原始 text（fail-open）
-else Skill 存在
-    SkillsManager -> ResourceManager: 读取 SKILL.md
-    activate ResourceManager
-    alt 正文读取成功
-        ResourceManager --> SkillsManager: SKILL.md 内容
-    else 正文读取失败
-        ResourceManager --> SkillsManager: read error
-    end
-    deactivate ResourceManager
-
-    alt 正文读取成功
-        SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
-        SkillsManager --> Runtime: expandedText
-    else 正文读取失败
-        SkillsManager -> SkillsManager: 记录诊断
-        SkillsManager --> Runtime: 返回原始 text（fail-open）
-    end
+else Skill 已启用
+    SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
+    SkillsManager --> Runtime: expandedText
 end
 deactivate SkillsManager
 
@@ -867,10 +862,14 @@ end
 
 Runtime --> Gateway: Agent response
 deactivate Runtime
-Gateway -> Database: 持久化消息
+Gateway -> ResourceManager: 持久化消息资源
+activate ResourceManager
+ResourceManager -> Database: 保存消息
 activate Database
-Database --> Gateway: persisted
+Database --> ResourceManager: persisted
 deactivate Database
+ResourceManager --> Gateway: persisted
+deactivate ResourceManager
 Gateway --> UI: Agent response
 deactivate Gateway
 UI --> Client: 展示响应
@@ -886,15 +885,17 @@ deactivate Client
 | 组件 | 在 Skill 调用中的职责 |
 |---|---|
 | 客户、Agent交互UI | 输入 `/skill:<name> [args]` 并展示最终响应 |
-| Agent GW | 加载 Agent/会话上下文，把请求路由到 Agent Runtime，并持久化消息 |
-| Agent Runtime | 编排 Skill 展开、模型和 Tool，不实现 Skill 发现或解析规则 |
-| Skills管理器 | 解析 Skill Command、按名称匹配、格式化 `<skill>` block，并保持 fail-open |
-| 资源管理器 | 提供当前 `SkillLoadResult`，按 `filePath` 读取 Skill 正文 |
+| Agent GW | 通过资源管理器加载 Agent/会话上下文，把请求路由到 Agent Runtime，并通过资源管理器持久化消息 |
+| Agent Runtime | 编排 Skill 执行、模型和 Tool；只调用 Skills管理器，不直接查询 Skill 资源或数据库 |
+| Skills管理器 | 负责 Skill 查看、启用、停用和执行；执行时解析 Skill Command、判断启停状态、格式化 `<skill>` block，并保持 fail-open |
+| 资源管理器 | 提供通用资源查询、读取、状态更新和持久化能力，是 Skills管理器、Agent GW 与数据库之间的唯一数据访问边界 |
 | 模型管理器 | 解析模型并执行模型调用 |
 | Tools管理器 | 提供 Tool 定义，只在模型返回 Tool Call 后执行 Tool |
-| 数据库 | 保存 Agent/会话配置和消息；PI-PARITY 下不保存 Skill 正文 |
+| 数据库 | 保存 Agent、会话、消息和 Skill 资源数据，包括 Skill 启停状态；只由资源管理器访问 |
 
-关键取舍：Skill 调用不会直接触发数据库查询 Skill，也不会直接调用 Tool。Skill 先展开为用户消息；模型收到展开后的消息和 Tool 定义后，才可能产生 Tool Call。
+平台映射说明：第 2 章记录的是 pi 本地文件实现事实；本图采用 Java 平台组件边界。Skills管理器承接 Skill 领域能力，资源管理器承接数据库访问，两者不改变 `/skill:` 解析、自由文本参数、展开格式和 fail-open 等 pi 行为。
+
+关键取舍：所有数据库访问统一经过资源管理器；Skills管理器不直接访问数据库，Agent Runtime 不直接读取 Skill。这里的“执行 Skill”是读取 Skill 资源并展开为模型输入，不是执行程序代码或 Tool。模型收到展开后的消息和 Tool 定义后，才可能产生 Tool Call。
 
 ### 10.3 SkillCommandExpander
 
@@ -1511,3 +1512,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.4 | 2026-07-14 | 调整 PlantUML 参与者顺序和消息长度，降低 GitHub 页面压缩；使用 SVG 作为主预览并保留 PNG 兼容版本 |
 | v2.5 | 2026-07-14 | 修复 `/skill:name` 节点的 Mermaid 语法；GitHub 主预览切回 PNG，SVG 仅作为高清链接 |
 | v2.6 | 2026-07-14 | 统一 PlantUML 元素为 `participant`，为每个同步调用补齐成对的 `activate/deactivate` |
+| v2.7 | 2026-07-14 | 调整平台职责：Skills管理器负责查看、启停和执行 Skill，资源管理器统一负责数据库访问 |
