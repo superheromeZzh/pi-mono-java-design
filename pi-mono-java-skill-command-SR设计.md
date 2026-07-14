@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.5  
+> 版本：v2.6  
 > 规范基线：pi TypeScript 当前实现  
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
 > 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
@@ -768,6 +768,8 @@ flowchart TD
 
 ### 10.2 端到端调用时序
 
+PlantUML 约束：所有交互元素统一声明为 `participant`；同步调用在接收方开始执行时 `activate`，返回后 `deactivate`；分支、并行和循环按各自执行路径保持激活区间成对闭合。
+
 [![Skill Command 端到端调用时序](./assets/skill-command-invocation.png)](./assets/skill-command-invocation.png)
 
 GitHub 不原生执行 PlantUML，主预览使用 PlantUML 生成的 PNG；[SVG 高清版本](./assets/skill-command-invocation.svg)同步保留。PlantUML 源码用于安装了 PlantUML 插件的编辑器，修改时应重新生成两个预览文件。
@@ -783,25 +785,32 @@ skinparam BoxPadding 4
 hide footbox
 autonumber
 
-actor "客户" as Client
-boundary "Agent交互\nUI" as UI
-control "Agent\nGW" as Gateway
-database "数据库" as Database
-control "Agent\nRuntime" as Runtime
-control "资源\n管理器" as ResourceManager
-control "Skills\n管理器" as SkillsManager
-control "模型\n管理器" as ModelManager
-control "Tools\n管理器" as ToolsManager
+participant "客户" as Client
+participant "Agent交互\nUI" as UI
+participant "Agent\nGW" as Gateway
+participant "数据库" as Database
+participant "Agent\nRuntime" as Runtime
+participant "资源\n管理器" as ResourceManager
+participant "Skills\n管理器" as SkillsManager
+participant "模型\n管理器" as ModelManager
+participant "Tools\n管理器" as ToolsManager
 
+activate Client
 Client -> UI: 提交 /skill:review-pr 123
+activate UI
 UI -> Gateway: 提交 Prompt
+activate Gateway
 Gateway -> Database: 读取 Agent 配置/会话
+activate Database
 Database --> Gateway: 配置/上下文
+deactivate Database
 Gateway -> Runtime: prompt(context, text)
 activate Runtime
 
 Runtime -> ResourceManager: 获取 SkillLoadResult
+activate ResourceManager
 ResourceManager --> Runtime: skills + diagnostics
+deactivate ResourceManager
 Runtime -> SkillsManager: expand(text, skills)
 activate SkillsManager
 SkillsManager -> SkillsManager: 解析名称和参数\n按名称查找 Skill
@@ -810,12 +819,18 @@ alt Skill 不存在
     SkillsManager --> Runtime: 返回原始 text（fail-open）
 else Skill 存在
     SkillsManager -> ResourceManager: 读取 SKILL.md
+    activate ResourceManager
     alt 正文读取成功
         ResourceManager --> SkillsManager: SKILL.md 内容
+    else 正文读取失败
+        ResourceManager --> SkillsManager: read error
+    end
+    deactivate ResourceManager
+
+    alt 正文读取成功
         SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
         SkillsManager --> Runtime: expandedText
     else 正文读取失败
-        ResourceManager --> SkillsManager: read error
         SkillsManager -> SkillsManager: 记录诊断
         SkillsManager --> Runtime: 返回原始 text（fail-open）
     end
@@ -824,28 +839,43 @@ deactivate SkillsManager
 
 par 准备模型
     Runtime -> ModelManager: resolve(modelId)
+    activate ModelManager
     ModelManager --> Runtime: Model
+    deactivate ModelManager
 else 准备 Tools
     Runtime -> ToolsManager: 获取 Tool 定义
+    activate ToolsManager
     ToolsManager --> Runtime: definitions
+    deactivate ToolsManager
 end
 
 Runtime -> ModelManager: invoke(expandedText, tools)
+activate ModelManager
 ModelManager --> Runtime: response / tool calls
+deactivate ModelManager
 
 loop 模型返回 Tool Call
     Runtime -> ToolsManager: execute(toolCall)
+    activate ToolsManager
     ToolsManager --> Runtime: Tool result
+    deactivate ToolsManager
     Runtime -> ModelManager: continue(Model, Tool result)
+    activate ModelManager
     ModelManager --> Runtime: Model response / Tool calls
+    deactivate ModelManager
 end
 
 Runtime --> Gateway: Agent response
 deactivate Runtime
 Gateway -> Database: 持久化消息
+activate Database
 Database --> Gateway: persisted
+deactivate Database
 Gateway --> UI: Agent response
+deactivate Gateway
 UI --> Client: 展示响应
+deactivate UI
+deactivate Client
 @enduml
 ```
 
@@ -1480,3 +1510,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.3 | 2026-07-14 | 保留 PlantUML 源码并嵌入生成的 PNG 预览，兼容不支持 PlantUML fenced block 的 Markdown 侧边栏 |
 | v2.4 | 2026-07-14 | 调整 PlantUML 参与者顺序和消息长度，降低 GitHub 页面压缩；使用 SVG 作为主预览并保留 PNG 兼容版本 |
 | v2.5 | 2026-07-14 | 修复 `/skill:name` 节点的 Mermaid 语法；GitHub 主预览切回 PNG，SVG 仅作为高清链接 |
+| v2.6 | 2026-07-14 | 统一 PlantUML 元素为 `participant`，为每个同步调用补齐成对的 `activate/deactivate` |
