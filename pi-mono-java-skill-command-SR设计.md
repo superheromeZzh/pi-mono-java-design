@@ -5,11 +5,11 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.15<br>
+> 版本：v2.16<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
-> 关联设计：[`pi-mono-java Command SR 设计 v1.5`](./pi-mono-java-command-SR设计.md)
+> 关联设计：[`pi-mono-java Command SR 设计 v1.6`](./pi-mono-java-command-SR设计.md)
 
 ---
 
@@ -1340,3 +1340,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.13 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.3 |
 | v2.14 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.4 |
 | v2.15 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.5 |
+| v2.16 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.6 |

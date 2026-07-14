@@ -116,6 +116,7 @@ Installer --> Snapshot : publish once
 ' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:499-533,2541-2674
 ' Observed behavior: pi Built-in behavior consists of metadata, optional completion, workflow execution, and implicit runtime rules.
 ' Design reason: represent the complete Java command contract with one definition and no Built-in or Extension subtype.
+' Java architecture change: shared and exclusive command concurrency is explicit because TUI and App share one dispatcher.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -163,6 +164,16 @@ enum CommandConcurrency {
   SHARED
   EXCLUSIVE
 }
+
+note right of CommandConcurrency
+  SHARED
+  Can overlap with SHARED
+  Conflicts with EXCLUSIVE
+
+  EXCLUSIVE
+  Conflicts with SHARED and EXCLUSIVE
+  Only one holder
+end note
 
 class CommandInvocation <<record>> {
   + String rawInput
