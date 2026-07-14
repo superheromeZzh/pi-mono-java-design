@@ -5,11 +5,11 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.10<br>
+> 版本：v2.15<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
-> 关联设计：[`pi-mono-java Command SR 设计 v1.0`](./pi-mono-java-command-SR设计.md)
+> 关联设计：[`pi-mono-java Command SR 设计 v1.5`](./pi-mono-java-command-SR设计.md)
 
 ---
 
@@ -1335,3 +1335,8 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.8 | 2026-07-14 | 将全部 Mermaid 和原内嵌 PlantUML 统一迁移到单一 `diagram.puml`，提交 SVG，并为每张图增加源码定位链接 |
 | v2.9 | 2026-07-14 | 规定 PlantUML 图源只使用英文，并将全部图表标题、元素、关系、控制标签、注释和源码注释整改为英文 |
 | v2.10 | 2026-07-14 | 对齐统一 Java Command SR：Built-in 与 Extension 统一为静态注册 Command，Skill 保持动态 Prompt 投影 |
+| v2.11 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.1 |
+| v2.12 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.2 |
+| v2.13 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.3 |
+| v2.14 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.4 |
+| v2.15 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.5 |

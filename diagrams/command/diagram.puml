@@ -147,7 +147,7 @@ interface CommandArgumentCompleter {
 class CommandExecutionPolicy <<record>> {
   + CommandExecutionMode mode
   + CommandConcurrency concurrency
-  + boolean cancellable
+  + boolean userCancellable
   + Optional<Duration> timeout
 }
 
@@ -237,8 +237,8 @@ alt all definitions valid
 else invalid definition or conflict
   Installer --> Spring : fail startup with bean class diagnostics
   note over Registry
-    No snapshot is published
-    No rollback is required
+    Registry remains empty
+    Startup reports the validation error
   end note
 end
 @enduml
@@ -258,7 +258,7 @@ start
 :User input;
 if (Registered command?) then (yes)
   :CommandDispatcher;
-  :Stop; do not send to LLM;
+  :Return command result\nand finish input routing;
   stop
 else (no)
   if (Starts with !?) then (yes)
@@ -314,8 +314,8 @@ alt execution admitted
   Dispatcher --> Client : HANDLED + refreshHints
   Client -> Client : apply refresh hints
 else runtime state rejects execution
-  Gate --> Dispatcher : stable error code
-  Dispatcher --> Client : FAILED + safe message
+  Gate --> Dispatcher : policy error code
+  Dispatcher --> Client : FAILED + sanitized message
 else handler fails
   Handler --> Dispatcher : exceptional completion
   Dispatcher --> Client : FAILED + correlationId
@@ -342,11 +342,11 @@ rectangle ABORT_AGENT_AND_RUN
 rectangle RUNTIME_TRANSITION
 rectangle SHUTDOWN
 
-rectangle "Direct Workflow\nsettings, model, session" as Direct
-rectangle "Reject When Busy\nreload" as Idle
+rectangle "Run While Agent Active\nsession, hotkeys, copy" as Direct
+rectangle "Idle Required\nreload" as Idle
 rectangle "Abort Then Execute\ncompact" as Abort
 rectangle "Replace Runtime\nnew, import, resume, fork, clone" as Transition
-rectangle "Terminal Lifecycle\nquit" as Terminal
+rectangle "Close Application\nquit" as Terminal
 
 IMMEDIATE --> Direct
 REQUIRE_IDLE --> Idle
@@ -381,8 +381,8 @@ NameFilter --> App : command-name stage
 Catalog --> Resolved : argument stage
 Resolved --> Completer
 Completer --> VersionCheck
-VersionCheck --> TUI : current results only
-VersionCheck --> App : current results only
+VersionCheck --> TUI : latest request results
+VersionCheck --> App : latest request results
 @enduml
 
 @startuml 10-client-adaptation
@@ -413,8 +413,8 @@ Handler --> Interaction
 Handler --> Output
 Handler --> Services
 Handler --> Result
-Result --> TUI : generic refresh
-Result --> App : generic refresh
+Result --> TUI : apply refresh hints
+Result --> App : apply refresh hints
 @enduml
 
 @startuml 11-new-command-development
