@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.3  
+> 版本：v2.4  
 > 规范基线：pi TypeScript 当前实现  
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
 > 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
@@ -768,9 +768,9 @@ flowchart TD
 
 ### 10.2 端到端调用时序
 
-[![Skill Command 端到端调用时序](./assets/skill-command-invocation.png)](./assets/skill-command-invocation.png)
+[![Skill Command 端到端调用时序](./assets/skill-command-invocation.svg)](./assets/skill-command-invocation.svg)
 
-预览使用 PlantUML 生成的 PNG。PlantUML 源码保留如下，修改时应重新生成预览图。
+预览使用 PlantUML 生成的 SVG，保持 GitHub 页面缩放后的文字清晰度；[PNG 兼容版本](./assets/skill-command-invocation.png)同步保留。PlantUML 源码保留如下，修改时应重新生成两个预览文件。
 
 <details>
 <summary>PlantUML 源码</summary>
@@ -779,36 +779,37 @@ flowchart TD
 @startuml
 title Skill Command 端到端调用时序
 skinparam backgroundColor #FFFFFF
+skinparam BoxPadding 4
 hide footbox
 autonumber
 
 actor "客户" as Client
-boundary "Agent交互 UI" as UI
-control "Agent GW" as Gateway
-control "Agent Runtime" as Runtime
-control "模型管理器" as ModelManager
-control "Skills管理器" as SkillsManager
-control "Tools管理器" as ToolsManager
-control "资源管理器" as ResourceManager
+boundary "Agent交互\nUI" as UI
+control "Agent\nGW" as Gateway
 database "数据库" as Database
+control "Agent\nRuntime" as Runtime
+control "资源\n管理器" as ResourceManager
+control "Skills\n管理器" as SkillsManager
+control "模型\n管理器" as ModelManager
+control "Tools\n管理器" as ToolsManager
 
 Client -> UI: 提交 /skill:review-pr 123
-UI -> Gateway: submitPrompt(agentId, sessionId, text)
-Gateway -> Database: 读取 Agent 配置和会话上下文
-Database --> Gateway: AgentConfig + SessionContext
-Gateway -> Runtime: prompt(config, context, text)
+UI -> Gateway: 提交 Prompt
+Gateway -> Database: 读取 Agent 配置/会话
+Database --> Gateway: 配置/上下文
+Gateway -> Runtime: prompt(context, text)
 activate Runtime
 
-Runtime -> ResourceManager: getSkills()
-ResourceManager --> Runtime: SkillLoadResult(skills, diagnostics)
+Runtime -> ResourceManager: 获取 SkillLoadResult
+ResourceManager --> Runtime: skills + diagnostics
 Runtime -> SkillsManager: expand(text, skills)
 activate SkillsManager
-SkillsManager -> SkillsManager: 解析 skillName 和 args\n按名称查找 Skill
+SkillsManager -> SkillsManager: 解析名称和参数\n按名称查找 Skill
 
 alt Skill 不存在
     SkillsManager --> Runtime: 返回原始 text（fail-open）
 else Skill 存在
-    SkillsManager -> ResourceManager: readSkillContent(skill.filePath)
+    SkillsManager -> ResourceManager: 读取 SKILL.md
     alt 正文读取成功
         ResourceManager --> SkillsManager: SKILL.md 内容
         SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
@@ -822,15 +823,15 @@ end
 deactivate SkillsManager
 
 par 准备模型
-    Runtime -> ModelManager: resolve(config.model)
+    Runtime -> ModelManager: resolve(modelId)
     ModelManager --> Runtime: Model
 else 准备 Tools
-    Runtime -> ToolsManager: getToolDefinitions(config, context)
-    ToolsManager --> Runtime: Tool definitions
+    Runtime -> ToolsManager: 获取 Tool 定义
+    ToolsManager --> Runtime: definitions
 end
 
-Runtime -> ModelManager: invoke(Model, expandedText, Tool definitions)
-ModelManager --> Runtime: Model response / Tool calls
+Runtime -> ModelManager: invoke(expandedText, tools)
+ModelManager --> Runtime: response / tool calls
 
 loop 模型返回 Tool Call
     Runtime -> ToolsManager: execute(toolCall)
@@ -841,20 +842,10 @@ end
 
 Runtime --> Gateway: Agent response
 deactivate Runtime
-Gateway -> Database: 持久化用户消息和 Agent 响应
+Gateway -> Database: 持久化消息
 Database --> Gateway: persisted
 Gateway --> UI: Agent response
 UI --> Client: 展示响应
-
-note right of ResourceManager
-PI-PARITY：Skill 元数据和正文
-来自已解析的文件资源，不从数据库读取。
-end note
-
-note right of Database
-数据库只用于 Agent/会话配置
-和消息持久化，不是 Skill 正文存储。
-end note
 @enduml
 ```
 
@@ -1487,3 +1478,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.1 | 2026-07-14 | 明确区分 pi 事实、Java 现状和 Java 选择；新增核心取舍矩阵、参数补全专项取舍和代码到验收的追踪关系 |
 | v2.2 | 2026-07-14 | 新增包含客户、Agent交互UI、Agent GW、Agent Runtime、模型、Skills、Tools、资源和数据库管理组件的 Skill 调用 PlantUML 时序图 |
 | v2.3 | 2026-07-14 | 保留 PlantUML 源码并嵌入生成的 PNG 预览，兼容不支持 PlantUML fenced block 的 Markdown 侧边栏 |
+| v2.4 | 2026-07-14 | 调整 PlantUML 参与者顺序和消息长度，降低 GitHub 页面压缩；使用 SVG 作为主预览并保留 PNG 兼容版本 |
