@@ -1,0 +1,675 @@
+' Generated with PlantUML 1.2026.6
+' Run from this directory: plantuml -tsvg diagram.puml
+
+@startuml 01-extension-command-overview
+' pi source: packages/coding-agent/src/core/extensions/types.ts:1097-1107,1179
+' pi source: packages/coding-agent/src/core/agent-session.ts:1138-1165
+' Design reason: organize the public API, runtime governance, user discovery, and unified dispatch goals.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 设计目标
+
+rectangle "Extension Command" as Root
+package "开发者体验" {
+  rectangle registerCommand
+  rectangle 参数补全
+  rectangle "异步 Handler" as AsyncHandler
+  rectangle "不提供 sourceInfo" as NoSourceInfo
+}
+package "运行时治理" {
+  rectangle 所有权
+  rectangle 冲突检测
+  rectangle 原子注册
+  rectangle 卸载清理
+}
+package "用户体验" {
+  rectangle 统一帮助
+  rectangle 名称补全
+  rectangle 参数补全体验
+  rectangle 错误隔离
+}
+package "架构一致性" {
+  rectangle 内置与扩展统一
+  rectangle "单一 Dispatcher" as SingleDispatcher
+  rectangle 后续支持RPC
+}
+
+Root --> registerCommand
+Root --> 参数补全
+Root --> AsyncHandler
+Root --> NoSourceInfo
+Root --> 所有权
+Root --> 冲突检测
+Root --> 原子注册
+Root --> 卸载清理
+Root --> 统一帮助
+Root --> 名称补全
+Root --> 参数补全体验
+Root --> 错误隔离
+Root --> 内置与扩展统一
+Root --> SingleDispatcher
+Root --> 后续支持RPC
+@enduml
+
+@startuml 02-current-call-relationship
+' Java current-state diagram; pi source is not applicable.
+' Design reason: expose the disconnected extension aggregation path and the existing slash-command consumers.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Java 当前 Extension Command 调用关系
+
+left to right direction
+rectangle "Extension.commands()" as extension
+rectangle "ExtensionRegistry.getAllCommands()" as extensionRegistry
+rectangle SlashCommandRegistry as slashRegistry
+rectangle BuiltinCommandRegistrar as builtin
+rectangle "/help" as help
+rectangle "EditorContainer 补全" as autocomplete
+rectangle "InteractiveMode 执行" as interactive
+
+extension --> extensionRegistry
+extensionRegistry ..> slashRegistry : 未接入
+builtin --> slashRegistry
+slashRegistry --> help
+slashRegistry --> autocomplete
+slashRegistry --> interactive
+@enduml
+
+@startuml 03-target-architecture
+' pi source: packages/coding-agent/src/core/extensions/loader.ts:201-209
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:556-602
+' pi source: packages/coding-agent/src/core/agent-session.ts:1138-1165
+' Design reason: preserve pi registration/invocation semantics while adding atomic registry publication and shared consumers.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 目标组件架构
+
+top to bottom direction
+package "Extension 加载域" as Load {
+  component "Extension Loader" as loader
+  component Extension as extension
+  component "Scoped ExtensionApi\n绑定 extensionId" as scopedApi
+}
+package "Command 核心域" as CommandCore {
+  component "Registration Staging" as staging
+  component "SlashCommandRegistry\n不可变快照" as registry
+  component SlashCommandParser as parser
+  component SlashCommandDispatcher as dispatcher
+  component CommandCompletionService as completer
+}
+package "消费端" as Consumers {
+  component "Interactive TUI" as tui
+  component "/help" as help
+  component "Future RPC get_commands" as rpc
+}
+
+loader --> extension
+extension --> scopedApi : initialize(api)
+scopedApi --> staging : registerCommand
+staging --> registry : 原子提交
+tui --> parser
+parser --> dispatcher
+registry --> dispatcher
+dispatcher --> extension : handle(args, ctx)
+registry --> completer
+completer --> tui
+registry --> help
+registry ..> rpc
+@enduml
+
+@startuml 04-public-api-class
+' pi source: packages/coding-agent/src/core/extensions/types.ts:339-378,1097-1107,1179
+' Design reason: expose only stable developer inputs and keep source ownership inside the host.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+skinparam classAttributeIconSize 0
+title Extension Command 公开 API
+
+interface Extension {
+  + id(): String
+  + initialize(api: ExtensionApi): void
+  + onLoad(): void
+  + onUnload(): void
+}
+interface ExtensionApi {
+  + registerCommand(name: String, options: SlashCommandOptions): void
+}
+class SlashCommandOptions <<record>> {
+  + description: String
+  + argumentCompleter: SlashCommandArgumentCompleter
+  + handler: SlashCommandHandler
+}
+interface SlashCommandHandler <<functional interface>> {
+  + handle(arguments: String, context: SlashCommandContext): CompletionStage<Void>
+}
+interface SlashCommandArgumentCompleter <<functional interface>> {
+  + complete(prefix: String, context: SlashCommandContext): CompletionStage<List>
+}
+class SlashCommandCompletion <<record>> {
+  + value: String
+  + label: String
+  + description: String
+}
+class SlashCommandContext <<record>> {
+  + session: AgentSession
+  + output: OutputWriter
+}
+
+Extension ..> ExtensionApi : uses
+ExtensionApi ..> SlashCommandOptions : uses
+SlashCommandOptions o-- SlashCommandHandler : contains
+SlashCommandOptions o-- SlashCommandArgumentCompleter : contains
+SlashCommandArgumentCompleter ..> SlashCommandCompletion : returns
+SlashCommandHandler ..> SlashCommandContext : receives
+SlashCommandArgumentCompleter ..> SlashCommandContext : receives
+@enduml
+
+@startuml 05-internal-data-model
+' pi source: packages/coding-agent/src/core/extensions/types.ts:1097-1107
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:556-602
+' Design reason: separate public options from host-bound ownership and immutable registry snapshots.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+skinparam classAttributeIconSize 0
+title Extension Command 内部数据模型
+
+class SlashCommandOptions <<public>> {
+  description
+  argumentCompleter
+  handler
+}
+class RegisteredSlashCommand <<internal>> {
+  ownerId: String
+  name: String
+  description: String
+  argumentCompleter
+  handler
+}
+class CommandRegistrySnapshot <<internal>> {
+  version: long
+  commandsByName: Map
+  commandNamesByOwner: Map
+}
+class SlashCommandRegistry <<internal service>> {
+  + find(name)
+  + getAll()
+  + replaceOwnerCommands(ownerId, commands)
+  + removeOwner(ownerId)
+}
+
+SlashCommandOptions ..> RegisteredSlashCommand : framework wraps
+RegisteredSlashCommand --> CommandRegistrySnapshot
+SlashCommandRegistry --> CommandRegistrySnapshot : publishes
+@enduml
+
+@startuml 06-initial-registration
+' pi source: packages/coding-agent/src/core/extensions/loader.ts:201-209,368-432
+' Java divergence: staging and all-or-nothing publication are architecture hardening, not current pi behavior.
+' Design reason: prevent partial command sets and silent overwrite during extension initialization.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+autonumber
+title Extension Command 首次注册
+
+participant ExtensionLoader as L
+participant Extension as E
+participant ScopedExtensionApi as A
+participant RegistrationStaging as S
+participant SlashCommandRegistry as R
+
+L -> A : create(extensionId)
+L -> E : initialize(A)
+E -> A : registerCommand("deploy", options)
+A -> S : stage(ownerId, name, options)
+S -> S : validate name/options/duplicates
+alt validation success
+  S -> R : replaceOwnerCommands(ownerId, staged)
+  R -> R : publish snapshot version + 1
+  L -> E : onLoad()
+else validation failure
+  S --> L : registration error
+  note over R
+    existing snapshot unchanged
+  end note
+end
+@enduml
+
+@startuml 07-reload
+' pi source: packages/coding-agent/src/core/resource-loader.ts:333-559
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:511-527,720-724
+' Java divergence: candidate validation and rollback preserve the old active extension atomically.
+' Design reason: avoid exposing a half-reloaded command catalog.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+autonumber
+title Extension Command Reload
+
+participant ExtensionRegistry as ER
+participant "Old Extension" as Old
+participant "New Extension" as New
+participant Staging as Stage
+participant "Command Registry" as CR
+
+ER -> New : initialize(scopedApi)
+New -> Stage : register commands
+Stage -> Stage : validate against snapshot
+alt new extension valid
+  ER -> Old : onUnload()
+  ER -> CR : atomic replace owner commands
+  ER -> New : onLoad()
+else invalid or conflict
+  Stage --> ER : reject
+  note over Old, CR
+    old extension and commands remain active
+  end note
+end
+@enduml
+
+@startuml 08-lifecycle-state
+' pi source: packages/coding-agent/src/core/extensions/loader.ts:331-432
+' pi source: packages/coding-agent/src/core/resource-loader.ts:333-559
+' Design reason: make staging, activation, reload, unload, and rejection transitions explicit and testable.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 生命周期
+
+[*] --> Discovered
+Discovered --> Staging : initialize(api)
+Staging --> Rejected : validation failed
+Staging --> Registered : atomic publish
+Registered --> Active : onLoad
+Active --> Staging : reload candidate
+Active --> Unloading : unregister
+Unloading --> Removed : removeOwner
+Removed --> [*]
+Rejected --> [*]
+@enduml
+
+@startuml 09-registration-decision
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:556-590
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:484-497
+' Java divergence: conflicting extension commands fail registration instead of receiving generated invocation names.
+' Design reason: ToB command identity must be deterministic and auditable.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 注册决策
+
+start
+:registerCommand(name, options);
+if (Command name 合法?) then (否)
+  :拒绝：INVALID_NAME;
+  stop
+else (是)
+  if (description/handler 合法?) then (否)
+    :拒绝：INVALID_OPTIONS;
+    stop
+  else (是)
+    if (与内置命令同名?) then (是)
+      :拒绝：BUILTIN_RESERVED;
+      stop
+    else (否)
+      if (本次初始化重复?) then (是)
+        :拒绝：DUPLICATE_IN_EXTENSION;
+        stop
+      else (否)
+        if (其他 owner 已注册?) then (是)
+          :拒绝：COMMAND_CONFLICT;
+          stop
+        else (否)
+          :加入 Staging;
+          if (Extension 全部命令校验完成?) then (否)
+            :丢弃全部 Staging;
+            stop
+          else (是)
+            :原子发布新 Snapshot;
+            stop
+          endif
+        endif
+      endif
+    endif
+  endif
+endif
+@enduml
+
+@startuml 10-input-priority
+' pi source: packages/coding-agent/src/core/agent-session.ts:979-1028
+' Design reason: preserve extension-before-skill/template routing and prevent handled commands from reaching the model.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 输入优先级
+
+start
+:用户输入;
+if (匹配已注册命令?) then (是)
+  :执行 Built-in 或 Extension Handler;
+  :结束，不进入 LLM Prompt;
+  stop
+else (否)
+  if (匹配 /skill:name?) then (是)
+    :展开 Skill;
+  else (否)
+    if (匹配 Prompt Template?) then (是)
+      :展开 Template;
+    else (否)
+      :作为普通 Prompt;
+    endif
+  endif
+  :进入 LLM Prompt;
+  stop
+endif
+@enduml
+
+@startuml 11-execution-sequence
+' pi source: packages/coding-agent/src/core/agent-session.ts:1138-1165
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:688-724
+' Design reason: normalize parsing, registry lookup, context creation, async failure isolation, and TUI rendering.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+autonumber
+title Extension Command 执行时序
+
+actor User as U
+participant InteractiveMode as I
+participant SlashCommandParser as P
+participant Dispatcher as D
+participant "Registry Snapshot" as R
+participant Handler as H
+participant TUI as T
+
+U -> I : /deploy staging
+I -> P : parse(rawInput)
+P --> I : Invocation(deploy, staging)
+I -> D : dispatch(invocation, context)
+D -> R : find("deploy")
+R --> D : RegisteredSlashCommand
+D -> H : handle("staging", context)
+alt success
+  H --> D : CompletionStage completed
+  D --> I : HANDLED
+  I -> T : render command output
+else handler failure
+  H --> D : exceptional completion
+  D --> I : FAILED(error summary)
+  I -> T : render error, session remains usable
+end
+@enduml
+
+@startuml 12-completion-routing
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:499-570
+' pi source: packages/tui/src/autocomplete.ts:308-358
+' Design reason: share registry-backed name completion and invoke argument completers only after command resolution.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 补全路由
+
+start
+:编辑器文本变化;
+if (以 / 开头?) then (否)
+  :关闭 Command 补全;
+  stop
+else (是)
+  if (命令名后已有空白?) then (否)
+    :Registry 名称前缀过滤;
+    :显示候选项;
+    stop
+  else (是)
+    if (命令存在且有 Completer?) then (否)
+      :关闭 Command 补全;
+      stop
+    else (是)
+      :Completer.complete(argumentPrefix, ctx);
+      if (结果仍对应当前编辑器版本?) then (否)
+        :丢弃过期结果;
+        stop
+      else (是)
+        :显示候选项;
+        stop
+      endif
+    endif
+  endif
+endif
+@enduml
+
+@startuml 13-argument-completion
+' pi source: packages/coding-agent/src/core/extensions/types.ts:1097-1103
+' pi source: packages/tui/src/autocomplete.ts:333-358
+' Design reason: isolate completer timeout/error/null and discard results that cannot safely update the editor.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+autonumber
+title Extension Command 参数补全
+
+participant EditorContainer as E
+participant CompletionService as C
+participant Registry as R
+participant ArgumentCompleter as A
+
+E -> C : complete("/deploy st", cursor=end)
+C -> R : find("deploy")
+R --> C : command + completer
+C -> A : complete("st", context)
+alt completed before timeout
+  A --> C : [staging]
+  C --> E : completion items
+else timeout/error/null
+  C --> E : empty list + diagnostic
+end
+@enduml
+
+@startuml 14-development-example
+' pi source: packages/coding-agent/src/core/extensions/types.ts:1179
+' pi source: packages/coding-agent/src/core/extensions/loader.ts:201-209
+' Design reason: show that source ownership is host-bound while metadata, completion, and execution come from extension code.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Deploy Extension 开发示例
+
+left to right direction
+rectangle DeployExtension.initialize as code
+rectangle "registerCommand deploy" as register
+rectangle description as metadata
+rectangle completeEnvironment as completion
+rectangle "deploy handler" as execution
+rectangle sourceInfo as noSource
+
+code --> register
+register --> metadata
+register --> completion
+register --> execution
+register ..> noSource : 不包含
+@enduml
+
+@startuml 15-dependency-direction
+' Java target architecture; pi source is not applicable.
+' Design reason: keep command core reusable by TUI, extension, built-in, and future RPC adapters.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 依赖方向
+
+left to right direction
+component "mode/tui" as tui
+component "command API + services" as command
+component extension
+component "command/builtin" as builtin
+component "具体 TUI 类型" as noTui
+
+tui --> command
+extension --> command
+builtin --> command
+command ..> noTui : 禁止依赖
+@enduml
+
+@startuml 16-migration-path
+' Java migration plan; pi source is not applicable.
+' Design reason: preserve one complete execution path at each milestone while retiring the old registry API.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 迁移路径
+
+left to right direction
+rectangle "M1\nAPI + Parser + Snapshot Registry" as m1
+rectangle "M2\nExtensionApi + 原子注册" as m2
+rectangle "M3\nDispatcher + Built-in Adapter" as m3
+rectangle "M4\n/help + 名称补全" as m4
+rectangle "M5\n参数补全 + 异步隔离" as m5
+rectangle "M6\n移除旧接口和 Adapter" as m6
+
+m1 --> m2
+m2 --> m3
+m3 --> m4
+m4 --> m5
+m5 --> m6
+@enduml
+
+@startuml 17-rollback-boundary
+' pi source: packages/coding-agent/src/core/resource-loader.ts:333-559
+' Java divergence: explicit candidate rollback is a stronger lifecycle guarantee than current pi loading.
+' Design reason: retain the old extension and snapshot until the replacement is validated and published.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 回滚边界
+
+start
+:构建新 Extension 命令集合;
+if (校验成功?) then (否)
+  :保留旧 Extension + 旧 Snapshot;
+  stop
+else (是)
+  :原子发布新 Snapshot;
+  if (onLoad 失败?) then (否)
+    :新版本生效;
+    stop
+  else (是)
+    :交由 Extension 生命周期 SR 定义回滚;
+    stop
+  endif
+endif
+@enduml
+
+@startuml 18-test-pyramid
+' Java test strategy; pi source is not applicable.
+' Design reason: concentrate deterministic parser/registry/dispatcher coverage below a small number of interactive tests.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 测试金字塔
+
+rectangle "主要覆盖\nParser、Registry、Dispatcher、Completer" as unit
+rectangle "模块集成测试\nExtensionRegistry + CommandRegistry + TUI" as integration
+rectangle "少量交互验收\n/help、补全、执行、卸载" as e2e
+
+unit --> integration
+integration --> e2e
+@enduml
+
+@startuml 19-acceptance-sequence
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:546-552
+' pi source: packages/coding-agent/src/core/agent-session.ts:1138-1165
+' Design reason: verify registration, discovery, argument completion, execution, non-LLM routing, and unload as one user-visible lifecycle.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+title Extension Command 验收时序
+
+participant "Extension Developer" as Dev
+participant "Agent Host" as Host
+actor User
+
+Dev -> Host : register /deploy
+Host --> User : /deploy 出现在 /help 和补全
+User -> Host : 输入 /deploy st
+Host --> User : 补全 staging
+User -> Host : 执行 /deploy staging
+Host --> User : Handler 输出结果
+note over Host
+  不发送到 LLM
+end note
+Dev -> Host : unload extension
+Host --> User : /deploy 从执行、帮助、补全同时消失
+@enduml
+
+@startuml 20-conclusion
+' pi source: packages/coding-agent/src/core/extensions/types.ts:1097-1107,1179
+' pi source: packages/coding-agent/src/core/extensions/runner.ts:556-602
+' Design reason: summarize the boundary from developer-owned declarations to host-owned identity and unified runtime behavior.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Extension Command 结论
+
+left to right direction
+rectangle "Extension Developer" as developer
+rectangle "name + description\n+ argumentCompleter + handler" as publicApi
+rectangle "Scoped ExtensionApi" as scopedApi
+rectangle "ownerId + RegisteredCommand" as internal
+rectangle "统一帮助、补全、执行、卸载" as runtime
+rectangle sourceInfo as source
+
+developer --> publicApi
+publicApi --> scopedApi
+scopedApi --> internal
+internal --> runtime
+developer ..> source : 无需提供
+@enduml

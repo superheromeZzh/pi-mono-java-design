@@ -1,0 +1,351 @@
+' Generated with PlantUML 1.2026.6
+' Run from this directory: plantuml -tsvg diagram.puml
+
+@startuml 01-skill-command-pipeline
+' pi source: packages/coding-agent/src/core/resource-loader.ts:603-624
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:555-570
+' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1196
+' Observed behavior: loaded skills are projected into completion DTOs and expanded at invocation time without per-skill handlers.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Skill Command 核心链路
+
+left to right direction
+rectangle "Resource Loader" as A
+rectangle "Loaded Skill List" as B
+rectangle "Autocomplete Mapping" as C
+rectangle "/skill:name" as D
+rectangle "Skill Command Expansion" as E
+rectangle "Expanded User Message" as F
+
+A --> B
+B --> C
+C --> D
+B --> E
+E --> F
+@enduml
+
+@startuml 02-skill-discovery
+' pi source: packages/coding-agent/src/core/resource-loader.ts:333-410,603-624
+' pi source: packages/coding-agent/src/core/skills.ts:163-325,387-486
+' pi source: packages/coding-agent/src/core/package-manager.ts:184-188,2465-2489
+' Observed behavior: enabled sources are ordered, validated, canonical-path deduplicated, and name-deduplicated first-wins.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title pi Skill 发现链路
+
+rectangle DefaultResourceLoader.reload as A
+rectangle PackageManager.resolve as B
+rectangle "Enabled Skill Resources" as C
+rectangle loadSkills as D
+rectangle "Read SKILL.md Frontmatter" as E
+rectangle "Validate and Diagnose" as F
+rectangle "Canonical Path Dedupe" as G
+rectangle "Name Collision First Wins" as H
+rectangle "ResourceLoader Skills" as I
+
+A --> B
+B --> C
+C --> D
+D --> E
+E --> F
+F --> G
+G --> H
+H --> I
+@enduml
+
+@startuml 03-pi-skill-invocation
+' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1196
+' Observed behavior: resolve metadata by exact name, read SKILL.md at invocation, strip frontmatter, wrap the body, and append free-text args.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+title pi Skill Command 调用
+
+actor User as U
+participant AgentSession as S
+participant ResourceLoader as R
+participant SKILL.md as F
+participant Agent as A
+
+U -> S : /skill:review-pr 123
+S -> R : getSkills and find name
+R --> S : Skill metadata
+S -> F : read UTF-8 content
+F --> S : frontmatter and body
+S -> S : strip frontmatter and wrap
+S -> A : skill block plus args
+@enduml
+
+@startuml 04-current-java-flow
+' Java current-state diagram; pi source is not applicable.
+' Design reason: expose the mutable registry and separate completion/expansion paths that must be aligned with pi.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Java 当前 Skill Command 链路
+
+left to right direction
+rectangle SkillLoader as A
+rectangle "Mutable SkillRegistry" as B
+rectangle InteractiveMode as C
+rectangle CommandSuggestion as D
+rectangle SkillExpander as E
+rectangle "AgentSession Prompt" as F
+
+A --> B
+B --> C
+C --> D
+B --> E
+E --> F
+@enduml
+
+@startuml 05-target-architecture
+' pi source: packages/coding-agent/src/core/resource-loader.ts:333-410,603-624
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:555-570
+' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
+' Design reason: preserve pi behavior while using immutable Java results and one AgentSession expansion path.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Java Skill Command 目标架构
+
+rectangle "Package and Settings Resolver" as PM
+rectangle DefaultResourceLoader as RL
+rectangle SkillLoader as LS
+rectangle "Immutable SkillLoadResult" as LR
+rectangle InteractiveMode as IM
+rectangle CombinedAutocompleteProvider as AP
+rectangle AgentSession as AS
+rectangle SkillCommandExpander as SE
+rectangle Agent as AG
+
+PM --> RL
+RL --> LS
+LS --> LR
+LR --> IM
+IM --> AP
+LR --> AS
+AS --> SE
+SE --> AG
+@enduml
+
+@startuml 06-reload
+' pi source: packages/coding-agent/src/core/agent-session.ts:2435-2456
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:5099-5125
+' Design reason: publish a complete SkillLoadResult before rebuilding completion, never expose clear-then-register intermediate state.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+hide footbox
+title Skill Command Reload
+
+actor User as U
+participant AgentSession as S
+participant ResourceLoader as R
+participant SkillLoader as L
+participant InteractiveMode as T
+
+U -> S : /reload
+S -> R : reload
+R -> L : load resolved skills
+L --> R : complete SkillLoadResult
+R -> R : replace current result
+S --> T : reload completed
+T -> T : rebuild autocomplete provider
+T --> U : new skill suggestions
+@enduml
+
+@startuml 07-routing
+' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
+' Design reason: preserve extension-command priority, then expand Skill before Prompt Template for prompt, steer, and follow-up.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+title Skill Command 路由优先级
+
+start
+:User Input;
+if (Builtin or Extension Command?) then (matched)
+  :Execute Handler;
+  stop
+else (not matched)
+  if (Skill Command?) then (matched)
+    :Expand Skill;
+  else (not matched)
+    if (Prompt Template?) then (matched)
+      :Expand Template;
+    else (not matched)
+      :Ordinary Prompt;
+    endif
+  endif
+  :Agent;
+  stop
+endif
+@enduml
+
+@startuml 08-end-to-end-invocation
+' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
+' Java platform mapping: SkillsManager owns skill-domain behavior; ResourceManager is the only database access boundary.
+' Design reason: retain pi parsing, free-text args, envelope, and fail-open behavior across the Java platform components.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+skinparam BoxPadding 4
+hide footbox
+autonumber
+title Skill Command 端到端调用时序
+
+participant "客户" as Client
+participant "Agent交互\nUI" as UI
+participant "Agent\nGW" as Gateway
+participant "Agent\nRuntime" as Runtime
+participant "Skills\n管理器" as SkillsManager
+participant "资源\n管理器" as ResourceManager
+participant "数据库" as Database
+participant "模型\n管理器" as ModelManager
+participant "Tools\n管理器" as ToolsManager
+
+activate Client
+Client -> UI: 提交 /skill:review-pr 123
+activate UI
+UI -> Gateway: 提交 Prompt
+activate Gateway
+Gateway -> ResourceManager: 读取 Agent 配置/会话资源
+activate ResourceManager
+ResourceManager -> Database: 查询资源数据
+activate Database
+Database --> ResourceManager: Agent 配置/会话
+deactivate Database
+ResourceManager --> Gateway: 配置/上下文
+deactivate ResourceManager
+Gateway -> Runtime: prompt(context, text)
+activate Runtime
+
+Runtime -> SkillsManager: execute(text)
+activate SkillsManager
+SkillsManager -> SkillsManager: 解析名称和参数\n构造资源查询条件
+SkillsManager -> ResourceManager: 读取 Skill 资源
+activate ResourceManager
+ResourceManager -> Database: 按名称查询 Skill
+activate Database
+Database --> ResourceManager: Skill 数据 / not found
+deactivate Database
+ResourceManager --> SkillsManager: SkillResource / not found / error
+deactivate ResourceManager
+SkillsManager -> SkillsManager: 校验 Skill 启停状态
+
+alt Skill 不存在、已停用或读取失败
+  SkillsManager --> Runtime: 返回原始 text（fail-open）
+else Skill 已启用
+  SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
+  SkillsManager --> Runtime: expandedText
+end
+deactivate SkillsManager
+
+par 准备模型
+  Runtime -> ModelManager: resolve(modelId)
+  activate ModelManager
+  ModelManager --> Runtime: Model
+  deactivate ModelManager
+else 准备 Tools
+  Runtime -> ToolsManager: 获取 Tool 定义
+  activate ToolsManager
+  ToolsManager --> Runtime: definitions
+  deactivate ToolsManager
+end
+
+Runtime -> ModelManager: invoke(expandedText, tools)
+activate ModelManager
+ModelManager --> Runtime: response / tool calls
+deactivate ModelManager
+
+loop 模型返回 Tool Call
+  Runtime -> ToolsManager: execute(toolCall)
+  activate ToolsManager
+  ToolsManager --> Runtime: Tool result
+  deactivate ToolsManager
+  Runtime -> ModelManager: continue(Model, Tool result)
+  activate ModelManager
+  ModelManager --> Runtime: Model response / Tool calls
+  deactivate ModelManager
+end
+
+Runtime --> Gateway: Agent response
+deactivate Runtime
+Gateway -> ResourceManager: 持久化消息资源
+activate ResourceManager
+ResourceManager -> Database: 保存消息
+activate Database
+Database --> ResourceManager: persisted
+deactivate Database
+ResourceManager --> Gateway: persisted
+deactivate ResourceManager
+Gateway --> UI: Agent response
+deactivate Gateway
+UI --> Client: 展示响应
+deactivate UI
+deactivate Client
+@enduml
+
+@startuml 09-class-relationships
+' pi source: packages/coding-agent/src/core/resource-loader.ts:603-624
+' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
+' Design reason: express the Java implementation boundary without registering Skill handlers in SlashCommandRegistry.
+!theme plain
+!pragma layout smetana
+skinparam defaultFontName "PingFang SC"
+skinparam shadowing false
+skinparam backgroundColor transparent
+skinparam classAttributeIconSize 0
+title Java Skill Command 类关系
+
+interface ResourceLoader {
+  + getSkills(): SkillLoadResult
+  + reload()
+}
+class DefaultResourceLoader {
+  - skills: SkillLoadResult
+}
+class SkillLoader {
+  + load(resources): SkillLoadResult
+}
+class SkillCommandExpander {
+  + expand(text, skills): String
+}
+class CombinedAutocompleteProvider {
+  + getSuggestions(prefix): List
+}
+class InteractiveMode {
+  + createAutocompleteProvider()
+}
+class AgentSession {
+  - expandUserInput(text): String
+}
+
+ResourceLoader <|.. DefaultResourceLoader
+DefaultResourceLoader --> SkillLoader
+AgentSession --> ResourceLoader
+AgentSession --> SkillCommandExpander
+InteractiveMode --> ResourceLoader
+InteractiveMode --> CombinedAutocompleteProvider
+@enduml

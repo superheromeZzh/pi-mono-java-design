@@ -9,36 +9,17 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.15 |
+| 版本 | v1.16 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
+| pi 源码提交 | `bb959aae017eedc8edaa91d01d0475d483ea9371` |
 
 ---
 
 ## 1. 设计目标
 
-```mermaid
-mindmap
-  root((Extension Command))
-    开发者体验
-      registerCommand
-      参数补全
-      异步 Handler
-      不提供 sourceInfo
-    运行时治理
-      所有权
-      冲突检测
-      原子注册
-      卸载清理
-    用户体验
-      统一帮助
-      名称补全
-      参数补全
-      错误隔离
-    架构一致性
-      内置与扩展统一
-      单一 Dispatcher
-      后续支持 RPC
-```
+![Extension Command 设计目标](./diagrams/extension-command/01-extension-command-overview.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L4)
 
 目标结论：
 
@@ -62,29 +43,26 @@ sourceInfo        = 不进入 Java Extension Command 设计
 
 前置条件：Extension 实例已由 Spring、`ServiceLoader`、测试代码或未来的 Extension Loader 加载。
 
+### 1.2 PlantUML 图表源码
+
+本 SR 的 20 个设计图统一由 [`diagrams/extension-command/diagram.puml`](./diagrams/extension-command/diagram.puml) 生成。每张图下方的源码链接直接定位到对应命名的 `@startuml`；Markdown 只引用生成后的 SVG，不复制维护第二份图形定义。
+
+```bash
+cd diagrams/extension-command
+plantuml -tsvg diagram.puml
+```
+
+图源显式使用 PlantUML 内置 Smetana 布局，不依赖外部 Graphviz。SVG 是生成物，不得手工修改。本次使用 PlantUML `1.2026.6` 完成语法和 SVG 生成校验。
+
 ---
 
 ## 2. 当前问题
 
 ### 2.1 当前调用关系
 
-```mermaid
-flowchart LR
-    extension["Extension.commands()"]
-    extensionRegistry["ExtensionRegistry.getAllCommands()"]
-    slashRegistry["SlashCommandRegistry"]
-    builtin["BuiltinCommandRegistrar"]
-    help["/help"]
-    autocomplete["EditorContainer 补全"]
-    interactive["InteractiveMode 执行"]
+![Java 当前 Extension Command 调用关系](./diagrams/extension-command/02-current-call-relationship.svg)
 
-    extension --> extensionRegistry
-    extensionRegistry -. "未接入" .-> slashRegistry
-    builtin --> slashRegistry
-    slashRegistry --> help
-    slashRegistry --> autocomplete
-    slashRegistry --> interactive
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L57)
 
 ### 2.2 缺口矩阵
 
@@ -103,43 +81,9 @@ flowchart LR
 
 ### 3.1 组件图
 
-```mermaid
-flowchart TB
-    subgraph Load["Extension 加载域"]
-        loader["Extension Loader"]
-        extension["Extension"]
-        scopedApi["Scoped ExtensionApi\n绑定 extensionId"]
-    end
+![Extension Command 目标组件架构](./diagrams/extension-command/03-target-architecture.svg)
 
-    subgraph CommandCore["Command 核心域"]
-        staging["Registration Staging"]
-        registry["SlashCommandRegistry\n不可变快照"]
-        parser["SlashCommandParser"]
-        dispatcher["SlashCommandDispatcher"]
-        completer["CommandCompletionService"]
-    end
-
-    subgraph Consumers["消费端"]
-        tui["Interactive TUI"]
-        help["/help"]
-        rpc["Future RPC get_commands"]
-    end
-
-    loader --> extension
-    extension -->|"initialize(api)"| scopedApi
-    scopedApi -->|"registerCommand"| staging
-    staging -->|"原子提交"| registry
-
-    tui --> parser
-    parser --> dispatcher
-    registry --> dispatcher
-    dispatcher -->|"handle(args, ctx)"| extension
-
-    registry --> completer
-    completer --> tui
-    registry --> help
-    registry -.-> rpc
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L84)
 
 ### 3.2 核心职责
 
@@ -159,61 +103,11 @@ flowchart TB
 
 ### 4.1 API 类图
 
-```mermaid
-%%{init: {"theme": "base", "themeCSS": ".edgePaths>path:nth-child(6){stroke:transparent!important;fill:none!important;}"}}%%
-classDiagram
-    class Extension {
-        <<interface>>
-        +String id()
-        +void initialize(ExtensionApi api)
-        +void onLoad()
-        +void onUnload()
-    }
+![Extension Command 公开 API 类图](./diagrams/extension-command/04-public-api-class.svg)
 
-    class ExtensionApi {
-        <<interface>>
-        +void registerCommand(String name, SlashCommandOptions options)
-    }
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L129)
 
-    class SlashCommandOptions {
-        <<record>>
-        +String description
-        +SlashCommandArgumentCompleter argumentCompleter
-        +SlashCommandHandler handler
-    }
-
-    class SlashCommandHandler {
-        <<functional interface>>
-        +CompletionStage~Void~ handle(String arguments, SlashCommandContext context)
-    }
-
-    class SlashCommandArgumentCompleter {
-        <<functional interface>>
-        +CompletionStage~List~ complete(String prefix, SlashCommandContext context)
-    }
-
-    class SlashCommandCompletion {
-        <<record>>
-        +String value
-        +String label
-        +String description
-    }
-
-    class SlashCommandContext {
-        <<record>>
-        +AgentSession session
-        +OutputWriter output
-    }
-
-    Extension ..> ExtensionApi : uses
-    ExtensionApi ..> SlashCommandOptions : uses
-    SlashCommandOptions o-- SlashCommandHandler : contains
-    SlashCommandOptions o-- SlashCommandArgumentCompleter : contains
-    SlashCommandArgumentCompleter ..> SlashCommandCompletion : returns
-    SlashCommandHandler -- SlashCommandContext
-```
-
-`SlashCommandContext` 作为相关类型独立展示在左下角，不显示关系线。最后一条关系仅用于 Mermaid 布局，并通过主题样式隐藏；Handler/Completer 对 Context 的使用由方法签名表达。
+`SlashCommandContext` 通过 Handler/Completer 方法签名和显式依赖线展示，不使用隐藏连线参与排版。
 
 关系图例：
 
@@ -467,43 +361,9 @@ public record SlashCommandCompletion(
 
 ### 5.1 模型图
 
-```mermaid
-classDiagram
-    class SlashCommandOptions {
-        <<public>>
-        description
-        argumentCompleter
-        handler
-    }
+![Extension Command 内部数据模型](./diagrams/extension-command/05-internal-data-model.svg)
 
-    class RegisteredSlashCommand {
-        <<internal>>
-        String ownerId
-        String name
-        String description
-        argumentCompleter
-        handler
-    }
-
-    class CommandRegistrySnapshot {
-        <<internal>>
-        long version
-        Map commandsByName
-        Map commandNamesByOwner
-    }
-
-    class SlashCommandRegistry {
-        <<internal service>>
-        +find(name)
-        +getAll()
-        +replaceOwnerCommands(ownerId, commands)
-        +removeOwner(ownerId)
-    }
-
-    SlashCommandOptions --> RegisteredSlashCommand : framework wraps
-    RegisteredSlashCommand --> CommandRegistrySnapshot
-    SlashCommandRegistry --> CommandRegistrySnapshot : publishes
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L179)
 
 ```java
 record RegisteredSlashCommand(
@@ -529,71 +389,21 @@ record RegisteredSlashCommand(
 
 ### 6.1 首次注册时序
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as ExtensionLoader
-    participant E as Extension
-    participant A as ScopedExtensionApi
-    participant S as RegistrationStaging
-    participant R as SlashCommandRegistry
+![Extension Command 首次注册](./diagrams/extension-command/06-initial-registration.svg)
 
-    L->>A: create(extensionId)
-    L->>E: initialize(A)
-    E->>A: registerCommand("deploy", options)
-    A->>S: stage(ownerId, name, options)
-    S->>S: validate name/options/duplicates
-
-    alt validation success
-        S->>R: replaceOwnerCommands(ownerId, staged)
-        R->>R: publish snapshot version + 1
-        L->>E: onLoad()
-    else validation failure
-        S-->>L: registration error
-        Note over R: existing snapshot unchanged
-    end
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L220)
 
 ### 6.2 Reload 时序
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant ER as ExtensionRegistry
-    participant Old as Old Extension
-    participant New as New Extension
-    participant Stage as Staging
-    participant CR as Command Registry
+![Extension Command Reload](./diagrams/extension-command/07-reload.svg)
 
-    ER->>New: initialize(scopedApi)
-    New->>Stage: register commands
-    Stage->>Stage: validate against snapshot
-
-    alt new extension valid
-        ER->>Old: onUnload()
-        ER->>CR: atomic replace owner commands
-        ER->>New: onLoad()
-    else invalid or conflict
-        Stage-->>ER: reject
-        Note over Old,CR: old extension and commands remain active
-    end
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L256)
 
 ### 6.3 生命周期状态图
 
-```mermaid
-stateDiagram-v2
-    [*] --> Discovered
-    Discovered --> Staging: initialize(api)
-    Staging --> Rejected: validation failed
-    Staging --> Registered: atomic publish
-    Registered --> Active: onLoad
-    Active --> Staging: reload candidate
-    Active --> Unloading: unregister
-    Unloading --> Removed: removeOwner
-    Removed --> [*]
-    Rejected --> [*]
-```
+![Extension Command 生命周期](./diagrams/extension-command/08-lifecycle-state.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L291)
 
 ### 6.4 生命周期规则
 
@@ -611,23 +421,9 @@ stateDiagram-v2
 
 ### 7.1 注册决策图
 
-```mermaid
-flowchart TD
-    start["registerCommand(name, options)"] --> validName{"Command name 合法?"}
-    validName -- 否 --> rejectName["拒绝：INVALID_NAME"]
-    validName -- 是 --> validOptions{"description/handler 合法?"}
-    validOptions -- 否 --> rejectOptions["拒绝：INVALID_OPTIONS"]
-    validOptions -- 是 --> builtin{"与内置命令同名?"}
-    builtin -- 是 --> rejectBuiltin["拒绝：BUILTIN_RESERVED"]
-    builtin -- 否 --> sameBatch{"本次初始化重复?"}
-    sameBatch -- 是 --> rejectBatch["拒绝：DUPLICATE_IN_EXTENSION"]
-    sameBatch -- 否 --> otherOwner{"其他 owner 已注册?"}
-    otherOwner -- 是 --> rejectConflict["拒绝：COMMAND_CONFLICT"]
-    otherOwner -- 否 --> stage["加入 Staging"]
-    stage --> allValid{"Extension 全部命令校验完成?"}
-    allValid -- 否 --> rollback["丢弃全部 Staging"]
-    allValid -- 是 --> publish["原子发布新 Snapshot"]
-```
+![Extension Command 注册决策](./diagrams/extension-command/09-registration-decision.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L314)
 
 ### 7.2 冲突策略
 
@@ -647,51 +443,15 @@ flowchart TD
 
 ### 8.1 输入优先级
 
-```mermaid
-flowchart TD
-    input["用户输入"] --> registered{"匹配已注册命令?"}
-    registered -- 是 --> handler["执行 Built-in 或 Extension Handler"]
-    registered -- 否 --> skill{"匹配 /skill:name?"}
-    skill -- 是 --> expandSkill["展开 Skill"]
-    skill -- 否 --> template{"匹配 Prompt Template?"}
-    template -- 是 --> expandTemplate["展开 Template"]
-    template -- 否 --> prompt["作为普通 Prompt"]
-    expandSkill --> prompt
-    expandTemplate --> prompt
-    handler --> handled["结束，不进入 LLM Prompt"]
-```
+![Extension Command 输入优先级](./diagrams/extension-command/10-input-priority.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L363)
 
 ### 8.2 执行时序
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant I as InteractiveMode
-    participant P as SlashCommandParser
-    participant D as Dispatcher
-    participant R as Registry Snapshot
-    participant H as Handler
-    participant T as TUI
+![Extension Command 执行时序](./diagrams/extension-command/11-execution-sequence.svg)
 
-    U->>I: /deploy staging
-    I->>P: parse(rawInput)
-    P-->>I: Invocation(deploy, staging)
-    I->>D: dispatch(invocation, context)
-    D->>R: find("deploy")
-    R-->>D: RegisteredSlashCommand
-    D->>H: handle("staging", context)
-
-    alt success
-        H-->>D: CompletionStage completed
-        D-->>I: HANDLED
-        I->>T: render command output
-    else handler failure
-        H-->>D: exceptional completion
-        D-->>I: FAILED(error summary)
-        I->>T: render error, session remains usable
-    end
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L394)
 
 ### 8.3 解析结果
 
@@ -735,43 +495,15 @@ public record SlashCommandDispatchResult(
 
 ### 9.1 补全路由
 
-```mermaid
-flowchart TD
-    edit["编辑器文本变化"] --> slash{"以 / 开头?"}
-    slash -- 否 --> hide["关闭 Command 补全"]
-    slash -- 是 --> space{"命令名后已有空白?"}
-    space -- 否 --> names["Registry 名称前缀过滤"]
-    space -- 是 --> resolve{"命令存在且有 Completer?"}
-    resolve -- 否 --> hide
-    resolve -- 是 --> args["Completer.complete(argumentPrefix, ctx)"]
-    names --> menu["显示候选项"]
-    args --> stale{"结果仍对应当前编辑器版本?"}
-    stale -- 否 --> discard["丢弃过期结果"]
-    stale -- 是 --> menu
-```
+![Extension Command 补全路由](./diagrams/extension-command/12-completion-routing.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L433)
 
 ### 9.2 参数补全时序
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant E as EditorContainer
-    participant C as CompletionService
-    participant R as Registry
-    participant A as ArgumentCompleter
+![Extension Command 参数补全](./diagrams/extension-command/13-argument-completion.svg)
 
-    E->>C: complete("/deploy st", cursor=end)
-    C->>R: find("deploy")
-    R-->>C: command + completer
-    C->>A: complete("st", context)
-
-    alt completed before timeout
-        A-->>C: [staging]
-        C-->>E: completion items
-    else timeout/error/null
-        C-->>E: empty list + diagnostic
-    end
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L472)
 
 ### 9.3 首版边界
 
@@ -843,14 +575,9 @@ public final class DeployExtension implements Extension {
 }
 ```
 
-```mermaid
-flowchart LR
-    code["DeployExtension.initialize"] --> register["registerCommand deploy"]
-    register --> metadata["description"]
-    register --> completion["completeEnvironment"]
-    register --> execution["deploy handler"]
-    register -. "不包含" .-> noSource["sourceInfo"]
-```
+![Deploy Extension 开发示例](./diagrams/extension-command/14-development-example.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L502)
 
 ---
 
@@ -939,13 +666,9 @@ modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/
 
 依赖方向：
 
-```mermaid
-flowchart LR
-    tui["mode/tui"] --> command["command API + services"]
-    extension["extension"] --> command
-    builtin["command/builtin"] --> command
-    command -. "禁止依赖" .-> noTui["具体 TUI 类型"]
-```
+![Extension Command 依赖方向](./diagrams/extension-command/15-dependency-direction.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L528)
 
 ---
 
@@ -953,17 +676,9 @@ flowchart LR
 
 ### 14.1 迁移路径
 
-```mermaid
-flowchart LR
-    m1["M1\nAPI + Parser + Snapshot Registry"]
-    m2["M2\nExtensionApi + 原子注册"]
-    m3["M3\nDispatcher + Built-in Adapter"]
-    m4["M4\n/help + 名称补全"]
-    m5["M5\n参数补全 + 异步隔离"]
-    m6["M6\n移除旧接口和 Adapter"]
+![Extension Command 迁移路径](./diagrams/extension-command/16-migration-path.svg)
 
-    m1 --> m2 --> m3 --> m4 --> m5 --> m6
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L551)
 
 ### 14.2 现有类型迁移
 
@@ -979,15 +694,9 @@ flowchart LR
 
 ### 14.3 回滚边界
 
-```mermaid
-flowchart TD
-    candidate["构建新 Extension 命令集合"] --> validate{"校验成功?"}
-    validate -- 否 --> keep["保留旧 Extension + 旧 Snapshot"]
-    validate -- 是 --> publish["原子发布新 Snapshot"]
-    publish --> runtimeFailure{"onLoad 失败?"}
-    runtimeFailure -- 否 --> done["新版本生效"]
-    runtimeFailure -- 是 --> lifecycle["交由 Extension 生命周期 SR 定义回滚"]
-```
+![Extension Command 回滚边界](./diagrams/extension-command/17-rollback-boundary.svg)
+
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L576)
 
 ---
 
@@ -995,14 +704,9 @@ flowchart TD
 
 ### 15.1 测试金字塔
 
-```mermaid
-flowchart TB
-    e2e["少量交互验收\n/help、补全、执行、卸载"]
-    integration["模块集成测试\nExtensionRegistry + CommandRegistry + TUI"]
-    unit["主要覆盖\nParser、Registry、Dispatcher、Completer"]
+![Extension Command 测试金字塔](./diagrams/extension-command/18-test-pyramid.svg)
 
-    unit --> integration --> e2e
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L604)
 
 ### 15.2 测试矩阵
 
@@ -1025,22 +729,9 @@ flowchart TB
 
 ## 16. 验收场景
 
-```mermaid
-sequenceDiagram
-    participant Dev as Extension Developer
-    participant Host as Agent Host
-    participant User
+![Extension Command 验收时序](./diagrams/extension-command/19-acceptance-sequence.svg)
 
-    Dev->>Host: register /deploy
-    Host-->>User: /deploy 出现在 /help 和补全
-    User->>Host: 输入 /deploy st
-    Host-->>User: 补全 staging
-    User->>Host: 执行 /deploy staging
-    Host-->>User: Handler 输出结果
-    Note over Host: 不发送到 LLM
-    Dev->>Host: unload extension
-    Host-->>User: /deploy 从执行、帮助、补全同时消失
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L622)
 
 | AC | 验收项 | 通过条件 |
 |---|---|---|
@@ -1075,17 +766,9 @@ sequenceDiagram
 
 ## 18. 结论
 
-```mermaid
-flowchart LR
-    developer["Extension Developer"]
-    publicApi["name + description\n+ argumentCompleter + handler"]
-    scopedApi["Scoped ExtensionApi"]
-    internal["ownerId + RegisteredCommand"]
-    runtime["统一帮助、补全、执行、卸载"]
+![Extension Command 结论](./diagrams/extension-command/20-conclusion.svg)
 
-    developer --> publicApi --> scopedApi --> internal --> runtime
-    developer -. "无需提供" .-> source["sourceInfo"]
-```
+PlantUML：[查看源码](./diagrams/extension-command/diagram.puml#L651)
 
 Java Extension Command 采用 pi 语义一致的注册模型：
 
