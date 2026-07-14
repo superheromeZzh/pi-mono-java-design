@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.21<br>
+> 版本：v2.22<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > Java GUI 源码提交：`b99871a0321b73606a8f074c42050f28f52fdfca`<br>
@@ -222,7 +222,9 @@ Skill body...
 123
 ```
 
-### 2.6 路由和队列
+### 2.6 pi 原始路由和队列（源码事实，Java 不采用）
+
+> 本节只记录 pi 源码行为，不是 Java 目标路由。Java 的唯一目标路由见第 10.1 节：注册 Command → Skill Command → 普通 Prompt，不包含 Prompt Template。
 
 pi 普通 Prompt 的处理顺序：
 
@@ -1358,3 +1360,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.19 | 2026-07-14 | 更新关联的统一 Java Command SR 版本为 v1.9 |
 | v2.20 | 2026-07-14 | 将 Java 目标交互面收敛为 GUI，保留 pi TUI 为源码事实，补充 Java Vue 前端差距，移除目标 TUI/CLI extension 并改为 GUI 动态补全 |
 | v2.21 | 2026-07-14 | 移除 Java 目标的 Prompt Command 补全与展开，将路由收敛为注册 Command、Skill Command 和普通 Prompt |
+| v2.22 | 2026-07-14 | 将仍包含 Prompt Template 的第 2.6 节明确标记为 pi 源码事实且非 Java 目标路由，消除与第 10.1 节的语义混淆 |
