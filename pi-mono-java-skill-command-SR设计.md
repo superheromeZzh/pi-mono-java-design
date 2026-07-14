@@ -5,7 +5,7 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.8<br>
+> 版本：v2.9<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
@@ -89,6 +89,12 @@ plantuml -tsvg diagram.puml
 ```
 
 图源显式使用 PlantUML 内置 Smetana 布局，不依赖外部 Graphviz。SVG 是生成物，不得手工修改。本次使用 PlantUML `1.2026.6` 完成语法和 SVG 生成校验。
+
+PlantUML 图源中的所有可读内容必须使用英文，包括 `title`、元素名称、关系标签、分支/循环标签、`note` 和源码注释；技术标识必须使用 ASCII，图源不得包含任何非 ASCII 字符。Markdown 正文、章节标题和 SVG 图注可以继续使用中文。生成 SVG 前执行以下检查，命令必须无输出：
+
+```bash
+rg -n '[^\x00-\x7F]' diagram.puml
+```
 
 ---
 
@@ -1328,3 +1334,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.6 | 2026-07-14 | 统一 PlantUML 元素为 `participant`，为每个同步调用补齐成对的 `activate/deactivate` |
 | v2.7 | 2026-07-14 | 调整平台职责：Skills管理器负责查看、启停和执行 Skill，资源管理器统一负责数据库访问 |
 | v2.8 | 2026-07-14 | 将全部 Mermaid 和原内嵌 PlantUML 统一迁移到单一 `diagram.puml`，提交 SVG，并为每张图增加源码定位链接 |
+| v2.9 | 2026-07-14 | 规定 PlantUML 图源只使用英文，并将全部图表标题、元素、关系、控制标签、注释和源码注释整改为英文 |

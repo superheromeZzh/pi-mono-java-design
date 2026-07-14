@@ -7,10 +7,10 @@
 ' Design reason: bind metadata and execution, then share one registry/dispatcher across clients.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Built-in Command 目标执行链路
+title Built-in Command Target Execution Pipeline
 
 left to right direction
 rectangle "BuiltinCommandContributor" as A
@@ -21,7 +21,7 @@ rectangle "BuiltinCommandHandler" as E
 rectangle "Application Services" as F
 rectangle "CommandInteraction Port" as G
 rectangle "CommandExecutionResult" as H
-rectangle "InteractiveMode\n通用刷新" as I
+rectangle "InteractiveMode\nGeneric Refresh" as I
 
 A --> B
 B --> C
@@ -38,17 +38,17 @@ H --> I
 ' Design reason: preserve pi discovery inputs while publishing one catalog view.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title pi 命令补全链路
+title pi Command Completion Flow
 
 left to right direction
 rectangle "BUILTIN_SLASH_COMMANDS" as B
 rectangle "ExtensionRunner commands" as E
 rectangle "Prompt Templates" as P
 rectangle "Skills" as S
-rectangle "SlashCommand 补全项" as C
+rectangle "SlashCommand\nCompletion Items" as C
 rectangle "CombinedAutocompleteProvider" as A
 rectangle "TUI Editor" as T
 
@@ -66,11 +66,11 @@ A --> T
 ' Observed behavior: clone forks at the current leaf and replaces the active session.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
 hide footbox
-title pi /clone 执行链路
+title pi /clone Execution Flow
 
 actor User as U
 participant InteractiveMode as I
@@ -79,7 +79,7 @@ participant RuntimeHost as R
 participant TUI as T
 
 U -> I : /clone
-I -> I : 字符串分支命中
+I -> I : string branch matched
 I -> R : fork(currentLeaf, position=at)
 R --> I : replaced session
 I -> T : rebuild + status
@@ -90,10 +90,10 @@ I -> T : rebuild + status
 ' Design reason: expose registry execution, TUI bypasses, and post-command side effects as separate paths.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Java 当前 Built-in Command 架构
+title Current Java Built-in Command Architecture
 
 left to right direction
 rectangle "BuiltinCommandRegistrar" as R
@@ -115,13 +115,13 @@ I --> S
 ' Design reason: separate definition, dispatch, runtime workflow, interaction, and client adaptation.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Built-in Command 目标组件架构
+title Built-in Command Target Component Architecture
 
 top to bottom direction
-package "定义与安装" as Definition {
+package "Definition and Installation" as Definition {
   component "CoreBuiltinCommandContributor" as Core
   component "HostBuiltinCommandContributor" as Host
   component "BuiltinCommandInstaller" as Installer
@@ -129,7 +129,7 @@ package "定义与安装" as Definition {
   Host --> Installer
 }
 
-package "统一命令核心" as CommandCore {
+package "Unified Command Core" as CommandCore {
   component "SlashCommandRegistry\nSnapshot" as Registry
   component "SlashCommandParser" as Parser
   component "SlashCommandDispatcher" as Dispatcher
@@ -150,7 +150,7 @@ package "Built-in Runtime" as Runtime {
   Gate --> Handler
 }
 
-package "客户端与协议适配" as Clients {
+package "Client and Protocol Adapters" as Clients {
   component "InteractiveMode" as TUI
   component "App Command Client" as APP
   component "HelpCommand" as Help
@@ -171,10 +171,10 @@ Installer --> Registry
 ' Design reason: remove the pi TUI-to-workflow coupling and prevent reverse dependencies on UI or slash text.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title 目标依赖方向
+title Target Dependency Direction
 
 left to right direction
 component "mode/tui" as tui
@@ -183,16 +183,16 @@ component "command application API" as command
 component "session/model/auth/reload services" as session
 component "command/builtin" as builtin
 component "extension adapter" as extension
-component "具体 TUI Component" as tuiConcrete
-component "Slash 文本解析" as slashText
+component "Concrete TUI Component" as tuiConcrete
+component "Slash Text Parsing" as slashText
 
 tui --> command
 app --> command
 command --> session
 builtin --> command
 extension --> command
-command ..> tuiConcrete : 禁止依赖
-session ..> slashText : 禁止依赖
+command ..> tuiConcrete : forbidden dependency
+session ..> slashText : forbidden dependency
 @enduml
 
 @startuml 07-builtin-definition-class
@@ -201,11 +201,11 @@ session ..> slashText : 禁止依赖
 ' Design reason: bind pi metadata to a handler and normalize all sources behind an internal executor.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
 skinparam classAttributeIconSize 0
-title Built-in Command 定义与内部模型
+title Built-in Command Definition and Internal Model
 
 class BuiltinCommandDefinition <<record>> {
   + String name
@@ -295,11 +295,11 @@ BuiltinCommandHandler ..> CommandExecutionResult : returns
 ' Design reason: turn pi conflict diagnostics into fail-fast, all-or-nothing registry publication.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
 hide footbox
-title Built-in Command 原子安装
+title Atomic Built-in Command Installation
 
 participant Spring as S
 participant BuiltinCommandInstaller as I
@@ -310,13 +310,13 @@ S -> I : initialize
 I -> C : collect definitions
 C --> I : command lists
 I -> I : stable sort + validate all
-alt 全部合法
+alt all definitions valid
   I -> R : replaceOwnerCommands("builtin", definitions)
   R -> R : publish snapshot version + 1
-else 非法或冲突
+else invalid or conflicting
   I --> S : fail application startup
   note over R
-    不发布部分命令集合
+    No partial command catalog is published
   end note
 end
 @enduml
@@ -326,32 +326,32 @@ end
 ' Design reason: preserve built-in priority while routing built-in and extension commands through one dispatcher.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Slash Command 输入优先级
+title Slash Command Input Priority
 
 start
-if (以 ! 开头?) then (是)
+if (Starts with !?) then (yes)
   :Bash input mode;
   stop
-else (否)
-  if (Registry 命令?) then (是)
-    :Dispatcher 执行\nBuilt-in/Extension;
-    :结束，不进入 LLM;
+else (no)
+  if (Registry command?) then (yes)
+    :Dispatcher executes\nBuilt-in/Extension;
+    :Stop; do not send to LLM;
     stop
-  else (否)
-    if (Skill Command?) then (是)
+  else (no)
+    if (Skill Command?) then (yes)
       :Skill Processor;
       :Agent;
       stop
-    else (否)
-      if (Prompt Template?) then (是)
+    else (no)
+      if (Prompt Template?) then (yes)
         :Template Expansion;
         :Agent;
         stop
-      else (否)
-        :普通 Prompt;
+      else (no)
+        :Ordinary Prompt;
         :Agent;
         stop
       endif
@@ -365,11 +365,11 @@ endif
 ' Design reason: centralize policy checks, result mapping, concurrency, and client refresh semantics.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
 hide footbox
-title Slash Command Dispatch 时序
+title Slash Command Dispatch Sequence
 
 actor User as U
 participant InputRouter as I
@@ -387,12 +387,12 @@ I -> D : dispatch(invocation, context)
 D -> R : find(name)
 R --> D : RegisteredSlashCommand
 D -> G : check(policy, runtimeState)
-alt 可执行
+alt executable
   G -> H : execute async
   H --> D : CommandExecutionResult
   D --> C : HANDLED + refreshHints
-  C -> C : 通用应用 refreshHints
-else 状态不允许
+  C -> C : apply refreshHints generically
+else runtime state disallows execution
   G --> D : COMMAND_NOT_AVAILABLE
   D --> C : FAILED + userMessage
 end
@@ -404,18 +404,18 @@ end
 ' Design reason: reuse one fork service without erasing before/at product semantics.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Fork 与 Clone 工作流
+title Fork and Clone Workflow
 
 rectangle "/fork" as F
-rectangle "选择历史 User Message" as U
+rectangle "Select Historical User Message" as U
 rectangle "RuntimeHost.fork\nposition=before" as B
 rectangle "/clone" as C
-rectangle "读取当前 leaf" as L
+rectangle "Read Current Leaf" as L
 rectangle "RuntimeHost.fork\nposition=at" as A
-rectangle "原子替换 Runtime" as R
+rectangle "Atomically Replace Runtime" as R
 
 F --> U
 U --> B
@@ -430,11 +430,11 @@ A --> R
 ' Design reason: preserve reload scope and idle guard while adding atomic candidate publication.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
 hide footbox
-title Reload 两阶段发布
+title Reload Two-Phase Publication
 
 actor User as U
 participant ReloadCommand as C
@@ -446,14 +446,14 @@ U -> C : /reload
 C -> R : prepare(cancellation)
 R -> B : settings/keybindings/extensions/\nskills/prompts/themes/models
 B --> R : candidate snapshots + diagnostics
-alt 全部满足发布条件
+alt all publication conditions met
   R -> S : publish generation N+1
   S --> C : ReloadResult
   C --> U : loaded resources + diagnostics
 else fatal/cancelled
   R --> C : failure/cancelled
   note over S
-    generation N 保持有效
+    generation N remains active
   end note
 end
 @enduml
@@ -463,25 +463,25 @@ end
 ' Design reason: replace per-handler catch/print behavior with one safe dispatcher failure boundary.
 !theme plain
 !pragma layout smetana
-skinparam defaultFontName "PingFang SC"
+skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title Handler 失败边界
+title Handler Failure Boundary
 
 rectangle "Handler CompletionStage" as H
-rectangle "完成状态" as S
+rectangle "Completion State" as S
 rectangle "HANDLED" as R
 rectangle "HANDLED + CANCELLED" as C
-rectangle "FAILED + 稳定错误码" as K
+rectangle "FAILED + Stable Error Code" as K
 rectangle "FAILED + COMMAND_FAILED" as U
-rectangle "ERROR 日志含 correlationId" as L
-rectangle "用户只看安全摘要" as M
+rectangle "ERROR Log with correlationId" as L
+rectangle "User Sees Safe Summary" as M
 
 H --> S
-S --> R : 正常
-S --> C : 用户取消
-S --> K : 已知 CommandException
-S --> U : 未知 Throwable
+S --> R : normal
+S --> C : user cancelled
+S --> K : known CommandException
+S --> U : unknown Throwable
 U --> L
 U --> M
 @enduml

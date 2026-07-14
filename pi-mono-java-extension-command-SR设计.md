@@ -9,7 +9,7 @@
 | 适用项目 | `/Users/z/pi-mono-java` |
 | 状态 | Draft |
 | 日期 | 2026-07-13 |
-| 版本 | v1.16 |
+| 版本 | v1.17 |
 | 对齐基线 | pi TypeScript `ExtensionAPI.registerCommand()` |
 | pi 源码提交 | `bb959aae017eedc8edaa91d01d0475d483ea9371` |
 
@@ -53,6 +53,12 @@ plantuml -tsvg diagram.puml
 ```
 
 图源显式使用 PlantUML 内置 Smetana 布局，不依赖外部 Graphviz。SVG 是生成物，不得手工修改。本次使用 PlantUML `1.2026.6` 完成语法和 SVG 生成校验。
+
+PlantUML 图源中的所有可读内容必须使用英文，包括 `title`、元素名称、关系标签、分支/循环标签、`note` 和源码注释；技术标识必须使用 ASCII，图源不得包含任何非 ASCII 字符。Markdown 正文、章节标题和 SVG 图注可以继续使用中文。生成 SVG 前执行以下检查，命令必须无输出：
+
+```bash
+rg -n '[^\x00-\x7F]' diagram.puml
+```
 
 ---
 
