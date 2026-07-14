@@ -5,12 +5,12 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.22<br>
+> 版本：v2.23<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > Java GUI 源码提交：`b99871a0321b73606a8f074c42050f28f52fdfca`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
-> 关联设计：[`pi-mono-java Command SR 设计 v1.11`](./pi-mono-java-command-SR设计.md)
+> 关联设计：[`pi-mono-java Command SR 设计 v1.12`](./pi-mono-java-command-SR设计.md)
 
 ---
 
@@ -393,7 +393,7 @@ PlantUML：[查看源码](./diagrams/skill-command/diagram.puml#L121)
 | `DefaultResourceLoader` | 解析来源、加载资源、保存当前 Skill 结果 |
 | `SkillLoader` | 读取 frontmatter、校验、去重和冲突处理 |
 | `SkillLoadResult` | 不可变保存有序 Skill 和诊断 |
-| `GuiCommandCompletionAdapter` | 把 GUI 的文本前缀和 Command Palette 查询交给补全服务 |
+| `Agent UI` | 将聊天文本前缀和 Command Palette 查询交给补全服务，并展示候选项 |
 | `CommandCompletionService` | 合并注册命令和 Skill 补全并执行 fuzzy filter |
 | `SkillCommandExpander` | 按 pi 规则查找、读取并展开 Skill |
 | `AgentSession` | 统一 Prompt、Steer、Follow-up 的展开顺序 |
@@ -887,9 +887,11 @@ com.campusclaw.codingagent.command
   CommandCompletionService
   CommandSuggestion
 
-com.campusclaw.codingagent.presentation.gui
-  GuiCommandCompletionAdapter
+frontend
+  Agent UI
 ```
+
+`Agent UI` 是产品前端组件，不是 Java 命令域中的 Adapter 类。
 
 ### 11.3 移除和保留
 
@@ -973,7 +975,7 @@ public interface SkillExpansionErrorListener {
 }
 ```
 
-GUI Adapter 把安全错误摘要显示为通知或系统消息，完整异常进入受控日志；错误展示不得改变返回原文本的兼容语义。
+Agent UI 把安全错误摘要显示为通知或系统消息，完整异常进入受控日志；错误展示不得改变返回原文本的兼容语义。
 
 ### 13.3 发现诊断
 
@@ -1361,3 +1363,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.20 | 2026-07-14 | 将 Java 目标交互面收敛为 GUI，保留 pi TUI 为源码事实，补充 Java Vue 前端差距，移除目标 TUI/CLI extension 并改为 GUI 动态补全 |
 | v2.21 | 2026-07-14 | 移除 Java 目标的 Prompt Command 补全与展开，将路由收敛为注册 Command、Skill Command 和普通 Prompt |
 | v2.22 | 2026-07-14 | 将仍包含 Prompt Template 的第 2.6 节明确标记为 pi 源码事实且非 Java 目标路由，消除与第 10.1 节的语义混淆 |
+| v2.23 | 2026-07-14 | 将 `GuiCommandCompletionAdapter` 统一改为产品组件 `Agent UI`，删除容易被理解为独立 Java 适配层的命名 |

@@ -20,7 +20,7 @@ rectangle "pi Execution\nInteractiveMode branches" as Execution
 rectangle "pi Runtime Rules\nworkflow control flow" as RuntimeRules
 rectangle "Java CommandDefinition" as Definition
 rectangle "Registry + Dispatcher\n+ ExecutionGate" as Core
-rectangle "Java GUI Adapter" as Clients
+rectangle "Java Agent UI" as Clients
 
 Metadata --> Definition
 Completion --> Definition
@@ -100,8 +100,8 @@ package "Command Implementation" {
   Gate --> Handler
 }
 
-package "GUI Presentation" {
-  component "GUI Adapter" as GUI
+package "Presentation" {
+  component "Agent UI" as GUI
   component "Chat Input" as ChatInput
   component "Command Palette\nand Buttons" as Actions
   component "Help View" as Help
@@ -311,7 +311,7 @@ autonumber
 title Unified Command Dispatch Sequence
 
 actor User
-participant "GUI Adapter" as Client
+participant "Agent UI" as Client
 participant CommandParser as Parser
 participant CommandDispatcher as Dispatcher
 participant "Catalog Snapshot" as Catalog
@@ -413,10 +413,10 @@ VersionCheck --> Palette : latest request results
 skinparam defaultFontName "SansSerif"
 skinparam shadowing false
 skinparam backgroundColor transparent
-title GUI Command Adaptation
+title Agent UI Command Interaction
 
 left to right direction
-component "GUI Adapter" as GUI
+component "Agent UI" as GUI
 component CommandDispatcher as Dispatcher
 component CommandHandler as Handler
 component CommandInteraction as Interaction

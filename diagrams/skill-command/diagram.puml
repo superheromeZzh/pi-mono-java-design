@@ -136,7 +136,7 @@ rectangle "Package and Settings Resolver" as PM
 rectangle DefaultResourceLoader as RL
 rectangle SkillLoader as LS
 rectangle "Immutable SkillLoadResult" as LR
-rectangle GuiCommandCompletionAdapter as GUI
+rectangle "Agent UI" as GUI
 rectangle CommandCompletionService as CS
 rectangle AgentSession as AS
 rectangle SkillCommandExpander as SE
@@ -350,9 +350,7 @@ class SkillCommandExpander {
 class CommandCompletionService {
   + getSuggestions(prefix): List
 }
-class GuiCommandCompletionAdapter {
-  + getSuggestions(prefix): List
-}
+class "Agent UI" as AgentUI <<frontend component>>
 class AgentSession {
   - expandUserInput(text): String
 }
@@ -362,5 +360,5 @@ DefaultResourceLoader --> SkillLoader
 AgentSession --> ResourceLoader
 AgentSession --> SkillCommandExpander
 CommandCompletionService --> ResourceLoader
-GuiCommandCompletionAdapter --> CommandCompletionService
+AgentUI --> CommandCompletionService
 @enduml
