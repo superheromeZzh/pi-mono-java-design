@@ -1,7 +1,7 @@
 # pi-mono Java Command SR 设计
 
 > 文档编号：SR-CMD-001<br>
-> 版本：v1.6<br>
+> 版本：v1.7<br>
 > 日期：2026-07-14<br>
 > 状态：设计基线<br>
 > pi 源码基线：[`bb959aae017eedc8edaa91d01d0475d483ea9371`](https://github.com/badlogic/pi-mono/tree/bb959aae017eedc8edaa91d01d0475d483ea9371)
@@ -324,11 +324,37 @@ public record CommandInvocation(
 }
 ```
 
-- Parser 从首个 token 提取命令名，并把剩余文本交给对应 Handler 解释；
-- `rawInput` 为审计和兼容诊断保留原始输入，日志记录使用脱敏副本；
-- `arguments` 保留命令名之后的原始内容，并去除命令名后的首段空白；
-- 空输入和单独 `/` 返回 `NOT_A_COMMAND`，非法命令名返回稳定解析错误；
-- 未注册 `/x` 返回 `UNRESOLVED_SLASH_INPUT`，输入路由器随后检查 Skill 和 Prompt Template。
+`CommandDefinition` 描述一个启动期固定的命令，`CommandInvocation` 描述用户本次如何调用该命令。每次提交命令都会创建一个新的 Invocation。
+
+| 字段 | 具体含义 | 示例值 | 主要消费者 |
+|---|---|---|---|
+| `rawInput` | 去除整段输入首尾空白后的完整命令文本，包含开头的 `/`；“raw”表示尚未拆分为名称和参数，不表示保留传输层的每一个字符 | `/model claude-sonnet-4` | 审计、脱敏诊断和兼容处理 |
+| `name` | 不带 `/` 的规范命令名；Parser 只校验，不自动转换大小写 | `model` | Registry 查询、execution policy、指标和审计 |
+| `arguments` | 命令名和分隔空白之后的参数文本；空参数使用 `""`，不使用 `null` | `claude-sonnet-4` | 对应 `CommandHandler` |
+
+统一 Parser 按以下顺序构造 Invocation：
+
+1. 去除整段输入的首尾空白，结果为空或仅为 `/` 时返回 `NOT_A_COMMAND`；
+2. 确认输入以 `/` 开头，并把 `/` 后紧接的连续非空白字符作为 `name`；`/` 与名称之间不能出现空白；
+3. 使用 `CommandDefinition` 相同的名称规则校验 `name`，非法名称返回 `COMMAND_INVALID_ARGUMENT`；
+4. 跳过名称后的连续分隔空白，把剩余内容原样放入 `arguments`；
+5. 参数内部的空格、换行、引号和反斜杠保持原样，Parser 不负责拆词、去除引号或转义；
+6. 语法有效但未注册的 `/x` 返回 `UNRESOLVED_SLASH_INPUT`，输入路由器随后检查 Skill 和 Prompt Template。
+
+解析示例：
+
+| 用户输入 | `rawInput` | `name` | `arguments` |
+|---|---|---|---|
+| ` /session ` | `/session` | `session` | `""` |
+| `/model   claude-sonnet-4` | `/model   claude-sonnet-4` | `model` | `claude-sonnet-4` |
+| `/name "Sprint 42"` | `/name "Sprint 42"` | `name` | `"Sprint 42"` |
+| `/compact summarize only decisions` | `/compact summarize only decisions` | `compact` | `summarize only decisions` |
+
+Handler 通常只读取 `arguments`；命令名已经由 Dispatcher 完成目录查询，Handler 无需再次从 `rawInput` 截取名称。`rawInput` 可能包含路径、查询词或其他敏感参数，因此日志只能记录经过脱敏的副本。
+
+pi 没有 `CommandInvocation` 类型。pi TUI 在 [`setupEditorSubmitHandler()`](https://github.com/badlogic/pi-mono/blob/bb959aae017eedc8edaa91d01d0475d483ea9371/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L2541-L2568) 开始时对整段输入执行 `trim()`；Built-in 随后按各自分支接收完整文本或自行切片。Extension Command 在 [`AgentSession._tryExecuteExtensionCommand()`](https://github.com/badlogic/pi-mono/blob/bb959aae017eedc8edaa91d01d0475d483ea9371/packages/coding-agent/src/core/agent-session.ts#L1140-L1155) 中按第一个 ASCII 空格拆分名称和参数。
+
+Java 的统一 Invocation 属于架构改造：Parser 接受连续空白作为名称与参数的分隔符，并只执行一次结构拆分；具体参数语法仍由 Handler 决定。这样 TUI 与 App 获得相同解析结果，也避免 pi 中各命令分别切片产生不一致。
 
 ## 8. 统一分发
 
@@ -863,3 +889,4 @@ rg -n '[^\x00-\x7F]' diagram.puml
 | v1.4 | 2026-07-14 | 拆分 Agent 状态准入与命令并发准入，明确 `IMMEDIATE` 在获得执行权后才启动 Handler，并统一超时计时起点 |
 | v1.5 | 2026-07-14 | 将执行模式、路由、取消、超时和客户端行为统一改为简洁的用户可观察表述，并把框架实现细节放在行为说明之后 |
 | v1.6 | 2026-07-14 | 解释 `SHARED` 与 `EXCLUSIVE` 的并发语义、兼容矩阵、等待公平性及其与 execution mode 的职责边界，并标注为 Java 架构改造 |
+| v1.7 | 2026-07-14 | 解释 `CommandInvocation` 三个字段的取值时点、解析规则、示例、安全边界及其与 pi 分散参数切片行为的关系 |
