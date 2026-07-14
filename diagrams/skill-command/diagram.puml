@@ -173,7 +173,7 @@ T --> U : new skill suggestions
 
 @startuml 07-routing
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
-' Design reason: preserve extension-command priority, then expand Skill before Prompt Template for prompt, steer, and follow-up.
+' Design reason: preserve registered-command priority, then expand Skill before Prompt Template for prompt, steer, and follow-up.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -183,7 +183,7 @@ title Skill Command Routing Priority
 
 start
 :User Input;
-if (Builtin or Extension Command?) then (matched)
+if (Registered Command?) then (matched)
   :Execute Handler;
   stop
 else (not matched)
@@ -310,7 +310,7 @@ deactivate Client
 @startuml 09-class-relationships
 ' pi source: packages/coding-agent/src/core/resource-loader.ts:603-624
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
-' Design reason: express the Java implementation boundary without registering Skill handlers in SlashCommandRegistry.
+' Design reason: express the Java implementation boundary without installing Skill handlers in the static CommandRegistry.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"

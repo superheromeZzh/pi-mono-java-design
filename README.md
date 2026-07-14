@@ -4,9 +4,8 @@
 
 ## 文档
 
-- [Extension Command SR 设计](./pi-mono-java-extension-command-SR设计.md)
+- [Command SR 设计](./pi-mono-java-command-SR设计.md)
 - [Skill Command SR 设计](./pi-mono-java-skill-command-SR设计.md)
-- [Built-in Command SR 设计](./pi-mono-java-builtin-command-SR设计.md)
 
 ## 约定
 
@@ -17,6 +16,6 @@
 - 每组 PlantUML 图统一使用 `diagram.puml`，在图源目录执行 `plantuml -tsvg diagram.puml`；SVG 不得手工修改。
 - PlantUML 图源中的标题、元素名称、关系标签、分支/循环标签、注释和源码注释必须只使用英文，技术标识必须使用 ASCII；图源不得包含任何非 ASCII 字符。Markdown 正文和图注可以使用中文。
 - 文档变更通过版本号记录。
-- 每项源自 pi 的设计必须给出仓库相对源码路径、符号或行号，并说明从源码观察到的行为。
+- 每项源自 pi 的设计必须给出指向固定 commit 的可点击源码链接，并标明仓库相对路径、符号或行号，说明从源码观察到的行为。
 - 文档信息必须记录分析时使用的 pi commit；行号只对该基线负责。
 - Java 目标设计必须同时说明设计原因；与 pi 不一致时必须明确标注为产品约束、安全强化或架构改造，不得写成 pi 原生行为。

@@ -5,11 +5,11 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.9<br>
+> 版本：v2.10<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
-> 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
+> 关联设计：[`pi-mono-java Command SR 设计 v1.0`](./pi-mono-java-command-SR设计.md)
 
 ---
 
@@ -390,9 +390,8 @@ PlantUML：[查看源码](./diagrams/skill-command/diagram.puml#L114)
 ### 5.3 关键边界
 
 ```text
-SlashCommandRegistry
-  - Builtin Command
-  - Extension Command
+CommandRegistry
+  - Registered internal Command
 
 ResourceLoader
   - Skill[]
@@ -407,7 +406,7 @@ AgentSession
   - Prompt Template expansion
 ```
 
-Skill 不进入 `SlashCommandRegistry`，但可以使用普通 Java record 作为补全 DTO。
+Skill 不进入静态 `CommandRegistry`，但可以使用普通 Java record 作为补全 DTO。
 
 ---
 
@@ -618,7 +617,7 @@ private List<CommandSuggestion> buildSkillCommands() {
 }
 ```
 
-不新增每个 Skill 对应的 Handler，也不调用 `SlashCommandRegistry.register()`。
+不新增每个 Skill 对应的 Handler，也不调用 `CommandRegistry` 的启动安装流程。
 
 ### 8.2 合并顺序
 
@@ -716,7 +715,7 @@ PlantUML：[查看源码](./diagrams/skill-command/diagram.puml#L174)
 
 执行优先级必须是：
 
-1. Builtin 或 Extension Command。
+1. 已注册的内部 Command。
 2. Skill Command 展开。
 3. Prompt Template 展开。
 4. 普通 Prompt。
@@ -842,7 +841,7 @@ public void followUp(String text) {
 }
 ```
 
-Extension Command 在进入该辅助方法之前处理；Steer 和 Follow-up 遇到 Extension Command 时保持 pi 的拒绝语义。
+已注册 Command 在进入该辅助方法之前由统一 Dispatcher 处理；Steer 和 Follow-up 不进入注册命令执行路径，保持 pi 对 Extension Command 的拒绝语义。
 
 ---
 
@@ -1093,7 +1092,7 @@ pi 的 Skill Command 直接读取本地文件，因此以下策略不属于 PI-P
 - fuzzy prefix、分散字符和大小写场景。
 - 多 token 和字母数字顺序交换场景。
 - 输入出现空格后不做 Skill 参数补全。
-- Skill 不进入 `SlashCommandRegistry`。
+- Skill 不进入静态 `CommandRegistry`。
 
 ### 17.3 展开测试
 
@@ -1114,12 +1113,12 @@ pi 的 Skill Command 直接读取本地文件，因此以下策略不属于 PI-P
 
 `AgentSessionTest`：
 
-- Extension Command 先执行。
+- 已注册 Command 先执行。
 - Skill 先于 Prompt Template。
 - Prompt 展开 Skill。
 - Steer 展开 Skill。
 - Follow-up 展开 Skill。
-- Steer 和 Follow-up 拒绝 Extension Command。
+- Steer 和 Follow-up 不执行已注册 Command。
 
 ### 17.5 Reload 集成测试
 
@@ -1222,7 +1221,7 @@ Skill frontmatter
 
 因此“没有 `getArgumentCompletions`”同时由两个边界决定：
 
-1. Skill 是声明式 Markdown 资源，不是可执行 Extension Command，不能提供回调函数。
+1. Skill 是声明式 Markdown 资源，不是可执行 `CommandHandler`，不能提供回调函数。
 2. Skill frontmatter 没有声明式参数 Schema，TUI 不知道应该补全什么。
 
 Java 本期不通过启发式规则补全参数。只有同时满足以下条件，才能在后续 SR 重新评估：
@@ -1309,7 +1308,7 @@ Resource Resolver
   -> fuzzy autocomplete
 
 User /skill:name
-  -> Extension command check
+  -> Registered command check
   -> SkillCommandExpander
   -> Prompt Template expansion
   -> Agent
@@ -1335,3 +1334,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.7 | 2026-07-14 | 调整平台职责：Skills管理器负责查看、启停和执行 Skill，资源管理器统一负责数据库访问 |
 | v2.8 | 2026-07-14 | 将全部 Mermaid 和原内嵌 PlantUML 统一迁移到单一 `diagram.puml`，提交 SVG，并为每张图增加源码定位链接 |
 | v2.9 | 2026-07-14 | 规定 PlantUML 图源只使用英文，并将全部图表标题、元素、关系、控制标签、注释和源码注释整改为英文 |
+| v2.10 | 2026-07-14 | 对齐统一 Java Command SR：Built-in 与 Extension 统一为静态注册 Command，Skill 保持动态 Prompt 投影 |
