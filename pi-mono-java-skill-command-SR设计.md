@@ -5,12 +5,12 @@
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
 > 日期：2026-07-14  
-> 版本：v2.23<br>
+> 版本：v2.24<br>
 > 规范基线：pi TypeScript 当前实现  
 > pi 源码提交：`bb959aae017eedc8edaa91d01d0475d483ea9371`<br>
 > Java GUI 源码提交：`b99871a0321b73606a8f074c42050f28f52fdfca`<br>
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
-> 关联设计：[`pi-mono-java Command SR 设计 v1.12`](./pi-mono-java-command-SR设计.md)
+> 关联设计：[`pi-mono-java Command SR 设计 v1.13`](./pi-mono-java-command-SR设计.md)
 
 ---
 
@@ -1364,3 +1364,4 @@ Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不
 | v2.21 | 2026-07-14 | 移除 Java 目标的 Prompt Command 补全与展开，将路由收敛为注册 Command、Skill Command 和普通 Prompt |
 | v2.22 | 2026-07-14 | 将仍包含 Prompt Template 的第 2.6 节明确标记为 pi 源码事实且非 Java 目标路由，消除与第 10.1 节的语义混淆 |
 | v2.23 | 2026-07-14 | 将 `GuiCommandCompletionAdapter` 统一改为产品组件 `Agent UI`，删除容易被理解为独立 Java 适配层的命名 |
+| v2.24 | 2026-07-14 | 同步关联 Command SR v1.13 的 SR 级命令分发顺序图 |

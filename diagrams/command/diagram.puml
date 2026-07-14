@@ -297,10 +297,9 @@ endif
 @enduml
 
 @startuml 07-dispatch-sequence
-' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:2541-2674
-' pi source: packages/coding-agent/src/core/agent-session.ts:1641-1645
-' Java source: frontend/src/App.vue:142-180
-' Design reason: centralize parsing, runtime admission, cancellation, failures, and refresh semantics for the Java GUI.
+' pi source: packages/coding-agent/src/modes/interactive/interactive-mode.ts:2541-2674; Java source: frontend/src/App.vue:142-180
+' Java target-only design: Agent Gateway and Agent Runtime are product architecture boundaries, not existing pi components.
+' Design reason: show SR-level command dispatch while keeping parser, catalog, gate, and handler details in LLD.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -308,35 +307,36 @@ skinparam shadowing false
 skinparam backgroundColor transparent
 hide footbox
 autonumber
-title Unified Command Dispatch Sequence
-
-actor User
-participant "Agent UI" as Client
-participant CommandParser as Parser
-participant CommandDispatcher as Dispatcher
-participant "Catalog Snapshot" as Catalog
-participant CommandExecutionGate as Gate
-participant CommandHandler as Handler
-
-User -> Client : submit /reload
-Client -> Parser : parse(rawInput)
-Parser --> Client : CommandInvocation
-Client -> Dispatcher : dispatch(invocation, context)
-Dispatcher -> Catalog : find(name)
-Catalog --> Dispatcher : CommandDefinition
-Dispatcher -> Gate : acquire(policy, runtimeState)
-alt execution admitted
-  Gate -> Handler : handle(invocation, context)
-  Handler --> Dispatcher : CommandExecutionResult
-  Dispatcher --> Client : HANDLED + refreshHints
-  Client -> Client : apply refresh hints
-else runtime state rejects execution
-  Gate --> Dispatcher : policy error code
-  Dispatcher --> Client : FAILED + sanitized message
-else handler fails
-  Handler --> Dispatcher : exceptional completion
-  Dispatcher --> Client : FAILED + correlationId
+title Registered Command Dispatch
+participant User
+participant "Agent UI" as UI
+participant "Agent Gateway" as Gateway
+participant "Agent Runtime" as Runtime
+participant "Model Manager" as Models
+activate User
+User -> UI : Submit command
+activate UI
+UI -> Gateway : Command request
+activate Gateway
+Gateway -> Runtime : Dispatch with identity and session context
+activate Runtime
+alt Command accepted
+  opt Model-related command
+    Runtime -> Models : Apply model operation
+    activate Models
+    Models --> Runtime : Model operation result
+    deactivate Models
+  end
+  Runtime --> Gateway : Command result
+else Command rejected
+  Runtime --> Gateway : Rejection result
 end
+deactivate Runtime
+Gateway --> UI : Command response
+deactivate Gateway
+UI --> User : Display result
+deactivate UI
+deactivate User
 @enduml
 
 @startuml 08-execution-modes
