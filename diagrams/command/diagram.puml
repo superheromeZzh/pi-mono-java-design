@@ -267,7 +267,7 @@ end
 ' Java source: frontend/src/types/ws.ts:96-108
 ' Observed behavior: pi TUI parses Bash prefixes while pi RPC accepts a structured Bash request.
 ' Java product divergence: the GUI-only target has no Shell capability and does not parse Bash prefixes.
-' Design reason: route GUI text through registered commands, Skills, templates, and ordinary prompts only.
+' Design reason: route GUI text through registered commands, Skills, and ordinary prompts only.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -285,11 +285,11 @@ else (no)
   if (Skill Command?) then (yes)
     :Expand Skill;
   else (no)
-    if (Prompt Template?) then (yes)
-      :Expand Template;
-    else (no)
-      :Ordinary Prompt;
-    endif
+    :Ordinary Prompt;
+    ' Prompt Commands are intentionally unsupported.
+    ' Unknown slash text remains ordinary prompt input.
+    ' Future prompt assets use structured GUI actions.
+    ' They do not participate in this text router.
   endif
   :Agent;
   stop

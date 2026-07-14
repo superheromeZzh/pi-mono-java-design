@@ -1,7 +1,7 @@
 # pi-mono Java Command SR 设计
 
 > 文档编号：SR-CMD-001<br>
-> 版本：v1.10<br>
+> 版本：v1.11<br>
 > 日期：2026-07-14<br>
 > 状态：设计基线<br>
 > pi 源码基线：[`bb959aae017eedc8edaa91d01d0475d483ea9371`](https://github.com/badlogic/pi-mono/tree/bb959aae017eedc8edaa91d01d0475d483ea9371)
@@ -37,7 +37,7 @@ Java 版本使用一个静态注册的 `CommandDefinition` 表达原 Built-in Co
 - 新命令开发方式、错误模型、测试和迁移；
 - Skill Command 与注册命令的边界。
 
-具体业务服务实现、LLM Prompt Template 展开规则和 Skill 文件发现规则分别由对应模块设计。
+具体业务服务实现和 Skill 文件发现规则分别由对应模块设计。Java 目标不支持 Prompt Command，因此本 SR 不定义 Prompt Template 的文本路由或展开管线。
 
 ### 2.2 已确认的 Java 产品约束
 
@@ -335,10 +335,11 @@ pi 在普通 prompt 之前处理 Built-in；Bash、压缩和 streaming 又有特
 
 1. `/name ...` 且 `name` 在静态目录中：注册命令；
 2. `/skill:name ...`：Skill Command 动态投影；
-3. Prompt Template；
-4. 普通 Agent Prompt。
+3. 普通 Agent Prompt。
 
 这里的“优先级”是输入分类顺序，不是任务调度优先级。输入路由器从上到下判断，同一段输入命中一条路径后立即停止，不再进入后续路径。
+
+Java 目标明确不支持 Prompt Command：`/prompt:<name>` 不触发 Prompt Template 查询或展开，在未命中注册命令和 Skill Command 时作为普通 Prompt 发送给 Agent。这是 Java GUI ToB 产品约束和架构变更，不是 pi 已观察行为。如果未来建设数据库型 Prompt Library，应通过结构化 GUI Action 和独立服务调用，不重新加入聊天文本路由。
 
 GUI Command Palette 和按钮不需要先拼接成文本；GUI Adapter 可以直接构造 `CommandInvocation`，但仍必须经过同一个 Dispatcher 和 ExecutionGate。聊天输入框使用上述文本路由。
 
@@ -370,7 +371,7 @@ Java GUI 当前 [`ClientCommand`](https://github.com/superheromeZzh/pi-mono-java
 
 如果未来产品要求 GUI Shell，应单独设计结构化 `BashRequest`、授权、Sandbox、审计、取消和上下文策略，不应把 TUI 前缀加入 GUI 文本路由，也不应把 Bash 注册为 `CommandDefinition`。
 
-输入匹配到注册命令后，系统执行命令并把结果返回 GUI，本次输入不会再发送给 LLM。Skill、Template 和普通 Prompt 路径产生的消息进入 Agent Prompt 流程。
+输入匹配到注册命令后，系统执行命令并把结果返回 GUI，本次输入不会再发送给 LLM。Skill 展开后的消息和普通 Prompt 进入 Agent Prompt 流程。
 
 ### 7.2 Parser 规则
 
@@ -397,7 +398,7 @@ public record CommandInvocation(
 3. 使用 `CommandDefinition` 相同的名称规则校验 `name`，非法名称返回 `COMMAND_INVALID_ARGUMENT`；
 4. 跳过名称后的连续分隔空白，把剩余内容原样放入 `arguments`；
 5. 参数内部的空格、换行、引号和反斜杠保持原样，Parser 不负责拆词、去除引号或转义；
-6. 语法有效但未注册的 `/x` 返回 `UNRESOLVED_SLASH_INPUT`，输入路由器随后检查 Skill 和 Prompt Template。
+6. 语法有效但未注册的 `/x` 返回 `UNRESOLVED_SLASH_INPUT`，输入路由器随后检查 Skill；未命中 Skill 时按普通 Prompt 处理。
 
 解析示例：
 
@@ -952,3 +953,4 @@ rg -n '[^\x00-\x7F]' diagram.puml
 | v1.8 | 2026-07-14 | 解释路由优先级是输入分类顺序，补充 `!` 与 `!!` 的执行、会话记录、LLM 上下文和 streaming 行为 |
 | v1.9 | 2026-07-14 | 区分 TUI 的 `!`/`!!` 输入语法与跨客户端 Bash 执行能力，补充 pi RPC 结构化 Bash 请求及 Java App 的产品边界 |
 | v1.10 | 2026-07-14 | 将 Java 产品目标收敛为单一 GUI，补充 pi 无第一方 GUI 和 Java Vue 前端源码证据，移除目标 TUI Adapter 及 `!`/`!!` Bash 路由 |
+| v1.11 | 2026-07-14 | 移除 Java 目标中的 Prompt Command 路由，将输入优先级收敛为注册 Command、Skill Command 和普通 Prompt |

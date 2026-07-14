@@ -186,7 +186,7 @@ T --> U : new skill suggestions
 
 @startuml 07-routing
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
-' Design reason: preserve registered-command priority, then expand Skill before Prompt Template for prompt, steer, and follow-up.
+' Design reason: preserve registered-command priority, then expand Skill before ordinary prompt handling.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -203,11 +203,11 @@ else (not matched)
   if (Skill Command?) then (matched)
     :Expand Skill;
   else (not matched)
-    if (Prompt Template?) then (matched)
-      :Expand Template;
-    else (not matched)
-      :Ordinary Prompt;
-    endif
+    :Ordinary Prompt;
+    ' Prompt Commands are intentionally unsupported.
+    ' Unknown slash text remains ordinary prompt input.
+    ' Future prompt assets use structured GUI actions.
+    ' They do not participate in this text router.
   endif
   :Agent;
   stop
