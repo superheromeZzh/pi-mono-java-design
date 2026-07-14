@@ -77,7 +77,7 @@ participant ResourceLoader as R
 participant SKILL.md as F
 participant Agent as A
 
-U -> S : /skill:review-pr 123
+U -> S : /skill:skill-creator demo-skill
 S -> R : getSkills and find name
 R --> S : Skill metadata
 S -> F : read UTF-8 content
@@ -124,7 +124,8 @@ G --> H
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
 ' Java source: frontend/src/App.vue:112-180
 ' Java product constraint: GUI is the only target presentation surface.
-' Design reason: preserve pi behavior while using immutable Java results, GUI completion, and one AgentSession expansion path.
+' Java target-only architecture change: Agent Runtime parses commands and Skills Manager executes structured Skill invocations.
+' Design reason: preserve pi behavior while separating command routing from Skill execution ownership.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -138,8 +139,9 @@ rectangle SkillLoader as LS
 rectangle "Immutable SkillLoadResult" as LR
 rectangle "Agent UI" as GUI
 rectangle CommandCompletionService as CS
-rectangle AgentSession as AS
-rectangle SkillCommandExpander as SE
+rectangle "Agent Runtime" as AR
+rectangle SkillInvocation as SI
+rectangle "Skills Manager" as SM
 rectangle Agent as AG
 
 PM --> RL
@@ -148,9 +150,12 @@ LS --> LR
 LR --> CS
 GUI --> CS : query
 CS --> GUI : suggestions
-LR --> AS
-AS --> SE
-SE --> AG
+GUI --> AR : submit
+AR ..> SI : creates
+AR --> SM : execute
+LR --> SM
+SM --> AR : effectiveText
+AR --> AG
 @enduml
 
 @startuml 06-reload
@@ -168,10 +173,10 @@ hide footbox
 title Skill Command Reload
 
 actor User as U
-participant AgentSession as S
+participant "Agent Runtime" as S
 participant ResourceLoader as R
 participant SkillLoader as L
-participant "GUI Completion Adapter" as T
+participant "Agent UI" as T
 
 U -> T : Invoke /reload
 T -> S : dispatch /reload
@@ -216,9 +221,10 @@ endif
 
 @startuml 08-end-to-end-invocation
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1003-1028,1173-1237
-' Java platform mapping: SkillsManager owns skill-domain behavior; ResourceManager is the only database access boundary.
-' Java product constraint: the client and interaction UI are GUI components.
-' Design reason: retain pi parsing, free-text args, envelope, and fail-open behavior across the Java platform components.
+' Observed behavior: pi parses the raw /skill: command before reading and expanding the selected Skill.
+' Java target-only architecture change: Agent Runtime owns raw command parsing and passes a structured SkillInvocation.
+' Java platform mapping: Skills Manager owns Skill execution; its internal sequence is documented separately.
+' Design reason: separate Skill command orchestration from Skill execution and model invocation details.
 !theme plain
 !pragma layout smetana
 skinparam defaultFontName "SansSerif"
@@ -227,104 +233,49 @@ skinparam backgroundColor transparent
 skinparam BoxPadding 4
 hide footbox
 autonumber
-title Skill Command End-to-End Invocation Sequence
+title Skill Command Invocation Orchestration
 
-participant "GUI Client" as Client
-participant "Agent Interaction\nGUI" as UI
-participant "Agent\nGW" as Gateway
-participant "Agent\nRuntime" as Runtime
-participant "Skills\nManager" as SkillsManager
-participant "Resource\nManager" as ResourceManager
-participant "Database" as Database
-participant "Model\nManager" as ModelManager
-participant "Tools\nManager" as ToolsManager
+participant User
+participant "Agent UI" as UI
+participant "Agent Gateway" as Gateway
+participant "Agent Runtime" as Runtime
+participant "Skills Manager" as SkillsManager
+participant "Model Manager" as ModelManager
 
-activate Client
-Client -> UI: Submit /skill:review-pr 123
+User -> UI: Submit /skill:skill-creator demo-skill
 activate UI
-UI -> Gateway: Submit Prompt
+UI -> Gateway: submitPrompt(text)
 activate Gateway
-Gateway -> ResourceManager: Load Agent configuration and session resources
-activate ResourceManager
-ResourceManager -> Database: Query resource data
-activate Database
-Database --> ResourceManager: Agent configuration and session
-deactivate Database
-ResourceManager --> Gateway: Configuration and context
-deactivate ResourceManager
 Gateway -> Runtime: prompt(context, text)
 activate Runtime
 
-Runtime -> SkillsManager: execute(text)
+Runtime -> Runtime: Parse Skill command\nname = skill-creator\narguments = demo-skill
+Runtime -> SkillsManager: execute(SkillInvocation)
 activate SkillsManager
-SkillsManager -> SkillsManager: Parse name and arguments\nBuild resource query
-SkillsManager -> ResourceManager: Read Skill resource
-activate ResourceManager
-ResourceManager -> Database: Query Skill by name
-activate Database
-Database --> ResourceManager: Skill data / not found
-deactivate Database
-ResourceManager --> SkillsManager: SkillResource / not found / error
-deactivate ResourceManager
-SkillsManager -> SkillsManager: Check Skill enabled state
-
-alt Skill missing, disabled, or read failed
-  SkillsManager --> Runtime: Return original text (fail-open)
-else Skill enabled
-  SkillsManager -> SkillsManager: Strip frontmatter\nBuild <skill> block\nAppend free-text args
-  SkillsManager --> Runtime: expandedText
-end
+ref over SkillsManager
+  Skill execution sequence
+end ref
+SkillsManager --> Runtime: effectiveText
 deactivate SkillsManager
 
-par Prepare Model
-  Runtime -> ModelManager: resolve(modelId)
-  activate ModelManager
-  ModelManager --> Runtime: Model
-  deactivate ModelManager
-else Prepare Tools
-  Runtime -> ToolsManager: Get Tool definitions
-  activate ToolsManager
-  ToolsManager --> Runtime: definitions
-  deactivate ToolsManager
-end
-
-Runtime -> ModelManager: invoke(expandedText, tools)
+Runtime -> ModelManager: invoke(effectiveText, context)
 activate ModelManager
-ModelManager --> Runtime: response / tool calls
+ModelManager --> Runtime: modelResponse
 deactivate ModelManager
 
-loop Model returns Tool Call
-  Runtime -> ToolsManager: execute(toolCall)
-  activate ToolsManager
-  ToolsManager --> Runtime: Tool result
-  deactivate ToolsManager
-  Runtime -> ModelManager: continue(Model, Tool result)
-  activate ModelManager
-  ModelManager --> Runtime: Model response / Tool calls
-  deactivate ModelManager
-end
-
-Runtime --> Gateway: Agent response
+Runtime --> Gateway: agentResponse
 deactivate Runtime
-Gateway -> ResourceManager: Persist message resource
-activate ResourceManager
-ResourceManager -> Database: Save message
-activate Database
-Database --> ResourceManager: persisted
-deactivate Database
-ResourceManager --> Gateway: persisted
-deactivate ResourceManager
-Gateway --> UI: Agent response
+Gateway --> UI: agentResponse
 deactivate Gateway
-UI --> Client: Display response
+UI --> User: Display response
 deactivate UI
-deactivate Client
 @enduml
 
 @startuml 09-class-relationships
 ' pi source: packages/coding-agent/src/core/resource-loader.ts:603-624
 ' pi source: packages/coding-agent/src/core/agent-session.ts:1173-1237
 ' Java source: frontend/src/App.vue:112-140
+' Java target-only architecture change: Agent Runtime creates SkillInvocation and Skills Manager executes it.
 ' Design reason: express the Java GUI implementation boundary without installing Skill handlers in the static CommandRegistry.
 !theme plain
 !pragma layout smetana
@@ -344,21 +295,29 @@ class DefaultResourceLoader {
 class SkillLoader {
   + load(resources): SkillLoadResult
 }
-class SkillCommandExpander {
-  + expand(text, skills): String
+class SkillInvocation {
+  + name: String
+  + arguments: String
+  + originalText: String
+}
+class "Skills Manager" as SkillsManager {
+  + execute(invocation): String
 }
 class CommandCompletionService {
   + getSuggestions(prefix): List
 }
 class "Agent UI" as AgentUI <<frontend component>>
-class AgentSession {
-  - expandUserInput(text): String
+class "Agent Runtime" as AgentRuntime {
+  - parseSkillCommand(text): SkillInvocation
+  - resolveUserInput(text): String
 }
 
 ResourceLoader <|.. DefaultResourceLoader
 DefaultResourceLoader --> SkillLoader
-AgentSession --> ResourceLoader
-AgentSession --> SkillCommandExpander
+AgentRuntime ..> SkillInvocation : creates
+AgentRuntime --> SkillsManager
+SkillsManager --> ResourceLoader
 CommandCompletionService --> ResourceLoader
 AgentUI --> CommandCompletionService
+AgentUI --> AgentRuntime
 @enduml
