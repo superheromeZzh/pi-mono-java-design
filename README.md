@@ -5,6 +5,7 @@
 ## 文档
 
 - [Extension Command SR 设计](./pi-mono-java-extension-command-SR设计.md)
+- [Skill Command SR 设计](./pi-mono-java-skill-command-SR设计.md)
 
 ## 约定
 
