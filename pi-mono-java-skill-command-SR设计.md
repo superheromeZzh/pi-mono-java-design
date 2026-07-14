@@ -4,8 +4,8 @@
 > 设计名称：Java Skill Command 发现、动态展示与展开能力  
 > 目标工程：`/Users/z/pi-mono-java`  
 > 状态：Draft  
-> 日期：2026-07-13  
-> 版本：v2.0  
+> 日期：2026-07-14  
+> 版本：v2.3  
 > 规范基线：pi TypeScript 当前实现  
 > 设计原则：先实现 PI-PARITY，再讨论 Java 扩展  
 > 关联设计：`pi-mono-java Extension Command SR 设计 v1.11`
@@ -69,6 +69,19 @@ flowchart LR
 - Skill Command 专属指标和复杂可观测性平台。
 
 这些能力如有产品需求，应单独立项，不得以“对齐 pi”的名义进入本期。
+
+### 1.4 阅读和决策框架
+
+本文刻意区分事实、现状、选择和未来设想：
+
+| 分类 | 对应章节 | 含义 |
+|---|---|---|
+| pi 代码事实 | 第 2 章 | TypeScript 当前代码已经实现的行为，是 PI-PARITY 的依据 |
+| Java 当前现状 | 第 3 章 | 用于识别迁移差距，不代表目标设计 |
+| Java 本期选择 | 第 4～19 章 | 在保持 pi 产品语义的前提下确定 Java 结构和迁移方案 |
+| Java 后续扩展 | 第 20 章 | pi 当前没有的能力，必须独立评审 |
+
+第 19 章集中记录每项关键问题的 pi 事实、Java 选择、未选方案和取舍影响。不能从“Java 当前已经这样实现”推导“Java 目标设计应继续这样实现”。
 
 ---
 
@@ -156,6 +169,19 @@ if (settingsManager.getEnableSkillCommands()) {
 - 命令名阶段没有空格。
 - Skill 没有 `getArgumentCompletions`。
 - 选中后插入 `/skill:<name> `。
+
+`getArgumentCompletions` 是 `SlashCommand` 的可选函数。Builtin Command 可以在 TUI 中提供，Extension Command 可以从注册信息透传；Skill DTO 只包含 `name` 和 `description`。输入出现第一个空格后，`CombinedAutocompleteProvider` 只有在目标命令提供该函数时才继续补全，否则返回 `null`。
+
+这不是遗漏，而是 Skill 数据模型的结果：`SKILL.md` 没有参数名称、类型、顺序、枚举或动态候选值协议。AgentSession 只把第一个空格后的文本整体作为 `args`，经过 `trim()` 后追加到展开结果。因此 pi 只能可靠补全 Skill 名称，不能推断参数语义。
+
+代码证据：
+
+| 代码位置 | 证明的行为 |
+|---|---|
+| `packages/tui/src/autocomplete.ts:227-234` | `getArgumentCompletions` 是 Slash Command 可选字段 |
+| `packages/coding-agent/src/modes/interactive/interactive-mode.ts:555-570` | Skill DTO 只有名称和描述，没有参数补全函数 |
+| `packages/tui/src/autocomplete.ts:333-358` | 空格后只调用目标命令显式提供的参数补全函数 |
+| `packages/coding-agent/src/core/agent-session.ts:1173-1196` | 空格后的内容作为自由文本参数参与 Skill 展开 |
 
 ### 2.5 Skill 调用
 
@@ -245,7 +271,7 @@ pi 采用 fail-open：
 | 代码位置 | 证明的行为 |
 |---|---|
 | `packages/coding-agent/src/modes/interactive/interactive-mode.ts:555-570` | TUI 遍历 `getSkills().skills` 并创建 `skill:<name>` DTO |
-| `packages/tui/src/autocomplete.ts:308-345` | 命令名阶段合并过滤；出现空格后只查询命令自带参数补全 |
+| `packages/tui/src/autocomplete.ts:308-358` | 命令名阶段合并过滤；出现空格后只查询命令自带参数补全 |
 | `packages/tui/src/fuzzy.ts:12-136` | fuzzy 评分、token 拆分和字母数字交换 fallback |
 | `packages/coding-agent/src/core/agent-session.ts:1003-1028` | input hook 后执行 Skill-first、Template-second |
 | `packages/coding-agent/src/core/agent-session.ts:1173-1196` | 名称解析、调用时读取、展开格式和 fail-open |
@@ -740,7 +766,116 @@ flowchart TD
 3. Prompt Template 展开。
 4. 普通 Prompt。
 
-### 10.2 SkillCommandExpander
+### 10.2 端到端调用时序
+
+[![Skill Command 端到端调用时序](./assets/skill-command-invocation.png)](./assets/skill-command-invocation.png)
+
+预览使用 PlantUML 生成的 PNG。PlantUML 源码保留如下，修改时应重新生成预览图。
+
+<details>
+<summary>PlantUML 源码</summary>
+
+```plantuml
+@startuml
+title Skill Command 端到端调用时序
+skinparam backgroundColor #FFFFFF
+hide footbox
+autonumber
+
+actor "客户" as Client
+boundary "Agent交互 UI" as UI
+control "Agent GW" as Gateway
+control "Agent Runtime" as Runtime
+control "模型管理器" as ModelManager
+control "Skills管理器" as SkillsManager
+control "Tools管理器" as ToolsManager
+control "资源管理器" as ResourceManager
+database "数据库" as Database
+
+Client -> UI: 提交 /skill:review-pr 123
+UI -> Gateway: submitPrompt(agentId, sessionId, text)
+Gateway -> Database: 读取 Agent 配置和会话上下文
+Database --> Gateway: AgentConfig + SessionContext
+Gateway -> Runtime: prompt(config, context, text)
+activate Runtime
+
+Runtime -> ResourceManager: getSkills()
+ResourceManager --> Runtime: SkillLoadResult(skills, diagnostics)
+Runtime -> SkillsManager: expand(text, skills)
+activate SkillsManager
+SkillsManager -> SkillsManager: 解析 skillName 和 args\n按名称查找 Skill
+
+alt Skill 不存在
+    SkillsManager --> Runtime: 返回原始 text（fail-open）
+else Skill 存在
+    SkillsManager -> ResourceManager: readSkillContent(skill.filePath)
+    alt 正文读取成功
+        ResourceManager --> SkillsManager: SKILL.md 内容
+        SkillsManager -> SkillsManager: 去除 frontmatter\n生成 <skill> block\n追加自由文本 args
+        SkillsManager --> Runtime: expandedText
+    else 正文读取失败
+        ResourceManager --> SkillsManager: read error
+        SkillsManager -> SkillsManager: 记录诊断
+        SkillsManager --> Runtime: 返回原始 text（fail-open）
+    end
+end
+deactivate SkillsManager
+
+par 准备模型
+    Runtime -> ModelManager: resolve(config.model)
+    ModelManager --> Runtime: Model
+else 准备 Tools
+    Runtime -> ToolsManager: getToolDefinitions(config, context)
+    ToolsManager --> Runtime: Tool definitions
+end
+
+Runtime -> ModelManager: invoke(Model, expandedText, Tool definitions)
+ModelManager --> Runtime: Model response / Tool calls
+
+loop 模型返回 Tool Call
+    Runtime -> ToolsManager: execute(toolCall)
+    ToolsManager --> Runtime: Tool result
+    Runtime -> ModelManager: continue(Model, Tool result)
+    ModelManager --> Runtime: Model response / Tool calls
+end
+
+Runtime --> Gateway: Agent response
+deactivate Runtime
+Gateway -> Database: 持久化用户消息和 Agent 响应
+Database --> Gateway: persisted
+Gateway --> UI: Agent response
+UI --> Client: 展示响应
+
+note right of ResourceManager
+PI-PARITY：Skill 元数据和正文
+来自已解析的文件资源，不从数据库读取。
+end note
+
+note right of Database
+数据库只用于 Agent/会话配置
+和消息持久化，不是 Skill 正文存储。
+end note
+@enduml
+```
+
+</details>
+
+调用边界：
+
+| 组件 | 在 Skill 调用中的职责 |
+|---|---|
+| 客户、Agent交互UI | 输入 `/skill:<name> [args]` 并展示最终响应 |
+| Agent GW | 加载 Agent/会话上下文，把请求路由到 Agent Runtime，并持久化消息 |
+| Agent Runtime | 编排 Skill 展开、模型和 Tool，不实现 Skill 发现或解析规则 |
+| Skills管理器 | 解析 Skill Command、按名称匹配、格式化 `<skill>` block，并保持 fail-open |
+| 资源管理器 | 提供当前 `SkillLoadResult`，按 `filePath` 读取 Skill 正文 |
+| 模型管理器 | 解析模型并执行模型调用 |
+| Tools管理器 | 提供 Tool 定义，只在模型返回 Tool Call 后执行 Tool |
+| 数据库 | 保存 Agent/会话配置和消息；PI-PARITY 下不保存 Skill 正文 |
+
+关键取舍：Skill 调用不会直接触发数据库查询 Skill，也不会直接调用 Tool。Skill 先展开为用户消息；模型收到展开后的消息和 Tool 定义后，才可能产生 Tool Call。
+
+### 10.3 SkillCommandExpander
 
 ```java
 public final class SkillCommandExpander {
@@ -784,7 +919,7 @@ public final class SkillCommandExpander {
 }
 ```
 
-### 10.3 解析语义
+### 10.4 解析语义
 
 为保持 pi 兼容：
 
@@ -795,7 +930,7 @@ public final class SkillCommandExpander {
 - 参数执行 `trim()`。
 - 未找到 Skill 时返回原文本。
 
-### 10.4 正文读取
+### 10.5 正文读取
 
 正文在每次调用时读取，不在补全阶段缓存。
 
@@ -807,7 +942,7 @@ public final class SkillCommandExpander {
 
 `SkillFileReader` 只是文件读取边界，不引入 URI、版本或服务端协议。
 
-### 10.5 Prompt、Steer 和 Follow-up
+### 10.6 Prompt、Steer 和 Follow-up
 
 AgentSession 使用同一个私有辅助方法：
 
@@ -1197,23 +1332,79 @@ pi 的 Skill Command 直接读取本地文件，因此以下策略不属于 PI-P
 
 ---
 
-## 19. 决策记录
+## 19. 设计取舍记录
 
-| 决策 | 本期结论 | 依据 |
+本章回答的不是“pi 有什么类”，而是“pi 的产品语义约束了什么，以及 Java 还可以选择什么”。
+
+### 19.1 取舍判定规则
+
+| 类型 | Java 的处理原则 |
+|---|---|
+| PI-PARITY | 直接对齐，除非单独批准兼容性差异 |
+| Java 实现选择 | 可以使用 record、不可变集合和安全发布，但不得改变外部行为 |
+| Java 扩展 | pi 当前没有，必须说明收益、兼容性和安全代价，并通过独立 SR 评审 |
+
+只有“Java 实现选择”允许在本期自由取舍。PI-PARITY 不是偏好，Java 扩展也不能伪装成 PI-PARITY。
+
+### 19.2 核心取舍矩阵
+
+| ID | 问题 | pi 代码事实 | Java 本期选择 | 未选方案及原因 | 取舍影响 |
+|---|---|---|---|---|---|
+| TD-SC-01 | Skill 由谁持有 | Resource Loader 持有当前有序 `Skill[]` 和诊断 | Resource Loader 持有不可变 `SkillLoadResult` | 保留可变 `SkillRegistry`；会形成第二个事实源和 last-wins 语义 | 需要迁移 Help、Server、TUI 和 Session；换取单一事实源 |
+| TD-SC-02 | Skill 是否注册 Handler | TUI 把 Skill 动态映射为补全 DTO，调用由 AgentSession 展开 | 不向 Slash Command Registry 注册每个 Skill | 每个 Skill 注册 Handler；会复制生命周期、冲突和 Reload 管理 | 新增或删除 Skill 只需替换资源结果并重建补全 |
+| TD-SC-03 | 来源和重名如何处理 | 来源排序后 canonical path 去重，名称 first-wins，并记录冲突诊断 | 移植相同优先级和诊断规则 | 沿用 Registry 的注册顺序和 last-wins；结果依赖调用顺序 | 迁移成本较高，但行为可解释、可测试 |
+| TD-SC-04 | Reload 如何发布 | 完整加载后替换结果，TUI 随后重建补全 Provider | 局部构建完整结果后单次字段赋值 | `clear()` 后逐条注册；中间状态可见且失败恢复困难 | 每次 Reload 需要重建补全，但不会暴露半加载状态 |
+| TD-SC-05 | 命令名如何匹配 | 合并命令后使用 pi `fuzzyFilter()` 评分和稳定排序 | 移植算法并共享 parity fixtures | 保留 `startsWith()`；无法复现缩写和分散字符匹配 | 实现和测试复杂度增加，交互行为与 pi 一致 |
+| TD-SC-06 | Skill 参数是否补全 | Skill DTO 没有 `getArgumentCompletions`；空格后内容是自由文本 | PI-PARITY 阶段不提供参数补全 | 猜测文件路径、枚举或参数结构；Skill 没有足够元数据 | 放弃参数级提示，避免错误建议和隐式协议 |
+| TD-SC-07 | Skill 正文何时读取 | 发现阶段只保存元数据，调用时读取 `SKILL.md` | 保持调用时读取 | Reload 时缓存正文；会改变修改可见性并增加缓存一致性问题 | 每次调用有文件 I/O，但内存更小且语义一致 |
+| TD-SC-08 | 未知 Skill 和读取失败如何处理 | 记录必要错误后返回原输入，继续普通 Prompt | 保持 fail-open | fail-closed；安全边界更严格但改变 pi 行为 | 保持兼容，但原始 `/skill:` 文本可能进入模型 |
+| TD-SC-09 | Skill 与 Template 的顺序 | Prompt、Steer、Follow-up 都是 Skill-first、Template-second | AgentSession 私有辅助方法统一三条入口 | 为此新增公共 Pipeline/Preprocessor 框架；本期抽象收益不足 | 需要调整 Java 现有入口，避免引入过度抽象 |
+| TD-SC-10 | 两个开关控制什么 | `enableSkillCommands` 只控制补全；`disable-model-invocation` 只控制系统提示词 | 精确保留这两个边界 | 新增 `invocationEnabled` 或复用现有字段禁止调用；pi 无此语义 | 手工调用始终可用；如需权限控制必须另行设计 |
+| TD-SC-11 | 是否引入 Service、URI 和版本快照 | pi 使用本地文件 Path，没有正文 URI、generation 或版本绑定 | 本期不引入 | 为未来远程 Skill 预建完整服务协议；会扩大当前问题和状态空间 | 核心实现简单；暂不支持远程正文和跨请求版本一致性 |
+| TD-SC-12 | Sandbox 失败策略是什么 | pi Skill Command 直接读取本地文件，没有 Java Sandbox 回退协议 | 只保留 `SkillFileReader` 边界，不在本 SR 决定策略 | 沿用 Java 静默回退或改为强制失败；两者都会新增产品语义 | 安全策略暂不变化，但必须在独立 SR 中明确 |
+| TD-SC-13 | Java 是否可以增加类型约束 | pi 约束的是外部行为，不要求复制 TypeScript 可变对象结构 | 使用 record、`List.copyOf()`、结构化 `SourceInfo` 和安全发布 | 逐字段机械复制 TypeScript 结构；不符合 Java 实现习惯 | 提升类型安全，不改变发现、展示和调用结果 |
+
+### 19.3 `getArgumentCompletions` 的专项取舍
+
+pi 的完整链路是：
+
+```text
+Skill frontmatter
+  -> name、description 等元数据
+  -> skill:name 命令名补全
+  -> 用户输入第一个空格
+  -> 无参数 Completion Provider
+  -> 剩余文本整体作为 args
+  -> 追加到展开后的 Skill Prompt
+```
+
+因此“没有 `getArgumentCompletions`”同时由两个边界决定：
+
+1. Skill 是声明式 Markdown 资源，不是可执行 Extension Command，不能提供回调函数。
+2. Skill frontmatter 没有声明式参数 Schema，TUI 不知道应该补全什么。
+
+Java 本期不通过启发式规则补全参数。只有同时满足以下条件，才能在后续 SR 重新评估：
+
+- 已有明确的结构化参数产品场景，而不是只为接口完整性增加能力。
+- 定义参数 Schema 的归属、版本和与 Agent Skills 的兼容方式。
+- 明确静态枚举、文件路径和动态候选值的来源及权限。
+- 保证没有 Schema 的现有 Skill 继续使用自由文本参数。
+- 定义补全失败、超时和 Reload 后 Provider 刷新的行为。
+
+可选扩展方案包括声明式 frontmatter Schema，或者由 Extension 为指定 Skill 提供外部 Completion Provider；二者都不是当前 pi 行为。
+
+### 19.4 代码—设计—验收追踪
+
+| pi 代码事实 | Java 设计结论 | 需求和验收 |
 |---|---|---|
-| Skill 是否注册 Slash Command Handler | 否 | pi 动态投影 |
-| 是否保留 Java SkillRegistry | 否 | pi 由 Resource Loader 持有 Skill |
-| 是否新增 SkillCatalogSnapshot | 否 | pi 无该抽象，本期不需要 |
-| 是否新增 generation | 否 | pi 无该协议 |
-| Skill 正文何时读取 | 调用时 | pi 当前行为 |
-| 未知 Skill 是否报错并停止 | 否 | pi fail-open |
-| 读取失败是否停止 | 否 | pi 记录错误后 fail-open |
-| Skill 是否先于 Prompt Template | 是 | pi 当前顺序 |
-| Steer/Follow-up 是否展开 Skill | 是 | pi 当前行为 |
-| `enableSkillCommands` 是否禁止调用 | 否 | pi 只控制展示 |
-| 是否新增 `invocationEnabled` | 否 | pi 无该字段 |
-| 是否支持 Resource URI | 否 | pi 当前只使用文件 Path |
-| 是否定义 Skill Sandbox 策略 | 否 | 不属于 Skill Command |
+| `resource-loader.ts:333-410,603-624` | Resource Loader 统一持有完整 Skill 结果 | FR-PI-SC-001、FR-PI-SC-304 |
+| `skills.ts:387-486` 与 `package-manager.ts:184-188,2465-2489` | 来源排序、路径去重、名称 first-wins 和冲突诊断 | FR-PI-SC-003～005、AC-PI-SC-05 |
+| `interactive-mode.ts:555-570` | Skill 动态映射为补全 DTO，不注册 Handler | FR-PI-SC-101～102 |
+| `autocomplete.ts:227-234,333-358` | 参数补全是可选能力，Skill 未提供 | Skill 无参数补全测试、TD-SC-06 |
+| `fuzzy.ts:12-136` | Java 必须移植等价 fuzzy 规则 | FR-PI-SC-104、AC-PI-SC-08 |
+| `agent-session.ts:1003-1028,1207-1237` | Prompt、Steer、Follow-up 统一 Skill-first | FR-PI-SC-208～209、AC-PI-SC-11～14 |
+| `agent-session.ts:1173-1196` | 调用时读取、自由文本参数和 fail-open | FR-PI-SC-201～207、AC-PI-SC-09～10 |
+| `agent-session.ts:2435-2456` 与 `interactive-mode.ts:5099-5125` | Reload 完整替换资源并重建补全 | FR-PI-SC-301～304、AC-PI-SC-02～04 |
 
 ---
 
@@ -1285,3 +1476,14 @@ User /skill:name
 本期设计以 pi 当前代码行为为规范，不再把未来 Skill Service、版本化 Snapshot、结构化失败和严格 Sandbox 混入核心链路。
 
 Java 只增加不可变集合、整体字段替换和类型化 SourceInfo 等不改变产品语义的实现约束。所有行为差异必须通过独立后续 SR 评审。
+
+---
+
+## 23. 版本记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v2.0 | 2026-07-13 | 以 pi 当前代码为规范，重构 Java Skill Command 的发现、展示、调用和 Reload 设计 |
+| v2.1 | 2026-07-14 | 明确区分 pi 事实、Java 现状和 Java 选择；新增核心取舍矩阵、参数补全专项取舍和代码到验收的追踪关系 |
+| v2.2 | 2026-07-14 | 新增包含客户、Agent交互UI、Agent GW、Agent Runtime、模型、Skills、Tools、资源和数据库管理组件的 Skill 调用 PlantUML 时序图 |
+| v2.3 | 2026-07-14 | 保留 PlantUML 源码并嵌入生成的 PNG 预览，兼容不支持 PlantUML fenced block 的 Markdown 侧边栏 |
