@@ -1,7 +1,6 @@
 .DS_Store
 
-# Unrelated document kept in the same local directory.
-/memory-jsonl-to-gaussdb.md
+# Memory design source document is tracked with its diagrams.
 
 # Generated document export; Markdown is the source of truth.
 /*.docx

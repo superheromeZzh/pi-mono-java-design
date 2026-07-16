@@ -1,0 +1,117 @@
+@startuml memory-architecture
+!pragma layout smetana
+title Java ToB Memory Persistence Architecture
+skinparam componentStyle rectangle
+
+' Source evidence: packages/coding-agent/src/core/session-manager.ts: SessionEntry,
+' _appendEntry, buildContextEntries, commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' Observed behavior: pi appends session entries and rebuilds context from the active leaf path.
+' Design reason: keep context semantics in the application layer and make the database the durable source.
+' Java divergence: tenant isolation, durable leaf events, revision checks, and idempotency are target-only.
+
+package "Agent Application" {
+  [Agent Runtime] as runtime
+  [Memory Application Service] as memory
+  [Context Rebuilder] as context
+  [Compaction Coordinator] as compact
+  [Branch Summary Coordinator] as branch
+  [Tenant Context] as tenant
+}
+
+package "Persistence Adapter" {
+  [Session Repository] as sessionRepo
+  [Entry Repository] as entryRepo
+  [Audit Repository] as auditRepo
+}
+
+database "GaussDB" as db
+
+runtime --> memory : append / load context
+tenant --> memory : authenticated scope
+memory --> context : active path snapshot
+memory --> compact : prepare / commit compaction
+memory --> branch : prepare / commit branch summary
+memory --> sessionRepo : session state
+memory --> entryRepo : immutable entries
+memory --> auditRepo : leaf and operation audit
+sessionRepo --> db
+entryRepo --> db
+auditRepo --> db
+compact --> memory : summary result
+branch --> memory : summary result
+context --> runtime : AgentMessage context
+
+@enduml
+
+@startuml memory-write-transaction
+title Append And Branch Transaction
+
+' Source evidence: packages/coding-agent/src/core/session-manager.ts: _appendEntry,
+' appendCompaction, branchWithSummary; packages/coding-agent/src/core/agent-session.ts:
+' compact and navigateTree; commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' Observed behavior: pi generates summaries before appending compaction or branch_summary entries.
+' Design reason: keep LLM latency outside the database lock while committing a short atomic state change.
+' Java divergence: optimistic revision, idempotency record, and explicit leaf audit event are target-only.
+
+actor "Agent Runtime" as runtime
+participant "Memory Service" as memory
+participant "Summary Model" as model
+database "GaussDB" as db
+
+== Append message ==
+runtime -> memory : append(command, tenant, expectedRevision)
+memory -> db : lock session state
+memory -> db : insert entry and leaf event
+memory -> db : update leaf and revision
+db --> memory : committed entry id
+memory --> runtime : success
+
+== Compaction or branch summary ==
+runtime -> memory : prepare(snapshot request)
+memory -> db : read active path and revision
+db --> memory : immutable snapshot
+memory -> model : generate summary outside transaction
+model --> memory : summary and cut point
+memory -> db : lock state and verify revision
+alt revision changed
+  db --> memory : stale snapshot
+  memory --> runtime : retryable conflict
+else revision unchanged
+  memory -> db : insert summary entry and audit event
+  memory -> db : update leaf and revision
+  db --> memory : committed
+  memory --> runtime : success
+end
+
+@enduml
+
+@startuml memory-context-rebuild
+title Database Context Rebuild
+
+' Source evidence: packages/coding-agent/src/core/session-manager.ts: buildSessionPath,
+' buildContextEntries, buildSessionContext; commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' Observed behavior: pi walks parentId to root, keeps the latest compaction boundary, and projects entries to messages.
+' Design reason: SQL should fetch a stable tree path; Java should own prompt and message semantics.
+' Java divergence: the path is fetched by a recursive SQL query and current leaf is durable in the target schema.
+
+actor "Agent Runtime" as runtime
+participant "Memory Service" as memory
+database "GaussDB" as db
+participant "Context Rebuilder" as rebuild
+
+runtime -> memory : loadContext(tenant, session)
+memory -> db : recursive path query by durable leaf
+db --> memory : root to leaf entries
+memory -> rebuild : entries and session metadata
+rebuild -> rebuild : derive model and thinking level
+rebuild -> rebuild : locate latest compaction
+alt compaction exists
+  rebuild -> rebuild : inject summary and firstKept boundary
+  rebuild -> rebuild : keep boundary entries and newer entries
+else no compaction
+  rebuild -> rebuild : keep active path
+end
+rebuild --> memory : AgentMessage context
+memory --> runtime : context snapshot
+
+@enduml
