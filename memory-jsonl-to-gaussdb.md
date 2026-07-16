@@ -1,8 +1,8 @@
 # pi-mono Java ToB 记忆系统 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.1
-> 日期：2026-07-15
+> 版本：v0.2
+> 日期：2026-07-16
 > 状态：设计初稿
 > pi 源码基线：[`dcfe36c79702ec240b146c45f167ab75ecddd205`](https://github.com/badlogic/pi-mono/tree/dcfe36c79702ec240b146c45f167ab75ecddd205)
 > Java 源码基线：无；本文 Java 内容均为 target-only design
@@ -280,6 +280,19 @@ CREATE TABLE agent_session (
     PRIMARY KEY (tenant_id, session_id)
 );
 
+COMMENT ON TABLE agent_session IS '会话身份及当前状态投影；记忆事实保存在 session_entry';
+COMMENT ON COLUMN agent_session.tenant_id IS '认证租户标识；必须来自服务端 TenantContext，禁止信任请求体';
+COMMENT ON COLUMN agent_session.session_id IS '租户内会话标识；默认可使用 UUIDv7，最大长度由接口契约约束';
+COMMENT ON COLUMN agent_session.session_version IS '持久化会话格式版本；用于兼容 pi 会话版本，不作为并发版本';
+COMMENT ON COLUMN agent_session.cwd IS '会话创建时的工作目录快照；不得用于推导租户身份';
+COMMENT ON COLUMN agent_session.parent_session_id IS 'fork 来源会话标识；根会话为空，跨租户关系必须另行授权';
+COMMENT ON COLUMN agent_session.current_leaf_entry_id IS '当前活动分支的叶子 entry 标识；空会话或 reset 到根前位置时可为空';
+COMMENT ON COLUMN agent_session.revision IS '会话上下文乐观锁版本；追加 entry 或移动 leaf 成功后递增';
+COMMENT ON COLUMN agent_session.next_append_seq IS '下一个会话内追加序号；必须在锁定 agent_session 行后分配';
+COMMENT ON COLUMN agent_session.created_at IS '会话数据库记录的创建时间';
+COMMENT ON COLUMN agent_session.updated_at IS '会话状态投影最后更新时间；不等同于原始消息事件时间';
+COMMENT ON COLUMN agent_session.metadata IS '低频可扩展会话元数据；不得保存 provider secret 等敏感凭据';
+
 CREATE TABLE session_entry (
     tenant_id          VARCHAR(64)  NOT NULL,
     session_id         VARCHAR(128) NOT NULL,
@@ -301,6 +314,17 @@ CREATE TABLE session_entry (
     ))
 );
 
+COMMENT ON TABLE session_entry IS '不可变会话 entry 事实表；通过 parent_entry_id 组成会话树';
+COMMENT ON COLUMN session_entry.tenant_id IS 'entry 所属认证租户标识；参与所有主键、外键和查询过滤';
+COMMENT ON COLUMN session_entry.session_id IS 'entry 所属会话标识；仅在同一租户内解释';
+COMMENT ON COLUMN session_entry.entry_id IS '会话内 entry 唯一标识；兼容 pi 短 ID 和完整 UUID';
+COMMENT ON COLUMN session_entry.parent_entry_id IS '父 entry 标识；为空表示树根，必须属于同一租户和会话';
+COMMENT ON COLUMN session_entry.entry_type IS 'SessionEntry 判别类型；决定 payload 解析和上下文投影规则';
+COMMENT ON COLUMN session_entry.append_seq IS '会话内单调递增追加序号；用于稳定排序和审计，不表示树关系';
+COMMENT ON COLUMN session_entry.event_time IS 'entry 原始事件时间；JSONL 导入时保留源 timestamp 的时间语义';
+COMMENT ON COLUMN session_entry.payload IS 'entry 完整业务 JSON；保留类型专属及扩展字段并受大小和敏感信息限制';
+COMMENT ON COLUMN session_entry.created_at IS 'entry 写入数据库的时间；可与原始事件时间不同';
+
 CREATE TABLE session_leaf_event (
     tenant_id          VARCHAR(64)  NOT NULL,
     session_id         VARCHAR(128) NOT NULL,
@@ -315,6 +339,17 @@ CREATE TABLE session_leaf_event (
     CHECK (reason IN ('append', 'branch', 'reset', 'resume', 'import'))
 );
 
+COMMENT ON TABLE session_leaf_event IS '当前 leaf 变化的不可变审计事件；不参与 LLM 上下文';
+COMMENT ON COLUMN session_leaf_event.tenant_id IS 'leaf 事件所属认证租户标识';
+COMMENT ON COLUMN session_leaf_event.session_id IS 'leaf 事件所属会话标识';
+COMMENT ON COLUMN session_leaf_event.event_id IS 'leaf 变化审计事件的唯一标识';
+COMMENT ON COLUMN session_leaf_event.from_leaf_entry_id IS '变化前 leaf entry 标识；首次追加或无前置 leaf 时可为空';
+COMMENT ON COLUMN session_leaf_event.to_leaf_entry_id IS '变化后 leaf entry 标识；reset 到根前位置时可为空';
+COMMENT ON COLUMN session_leaf_event.reason IS 'leaf 变化原因；限定为 append、branch、reset、resume 或 import';
+COMMENT ON COLUMN session_leaf_event.operation_id IS '触发本次 leaf 变化的幂等操作标识';
+COMMENT ON COLUMN session_leaf_event.occurred_at IS 'leaf 状态变化实际提交时间';
+COMMENT ON COLUMN session_leaf_event.details IS 'leaf 变化的扩展审计信息；不作为当前 leaf 的事实源';
+
 CREATE TABLE session_file_operation (
     tenant_id       VARCHAR(64)  NOT NULL,
     session_id      VARCHAR(128) NOT NULL,
@@ -328,6 +363,14 @@ CREATE TABLE session_file_operation (
     CHECK (operation_type IN ('read', 'written', 'edited'))
 );
 
+COMMENT ON TABLE session_file_operation IS '从 compaction 或 branch summary details 展开的文件级查询和审计投影';
+COMMENT ON COLUMN session_file_operation.tenant_id IS '文件操作投影所属认证租户标识';
+COMMENT ON COLUMN session_file_operation.session_id IS '文件操作投影所属会话标识';
+COMMENT ON COLUMN session_file_operation.source_entry_id IS '产生该文件操作投影的 compaction 或 branch summary entry 标识';
+COMMENT ON COLUMN session_file_operation.operation_type IS '文件操作分类；限定为 read、written 或 edited';
+COMMENT ON COLUMN session_file_operation.file_path IS '租户内文件路径；查询和展示必须执行权限校验及必要脱敏';
+COMMENT ON COLUMN session_file_operation.created_at IS '文件操作投影写入数据库的时间';
+
 CREATE TABLE memory_write_operation (
     tenant_id       VARCHAR(64)  NOT NULL,
     operation_id    VARCHAR(128) NOT NULL,
@@ -337,6 +380,14 @@ CREATE TABLE memory_write_operation (
     committed_at    TIMESTAMPTZ  NOT NULL,
     PRIMARY KEY (tenant_id, operation_id)
 );
+
+COMMENT ON TABLE memory_write_operation IS '记忆写命令的幂等提交记录；用于网络超时和调用方重试';
+COMMENT ON COLUMN memory_write_operation.tenant_id IS '幂等操作所属认证租户标识';
+COMMENT ON COLUMN memory_write_operation.operation_id IS '租户内唯一幂等键；相同请求重试必须复用该值';
+COMMENT ON COLUMN memory_write_operation.session_id IS '幂等写操作目标会话标识';
+COMMENT ON COLUMN memory_write_operation.request_hash IS '规范化请求内容的 SHA-256 十六进制摘要；用于识别幂等键误复用';
+COMMENT ON COLUMN memory_write_operation.result_payload IS '首次成功提交的稳定响应；后续相同请求直接返回该结果';
+COMMENT ON COLUMN memory_write_operation.committed_at IS '幂等写操作首次成功提交时间';
 ```
 
 `agent_session.current_leaf_entry_id` 不直接建立循环外键；写事务必须先验证 entry 属于同一 `(tenant_id, session_id)`。如果部署方需要数据库强约束，应使用可延迟约束或把 session state 拆成独立状态表。
@@ -532,4 +583,5 @@ tree navigation 与 compaction 使用同一 revision 机制。摘要生成过程
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.2 | 2026-07-16 | 为 DDL 草案中的全部表和字段补充数据库 COMMENT；不改变表结构和行为设计 |
 | v0.1 | 2026-07-15 | 以 pi commit `dcfe36c79702ec240b146c45f167ab75ecddd205` 为基线，建立 Java ToB GaussDB 持久化、租户隔离、事务一致性、幂等和迁移设计；明确 Java target-only 差异 |
