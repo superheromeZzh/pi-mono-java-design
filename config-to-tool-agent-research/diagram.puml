@@ -160,389 +160,517 @@ DeployFactoryRegistry --> Memory
 DeployFactoryRegistry --> Checkpoints
 @enduml
 
-@startuml inline_code_tool_definitions
+@startuml pi_tool_model
 !pragma layout smetana
-' Source evidence: pi commit 216e672e7c9fc65682553394b74e483c0c9e47f7, packages/coding-agent/src/core/extensions/types.ts ToolDefinition.
-' Source evidence: opencode commit 3a1c6df9e24672f0761a6ced18e1315d89334baf, packages/opencode/src/tool/tool.ts Tool.Definition.
-' Source evidence: Amp Plugin API PluginToolDefinition at https://ampcode.com/manual/plugin-api, accessed 2026-07-17.
-' Source evidence: openclaw commit 55bb6cfa2ec4863b5ece006aee70b5de6d967709, src/agents/tools/common.ts.
-' Observed behavior: these systems register executable code objects, not metadata-only tool manifests.
-' Design reason: distinguish model-facing fields from required callbacks and plugin packaging.
-' Layout-only hidden links create a two-column grid and carry no design semantics.
-title Inline code ToolDefinition models
+' Source evidence: pi commit 216e672e7c9fc65682553394b74e483c0c9e47f7, packages/coding-agent/src/core/extensions/types.ts ToolDefinition and ExtensionAPI.
+' Observed behavior: the registered definition contains both model-facing metadata and execute behavior.
+' Design reason: one product per diagram keeps the registration relationship readable without catalog layout links.
+title Pi tool model
 top to bottom direction
 skinparam classAttributeIconSize 0
 skinparam shadowing false
 skinparam backgroundColor white
-skinparam packageStyle rectangle
-skinparam nodesep 35
-skinparam ranksep 40
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
 
-package "Pi" {
-  class PiToolDefinition {
-    +name: string
-    +label: string
-    +description: string
-    +parameters: TypeBoxSchema
-    +promptSnippet: string [0..1]
-    +promptGuidelines: string[] [0..1]
-    +executionMode: sequential | parallel [0..1]
-    +prepareArguments(raw): params [0..1]
-    +execute(callId, params, signal, update, ctx): ToolResult
-    +renderCall(): Component [0..1]
-    +renderResult(): Component [0..1]
-  }
-  class PiExtensionAPI {
-    +registerTool(definition)
-    +setActiveTools(names)
-  }
-  PiExtensionAPI o-- PiToolDefinition : registers
+class PiExtensionAPI {
+  +registerTool(definition)
+  +setActiveTools(names)
 }
-
-package "OpenCode" {
-  class OpenCodeToolDefinition {
-    +name: derived from file and export
-    +description: string
-    +args: ZodSchemaMap
-    +execute(args, context): string
-  }
-  class OpenCodeToolContext {
-    +agent: string
-    +sessionID: string
-    +messageID: string
-    +directory: string
-    +worktree: string
-  }
-  OpenCodeToolDefinition --> OpenCodeToolContext : execute receives
+class PiToolDefinition {
+  +name: string
+  +label: string
+  +description: string
+  +parameters: TypeBoxSchema
+  +promptSnippet: string [0..1]
+  +promptGuidelines: string[] [0..1]
+  +executionMode: sequential | parallel [0..1]
+  +prepareArguments(raw): params [0..1]
+  +execute(callId, params, signal, update, ctx): ToolResult
+  +renderCall(): Component [0..1]
+  +renderResult(): Component [0..1]
 }
-
-package "Amp" {
-  class AmpPluginToolDefinition {
-    +name: string
-    +description: string
-    +inputSchema: JsonSchemaObject
-    +execute(input, context): PluginToolResult
-  }
-  class AmpPluginToolContext {
-    +ui: PluginUI
-    +logger: PluginLogger
-    +thread: PluginThread
-  }
-  AmpPluginToolDefinition --> AmpPluginToolContext : execute receives
-}
-
-package "OpenClaw" {
-  class OpenClawPluginManifest {
-    +contracts.tools: string[]
-  }
-  class OpenClawToolFactory {
-    +create(context): OpenClawAgentTool
-  }
-  class OpenClawAgentTool {
-    +name: string
-    +label: string
-    +description: string
-    +parameters: TypeBoxSchema
-    +execute(callId, params): ToolResult
-  }
-  OpenClawPluginManifest ..> OpenClawAgentTool : declares names only
-  OpenClawToolFactory --> OpenClawAgentTool : creates runtime object
-}
-
-PiExtensionAPI -[hidden]right-> OpenCodeToolDefinition
-PiToolDefinition -[hidden]down-> AmpPluginToolDefinition
-OpenCodeToolContext -[hidden]down-> OpenClawToolFactory
-AmpPluginToolContext -[hidden]right-> OpenClawAgentTool
+PiExtensionAPI o-down-> PiToolDefinition : registers
 @enduml
 
-@startuml separated_and_callback_tool_definitions
+@startuml opencode_tool_model
+!pragma layout smetana
+' Source evidence: opencode commit 3a1c6df9e24672f0761a6ced18e1315d89334baf, packages/opencode/src/tool/tool.ts Tool.Definition.
+' Observed behavior: the tool object contains its schema and execute callback and receives a runtime context.
+' Design reason: show the single definition-to-context dependency without unrelated product packages.
+title OpenCode tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class OpenCodeToolDefinition {
+  +name: derived from file and export
+  +description: string
+  +args: ZodSchemaMap
+  +execute(args, context): string
+}
+class OpenCodeToolContext {
+  +agent: string
+  +sessionID: string
+  +messageID: string
+  +directory: string
+  +worktree: string
+}
+OpenCodeToolDefinition -down-> OpenCodeToolContext : execute receives
+@enduml
+
+@startuml amp_tool_model
+!pragma layout smetana
+' Source evidence: Amp Plugin API PluginToolDefinition at https://ampcode.com/manual/plugin-api, accessed 2026-07-17.
+' Observed behavior: the plugin definition contains metadata, schema, and execute and receives a plugin context.
+' Design reason: use the same top-down definition-to-runtime-context reading order as other code-registered tools.
+title Amp plugin tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class AmpPluginToolDefinition {
+  +name: string
+  +description: string
+  +inputSchema: JsonSchemaObject
+  +execute(input, context): PluginToolResult
+}
+class AmpPluginToolContext {
+  +ui: PluginUI
+  +logger: PluginLogger
+  +thread: PluginThread
+}
+AmpPluginToolDefinition -down-> AmpPluginToolContext : execute receives
+@enduml
+
+@startuml openclaw_tool_model
+!pragma layout smetana
+' Source evidence: openclaw commit 55bb6cfa2ec4863b5ece006aee70b5de6d967709, src/plugins/registry-registrars-tools-hooks.ts and src/agents/tools/common.ts.
+' Observed behavior: the manifest declares ownership names while a runtime factory creates the executable tool.
+' Design reason: keep the two inputs above the runtime tool so static ownership and executable behavior remain distinct.
+title OpenClaw plugin tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 30
+skinparam ranksep 35
+hide circle
+
+class OpenClawPluginManifest {
+  +contracts.tools: string[]
+}
+class OpenClawToolFactory {
+  +create(context): OpenClawAgentTool
+}
+class OpenClawAgentTool {
+  +name: string
+  +label: string
+  +description: string
+  +parameters: TypeBoxSchema
+  +execute(callId, params): ToolResult
+}
+OpenClawPluginManifest ..down..> OpenClawAgentTool : declares names only
+OpenClawToolFactory -down-> OpenClawAgentTool : creates
+@enduml
+
+@startuml cline_tool_model
 !pragma layout smetana
 ' Source evidence: cline commit c564045d8135c0c1c330b21d47b68b74917ce614, sdk/packages/shared/src/agent.ts AgentToolDefinition and AgentTool.
-' Source evidence: grok-build commit 8adf9013a0929e5c7f1d4e849492d2387837a28d, xai-grok-tools tool_metadata.rs and xai-tool-runtime tool.rs.
-' Source evidence: Anthropic Managed Agents tools at https://platform.claude.com/docs/en/managed-agents/tools, accessed 2026-07-17.
-' Source evidence: codex commit 315195492c80fdade38e917c18f9584efd599304, codex-rs/protocol/src/dynamic_tools.rs DynamicToolFunctionSpec.
-' Observed behavior: Cline and Grok split metadata from runtime, while Anthropic API and Codex route calls to a host.
-' Design reason: show that a complete callable tool still needs an executor even when the descriptor is independent.
-' Layout-only hidden links create a two-column grid and carry no design semantics.
-title Separated metadata and host callback models
+' Observed behavior: AgentTool extends the descriptor with execute behavior.
+' Design reason: inheritance is the only relationship needed, so the diagram uses one vertical axis.
+title Cline tool model
 top to bottom direction
 skinparam classAttributeIconSize 0
 skinparam shadowing false
 skinparam backgroundColor white
-skinparam packageStyle rectangle
-skinparam nodesep 35
-skinparam ranksep 40
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
 
-package "Cline" {
-  class ClineAgentToolDefinition {
-    +name: string
-    +description: string
-    +inputSchema: JsonSchema
-  }
-  class ClineAgentTool {
-    +execute(input, context): ToolResult
-  }
-  ClineAgentToolDefinition <|-- ClineAgentTool
+class ClineAgentToolDefinition {
+  +name: string
+  +description: string
+  +inputSchema: JsonSchema
 }
-
-package "Grok Build" {
-  interface GrokToolMetadata {
-    +name(): string
-    +displayName(): string
-    +description(): string
-    +parameterSchema(): JsonSchema
-  }
-  interface GrokRuntimeTool {
-    +execute(input, context): ToolResult
-  }
-  class RegisteredGrokTool
-  GrokToolMetadata <|.. RegisteredGrokTool
-  GrokRuntimeTool <|.. RegisteredGrokTool
+class ClineAgentTool {
+  +execute(input, context): ToolResult
 }
-
-package "Anthropic API and Managed Agents" {
-  class AnthropicClientToolContract {
-    +type: custom [Managed Agents]
-    +name: string
-    +description: string
-    +input_schema: JsonSchema
-    +strict: boolean [0..1]
-    +defer_loading: boolean [0..1]
-    +input_examples: object[] [0..1]
-  }
-  interface AnthropicClientExecutor {
-    +handle(toolUse): ToolResult
-  }
-  AnthropicClientToolContract ..> AnthropicClientExecutor : tool_use routed to host
-}
-
-package "Codex" {
-  class DynamicToolFunctionSpec {
-    +name: string
-    +description: string
-    +inputSchema: JsonSchema
-    +deferLoading: boolean
-  }
-  class DynamicToolNamespace {
-    +name: string
-    +description: string
-    +tools: DynamicToolFunctionSpec[]
-  }
-  interface AppServerToolCallback {
-    +handle(item_tool_call): DynamicToolResponse
-  }
-  DynamicToolNamespace o-- DynamicToolFunctionSpec
-  DynamicToolFunctionSpec ..> AppServerToolCallback : invocation sent to client
-}
-
-ClineAgentToolDefinition -[hidden]right-> GrokToolMetadata
-ClineAgentTool -[hidden]down-> AnthropicClientToolContract
-RegisteredGrokTool -[hidden]down-> DynamicToolNamespace
-AnthropicClientExecutor -[hidden]right-> AppServerToolCallback
+ClineAgentToolDefinition <|-down- ClineAgentTool
 @enduml
 
-@startuml generic_driver_tool_definitions
+@startuml grok_build_tool_model
 !pragma layout smetana
-' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
-' Source evidence: qwen-code commit 0ecba4b3c709d271a17faa5ac9537bf1b102eaf1, packages/core/src/tools/tool-registry.ts.
-' Source evidence: coze-studio commit 22275b1c2661d35344a7493cffe401e8cc61cf8e, backend/domain/plugin/conf/load_plugin.go.
-' Source evidence: continue commit d0a3c0b626b5bebc3bef4742eec05a0242be0bab, core/tools/callTool.ts.
-' Observed behavior: a generic driver interprets the descriptor and routes execution without per-tool host adapters.
-' Design reason: these are the strongest baselines for configuration-created proxy or driver-backed tools.
-' Layout-only hidden links create a two-column grid and carry no design semantics.
-title Protocol and generic driver ToolDefinition models
+' Source evidence: grok-build commit 8adf9013a0929e5c7f1d4e849492d2387837a28d, crates/codegen/xai-grok-tools/src/types/tool_metadata.rs and crates/common/xai-tool-runtime/src/tool.rs.
+' Observed behavior: a registered tool implements separate metadata and runtime traits.
+' Design reason: place both contracts above their concrete implementation to emphasize composition of responsibilities.
+title Grok Build tool model
 top to bottom direction
 skinparam classAttributeIconSize 0
 skinparam shadowing false
 skinparam backgroundColor white
-skinparam packageStyle rectangle
-skinparam nodesep 35
-skinparam ranksep 40
+skinparam nodesep 30
+skinparam ranksep 35
+hide circle
 
-package "MCP" {
-  class McpTool {
-    +name: string
-    +title: string [0..1]
-    +description: string [0..1]
-    +inputSchema: JsonSchema
-    +outputSchema: JsonSchema [0..1]
-    +annotations: ToolAnnotations [0..1]
-    +execution.taskSupport: enum [0..1]
-    +_meta: object [0..1]
-  }
-  interface McpServer {
-    +tools_list(): McpTool[]
-    +tools_call(name, arguments): CallToolResult
-  }
-  McpServer --> McpTool : publishes
+interface GrokToolMetadata {
+  +name(): string
+  +displayName(): string
+  +description(): string
+  +parameterSchema(): JsonSchema
 }
-
-package "Qwen Code" {
-  class QwenToolsConfig {
-    +discoveryCommand: string
-    +callCommand: string
-  }
-  class QwenFunctionDeclaration {
-    +name: string
-    +description: string
-    +parameters: JsonSchema
-  }
-  class QwenCommandDriver {
-    +discover(command): FunctionDeclaration[]
-    +call(command, toolName, jsonStdin): JsonResult
-  }
-  QwenToolsConfig --> QwenCommandDriver : configures
-  QwenCommandDriver --> QwenFunctionDeclaration : discovers
+interface GrokRuntimeTool {
+  +execute(input, context): ToolResult
 }
-
-package "Coze Studio" {
-  class CozePluginManifest {
-    +schemaVersion: string
-    +nameForModel: string
-    +descriptionForModel: string
-    +auth: AuthConfig
-    +api.type: openapi
-  }
-  class OpenApiOperation {
-    +operationId: string
-    +summary: string
-    +description: string
-    +parameters: Parameter[]
-    +requestBody: RequestBody [0..1]
-  }
-  class CozeHttpExecutor {
-    +compile(operation): ModelTool
-    +invoke(method, url, headers, body): ToolResult
-  }
-  CozePluginManifest o-- OpenApiOperation
-  CozeHttpExecutor --> OpenApiOperation : compiles and executes
-}
-
-package "Continue" {
-  class ContinueToolDescriptor {
-    +name: string
-    +description: string
-    +parameters: JsonSchema
-    +uri: string [0..1]
-  }
-  class ContinueToolDispatcher {
-    +callBuiltIn(name, args): ToolResult
-    +callMcp(uri, args): ToolResult
-    +callHttp(uri, args): ToolResult
-  }
-  ContinueToolDispatcher --> ContinueToolDescriptor : dispatches by name or URI
-}
-
-McpServer -[hidden]right-> QwenToolsConfig
-McpTool -[hidden]down-> CozePluginManifest
-QwenFunctionDeclaration -[hidden]down-> ContinueToolDispatcher
-OpenApiOperation -[hidden]right-> ContinueToolDescriptor
+class RegisteredGrokTool
+GrokToolMetadata <|.down. RegisteredGrokTool
+GrokRuntimeTool <|.down. RegisteredGrokTool
 @enduml
 
-@startuml mcp_consuming_agent_tool_definitions
+@startuml anthropic_client_tool_contract
+!pragma layout smetana
+' Source evidence: Anthropic Managed Agents tools at https://platform.claude.com/docs/en/managed-agents/tools and Tool reference, accessed 2026-07-17.
+' Observed behavior: the public custom tool contract describes a call that the client application executes.
+' Design reason: isolate this normalized API contract from Claude Code implementation claims.
+title Anthropic client tool contract
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class AnthropicClientToolContract {
+  +type: custom [Managed Agents]
+  +name: string
+  +description: string
+  +input_schema: JsonSchema
+  +strict: boolean [0..1]
+  +defer_loading: boolean [0..1]
+  +input_examples: object[] [0..1]
+}
+interface AnthropicClientExecutor {
+  +handle(toolUse): ToolResult
+}
+AnthropicClientToolContract ..down..> AnthropicClientExecutor : host executes
+@enduml
+
+@startuml codex_dynamic_tool_model
+!pragma layout smetana
+' Source evidence: codex commit 315195492c80fdade38e917c18f9584efd599304, codex-rs/protocol/src/dynamic_tools.rs and codex-rs/core/src/tools/handlers/dynamic.rs.
+' Observed behavior: a namespace owns dynamic function specs and the App Server client handles the resulting call.
+' Design reason: use a single top-down chain from catalog metadata to host execution.
+title Codex dynamic tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class DynamicToolNamespace {
+  +name: string
+  +description: string
+  +tools: DynamicToolFunctionSpec[]
+}
+class DynamicToolFunctionSpec {
+  +name: string
+  +description: string
+  +inputSchema: JsonSchema
+  +deferLoading: boolean
+}
+interface AppServerToolCallback {
+  +handle(item_tool_call): DynamicToolResponse
+}
+DynamicToolNamespace o-down-> DynamicToolFunctionSpec
+DynamicToolFunctionSpec ..down..> AppServerToolCallback : invocation sent to client
+@enduml
+
+@startuml mcp_tool_contract
+!pragma layout smetana
+' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool, ListToolsResult, and CallToolRequest.
+' Observed behavior: the server publishes descriptors through tools/list and owns tools/call execution.
+' Design reason: keep the protocol contract independent so client diagrams can focus on their own configuration.
+title MCP tool contract
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+interface McpServer {
+  +tools_list(): McpTool[]
+  +tools_call(name, arguments): CallToolResult
+}
+class McpTool {
+  +name: string
+  +title: string [0..1]
+  +description: string [0..1]
+  +inputSchema: JsonSchema
+  +outputSchema: JsonSchema [0..1]
+  +annotations: ToolAnnotations [0..1]
+  +execution.taskSupport: enum [0..1]
+  +_meta: object [0..1]
+}
+McpServer -down-> McpTool : publishes and executes
+@enduml
+
+@startuml qwen_command_tool_model
+!pragma layout smetana
+' Source evidence: qwen-code commit 0ecba4b3c709d271a17faa5ac9537bf1b102eaf1, packages/core/src/tools/tool-registry.ts.
+' Observed behavior: configuration selects discovery and call commands; the driver discovers function declarations and dispatches calls.
+' Design reason: follow the configuration-to-driver-to-descriptor lifecycle on one vertical axis.
+title Qwen Code command tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class QwenToolsConfig {
+  +discoveryCommand: string
+  +callCommand: string
+}
+class QwenCommandDriver {
+  +discover(command): FunctionDeclaration[]
+  +call(command, toolName, jsonStdin): JsonResult
+}
+class QwenFunctionDeclaration {
+  +name: string
+  +description: string
+  +parameters: JsonSchema
+}
+QwenToolsConfig -down-> QwenCommandDriver : configures
+QwenCommandDriver -down-> QwenFunctionDeclaration : discovers and invokes
+@enduml
+
+@startuml coze_openapi_tool_model
+!pragma layout smetana
+' Source evidence: coze-studio commit 22275b1c2661d35344a7493cffe401e8cc61cf8e, backend/domain/plugin/conf/load_plugin.go and backend/domain/plugin/service/tool/invocation_http.go.
+' Observed behavior: the plugin manifest references OpenAPI operations that a generic HTTP executor compiles and invokes.
+' Design reason: express the metadata-to-operation-to-executor flow without mixing other generic drivers.
+title Coze Studio OpenAPI tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class CozePluginManifest {
+  +schemaVersion: string
+  +nameForModel: string
+  +descriptionForModel: string
+  +auth: AuthConfig
+  +api.type: openapi
+}
+class OpenApiOperation {
+  +operationId: string
+  +summary: string
+  +description: string
+  +parameters: Parameter[]
+  +requestBody: RequestBody [0..1]
+}
+class CozeHttpExecutor {
+  +compile(operation): ModelTool
+  +invoke(method, url, headers, body): ToolResult
+}
+CozePluginManifest o-down-> OpenApiOperation
+OpenApiOperation -down-> CozeHttpExecutor : interpreted by
+@enduml
+
+@startuml continue_tool_dispatch_model
+!pragma layout smetana
+' Source evidence: continue commit d0a3c0b626b5bebc3bef4742eec05a0242be0bab, core/tools/callTool.ts.
+' Observed behavior: the descriptor name or URI selects a built-in, MCP, or HTTP dispatch path.
+' Design reason: place the descriptor above the dispatcher to match runtime selection order.
+title Continue tool dispatch model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class ContinueToolDescriptor {
+  +name: string
+  +description: string
+  +parameters: JsonSchema
+  +uri: string [0..1]
+}
+class ContinueToolDispatcher {
+  +callBuiltIn(name, args): ToolResult
+  +callMcp(uri, args): ToolResult
+  +callHttp(uri, args): ToolResult
+}
+ContinueToolDescriptor -down-> ContinueToolDispatcher : selects route
+@enduml
+
+@startuml claude_code_mcp_tool_model
 !pragma layout smetana
 ' Source evidence: Claude Code MCP at https://code.claude.com/docs/en/mcp, accessed 2026-07-17.
-' Source evidence: Kiro official Agent configuration reference and MCP configuration, accessed 2026-07-17.
-' Source evidence: goose commit d6345f75dba4f43afe705e045414edf173e40af4, crates/goose/src/agents/extension.rs ExtensionConfig.
 ' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
-' Observed behavior: these clients select or bind MCP tools but do not define arbitrary local tool implementations in metadata.
-' Design reason: separate agent-level selection and server binding from the server-owned tool descriptor and behavior.
-' Layout-only hidden links keep the three client configurations in one row and carry no design semantics.
-title MCP-consuming agent tool models
+' Observed behavior: Claude Code configures an MCP client that discovers and calls server-owned tools.
+' Design reason: keep the product configuration, client, server, and tool in one vertical ownership chain.
+title Claude Code MCP tool model
 top to bottom direction
 skinparam classAttributeIconSize 0
 skinparam shadowing false
 skinparam backgroundColor white
-skinparam packageStyle rectangle
-skinparam nodesep 35
-skinparam ranksep 40
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
 
+class ClaudeCodeMcpServerConfig {
+  +type: stdio | http | sse | websocket
+  +commandOrUrl: string
+  +args: string[] [0..1]
+  +envOrHeaders: SecretRefMap [0..1]
+  +scope: local | project | user
+}
+class ClaudeCodeMcpClient {
+  +discoverTools(): ExternalMcpTool[]
+  +callTool(name, args): CallToolResult
+}
+interface ExternalMcpServer {
+  +tools_list(): ExternalMcpTool[]
+  +tools_call(name, arguments): CallToolResult
+}
 class ExternalMcpTool {
   +name: string
   +description: string [0..1]
   +inputSchema: JsonSchema
   +outputSchema: JsonSchema [0..1]
 }
+ClaudeCodeMcpServerConfig -down-> ClaudeCodeMcpClient : configures
+ClaudeCodeMcpClient -down-> ExternalMcpServer : connects
+ExternalMcpServer -down-> ExternalMcpTool : owns and executes
+@enduml
+
+@startuml kiro_mcp_tool_model
+!pragma layout smetana
+' Source evidence: Kiro official Agent configuration reference and MCP configuration, accessed 2026-07-17.
+' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
+' Observed behavior: the Agent profile selects tools and contains MCP server bindings; the server owns execution.
+' Design reason: align selection, binding, server, and descriptor from top to bottom.
+title Kiro CLI MCP tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class KiroAgentProfile {
+  +tools: string[]
+  +allowedTools: string[]
+  +toolAliases: ToolAlias[]
+  +mcpServers: McpServerConfig[]
+}
+class KiroMcpServerConfig {
+  +command: string [0..1]
+  +args: string[] [0..1]
+  +url: string [0..1]
+  +envOrHeaders: SecretRefMap [0..1]
+  +disabledTools: string[] [0..1]
+}
 interface ExternalMcpServer {
   +tools_list(): ExternalMcpTool[]
   +tools_call(name, arguments): CallToolResult
 }
-ExternalMcpServer --> ExternalMcpTool : owns definition and behavior
-
-package "Claude Code" {
-  class ClaudeCodeMcpServerConfig {
-    +type: stdio | http | sse | websocket
-    +commandOrUrl: string
-    +args: string[] [0..1]
-    +envOrHeaders: SecretRefMap [0..1]
-    +scope: local | project | user
-  }
-  class ClaudeCodeMcpClient {
-    +discoverTools(): ExternalMcpTool[]
-    +callTool(name, args): CallToolResult
-  }
-  ClaudeCodeMcpServerConfig --> ClaudeCodeMcpClient : configures
-  ClaudeCodeMcpClient --> ExternalMcpServer : connects
+class ExternalMcpTool {
+  +name: string
+  +description: string [0..1]
+  +inputSchema: JsonSchema
+  +outputSchema: JsonSchema [0..1]
 }
-
-package "Kiro CLI" {
-  class KiroAgentProfile {
-    +tools: string[]
-    +allowedTools: string[]
-    +toolAliases: ToolAlias[]
-    +mcpServers: McpServerConfig[]
-  }
-  class KiroMcpServerConfig {
-    +command: string [0..1]
-    +args: string[] [0..1]
-    +url: string [0..1]
-    +envOrHeaders: SecretRefMap [0..1]
-    +disabledTools: string[] [0..1]
-  }
-  KiroAgentProfile o-- KiroMcpServerConfig
-  KiroMcpServerConfig --> ExternalMcpServer : starts or connects
-}
-
-package "Goose" {
-  class GooseExtensionConfig {
-    +type: stdio | sse | streamableHttp | builtin | inlinePython
-    +name: string
-    +cmdOrUri: string
-    +args: string[] [0..1]
-    +envs: SecretRefMap [0..1]
-  }
-  class GooseExtensionManager {
-    +start(config)
-    +listTools(): ExternalMcpTool[]
-    +callTool(name, args): CallToolResult
-  }
-  GooseExtensionConfig --> GooseExtensionManager : configures
-  GooseExtensionManager --> ExternalMcpServer : connects
-}
-
-ClaudeCodeMcpServerConfig -[hidden]right-> KiroAgentProfile
-KiroAgentProfile -[hidden]right-> GooseExtensionConfig
-ClaudeCodeMcpClient -[hidden]down-> ExternalMcpServer
-KiroMcpServerConfig -[hidden]down-> ExternalMcpServer
-GooseExtensionManager -[hidden]down-> ExternalMcpServer
+KiroAgentProfile o-down-> KiroMcpServerConfig
+KiroMcpServerConfig -down-> ExternalMcpServer : starts or connects
+ExternalMcpServer -down-> ExternalMcpTool : owns and executes
 @enduml
 
-@startuml devin_and_mcp_tool_ownership
+@startuml goose_extension_tool_model
+!pragma layout smetana
+' Source evidence: goose commit d6345f75dba4f43afe705e045414edf173e40af4, crates/goose/src/agents/extension.rs and extension_manager.rs.
+' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
+' Observed behavior: ExtensionConfig creates a managed client connection that lists and calls server-owned tools.
+' Design reason: show one vertical configuration-to-manager-to-server-to-tool chain.
+title Goose extension tool model
+top to bottom direction
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam nodesep 25
+skinparam ranksep 35
+hide circle
+
+class GooseExtensionConfig {
+  +type: stdio | sse | streamableHttp | builtin | inlinePython
+  +name: string
+  +cmdOrUri: string
+  +args: string[] [0..1]
+  +envs: SecretRefMap [0..1]
+}
+class GooseExtensionManager {
+  +start(config)
+  +listTools(): ExternalMcpTool[]
+  +callTool(name, args): CallToolResult
+}
+interface ExternalMcpServer {
+  +tools_list(): ExternalMcpTool[]
+  +tools_call(name, arguments): CallToolResult
+}
+class ExternalMcpTool {
+  +name: string
+  +description: string [0..1]
+  +inputSchema: JsonSchema
+  +outputSchema: JsonSchema [0..1]
+}
+GooseExtensionConfig -down-> GooseExtensionManager : configures
+GooseExtensionManager -down-> ExternalMcpServer : connects
+ExternalMcpServer -down-> ExternalMcpTool : owns and executes
+@enduml
+
+@startuml devin_tool_ownership_model
 !pragma layout smetana
 ' Source evidence: Devin official MCP and session API documentation, accessed 2026-07-17.
 ' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
 ' Observed behavior: Devin exposes a managed tool surface and can also connect to externally implemented MCP tools.
-' Design reason: keep managed execution separate from the MCP server-owned descriptor and behavior.
+' Design reason: use two semantic packages to keep managed execution separate from MCP server ownership.
 title Devin managed and MCP tool ownership
-left to right direction
+top to bottom direction
 skinparam classAttributeIconSize 0
 skinparam shadowing false
 skinparam backgroundColor white
 skinparam packageStyle rectangle
-skinparam nodesep 35
-skinparam ranksep 40
+skinparam nodesep 30
+skinparam ranksep 35
+hide circle
 
-package "MCP protocol" {
+package "External MCP tools" {
+  class DevinMcpIntegration {
+    +serverUrl: string
+    +authRef: string [0..1]
+    +enabledTools: string[] [0..1]
+  }
   class ExternalMcpTool {
     +name: string
     +description: string [0..1]
@@ -553,15 +681,11 @@ package "MCP protocol" {
     +tools_list(): ExternalMcpTool[]
     +tools_call(name, arguments): CallToolResult
   }
-  ExternalMcpServer --> ExternalMcpTool : owns and executes
+  DevinMcpIntegration -down-> ExternalMcpServer : connects
+  ExternalMcpServer -down-> ExternalMcpTool : owns and executes
 }
 
-package "Devin" {
-  class DevinMcpIntegration {
-    +serverUrl: string
-    +authRef: string [0..1]
-    +enabledTools: string[] [0..1]
-  }
+package "Devin managed tools" {
   class DevinManagedToolCatalog {
     +builtInTools: ManagedTool[]
   }
@@ -569,7 +693,6 @@ package "Devin" {
     +name: string
     +managedExecution: DevinService
   }
-  DevinMcpIntegration --> ExternalMcpServer : connects
-  DevinManagedToolCatalog o-- DevinManagedTool : separate managed surface
+  DevinManagedToolCatalog o-down-> DevinManagedTool
 }
 @enduml
