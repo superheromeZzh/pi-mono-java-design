@@ -1,6 +1,6 @@
 # 主流 Agent 的“配置生成 Tool / Agent”机制调研与统一元数据设计
 
-- 文档版本：1.3.0
+- 文档版本：1.4.0
 - 调研日期：2026-07-17
 - 当前结论范围：14 个 Agent/平台样本（Claude Code、Codex、OpenCode、Cline、Qwen Code、Kiro CLI、Amp、Grok Build、OpenClaw、Goose、Coze Studio、Continue、Devin、Pi），补充 Anthropic API/Managed Agents 契约，以及 MCP 协议基线
 - 说明：先前写作 `cozy` 的项目按 Coze Studio（扣子开源版）处理
@@ -516,11 +516,24 @@ Runtime Factory 使用这个不可变计划创建 Agent Instance。这样同一 
 | `workflow` | Coze workflow Tool 等 | 已部署 workflow runtime |
 | `agentProxy` | Cline/Amp/Continue 的 subagent Tool | 被引用 Agent 可编译且可运行 |
 
+Tool Manifest 还定义了与大规模 Tool catalog 相关的 `spec.exposure`：
+
+为兼容已有 Manifest，省略 `spec.exposure` 时，Compiler 按 `eager + searchable` 处理；生产配置仍建议显式填写，避免平台升级后产生歧义。
+
+| 字段 | 含义 |
+|---|---|
+| `mode: eager` | 完整 descriptor 常驻模型上下文，适用于 Tool Search 等引导工具 |
+| `mode: deferred` | 只进入受控搜索索引，命中后才把完整 descriptor 激活到会话 |
+| `mode: hidden` | 不进入模型上下文或 Tool Search；Schema 强制 `searchable: false` |
+| `searchable` | Tool Search 是否可以索引并返回该 Tool；它不能绕过 Agent selector 或 policy |
+| `aliases` / `keywords` / `group` | 在名称、描述和参数描述之外补充检索信号与分组 |
+
 ### 7.2 可运行示例
 
 - [OpenAPI Tool](./examples/tool-openapi.json)：由通用 OpenAPI driver 执行；最接近 Coze 模式。
 - [Command Tool](./examples/tool-command.json)：由统一 JSON stdin/stdout driver 执行；对应 Qwen 模式。
 - [MCP Tool](./examples/tool-mcp.json)：只生成协议代理；明确依赖已有 Server。
+- [Tool Search](./examples/tool-search.json)：搜索当前 Agent 已授权的 Ready Tool，并可把命中的 deferred Tool 激活到当前会话。
 - [Code Review Agent](./examples/agent-code-review.json)：模型、指令、Tool selector、Skill、Memory、权限、subagent、hook、输出 Schema。
 - [Development Binding](./examples/binding-development.json)：只保存 secret 引用、endpoint、workspace、identity 和 artifact pin，不保存明文 secret。
 
@@ -541,6 +554,42 @@ Runtime Factory 使用这个不可变计划创建 Agent Instance。这样同一 
 ```
 
 这样 Agent 的模型、工具、权限、记忆和升级策略仍由自己的 AgentManifest 管理；父 Agent 只持有引用。
+
+### 7.4 Tool Search 元数据设计
+
+[tool-search.json](./examples/tool-search.json) 是一个完整的 `kind: Tool` 示例。它综合了以下已观察机制：
+
+- GitHub Copilot CLI 按 name、description、parameter name/description 搜索 Tool，并把命中 Tool 按需加载到会话。[官方 Tool Search](https://docs.github.com/en/copilot/concepts/agents/copilot-cli/tool-search)
+- Codex `DynamicToolFunctionSpec` 具有 `defer_loading`，证明 Tool 描述可被延迟暴露。[固定源码](https://github.com/openai/codex/blob/315195492c80fdade38e917c18f9584efd599304/codex-rs/protocol/src/dynamic_tools.rs#L10-L27)
+- MCP 用 `tools/list` 提供可检索描述，用 `tools/call` 保留 Server 执行所有权。[固定 Schema](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/26897cc322f356487da89113451bd16b520b9288/schema/2025-11-25/schema.ts#L1080-L1297)
+- Qwen Code 的 discovery command 说明 catalog 可以由通用 Driver 动态填充，不必把所有 Tool 编译进平台。[固定源码](https://github.com/QwenLM/qwen-code/blob/0ecba4b3c709d271a17faa5ac9537bf1b102eaf1/packages/core/src/tools/tool-registry.ts#L42-L181)
+
+Tool Search 的元数据分层如下：
+
+| 层 | Tool Search 示例中的决定 | 原因 |
+|---|---|---|
+| `metadata` | 稳定资源名 `platform.tool_search` 与不可变版本 | 支持引用、审计、回滚 |
+| `descriptor` | 定义 query、filters、limit、search/activate mode 及结构化结果 | 这是模型可以看到和调用的契约 |
+| `exposure` | `eager` 且 `searchable: false` | 搜索入口必须常驻，但不应搜索到自身 |
+| `implementation` | `builtinRef` + `core.tool-search@1` | 搜索、排序、权限裁剪和会话激活必须由受信任平台代码实现 |
+| `semantics` | 外部只读，但 `contextMutation: true` | 它不修改业务系统，却会改变当前会话可见 Tool 集合 |
+| `policy` | `approval: auto`，仅供 Agent 使用 | 搜索本身低风险，真正 Tool 调用仍执行各自 policy |
+
+被搜索的 Tool 使用如下配置；完整示例见 [MCP Tool](./examples/tool-mcp.json)：
+
+```json
+{
+  "exposure": {
+    "mode": "deferred",
+    "searchable": true,
+    "aliases": ["find_pull_requests", "search_prs"],
+    "keywords": ["pull request", "code review", "github repository"],
+    "group": "github.read"
+  }
+}
+```
+
+这是**目标设计中的架构扩展**，不是声称上述产品共享同一个 JSON。实现时必须满足三个边界：查询 filter 只能缩小候选集，不能扩大授权；只返回当前 Agent selector、identity 和 policy 已允许且处于 `Ready` 的 Tool；结果只包含 ResourceRef 和公开 descriptor，禁止泄漏 secret、endpoint、artifact pin 或内部 implementation config。
 
 ## 8. 必须补充的安全与治理元数据
 
@@ -752,7 +801,7 @@ Agent Profile 负责选择和权限，MCP Server 配置负责绑定执行端。[
 ## 12. 本次验证结果
 
 - JSON Schema 本身通过 Draft 2020-12 schema check；
-- 五个示例均通过 `jsonschema` 校验；
+- 六个示例均通过 `jsonschema` 校验；
 - PlantUML 文件只包含 ASCII；
 - `plantuml -tsvg diagram.puml` 生成十九个 SVG；
 - SVG 均通过 XML 解析；
@@ -764,6 +813,7 @@ Agent Profile 负责选择和权限，MCP Server 配置负责绑定执行端。[
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.0 | 2026-07-17 | 新增 Tool Search 完整 JSON；增加 Tool exposure/deferred loading 与 session context mutation 元数据，并提供可检索 MCP Tool 示例 |
 | 1.3.0 | 2026-07-17 | 废弃跨产品目录式类图；改为一产品/契约一图的统一纵向布局，移除跨产品隐藏布局关系并完成逐图视觉检查 |
 | 1.2.0 | 2026-07-17 | 拆分 Claude Code、Anthropic API 与 Managed Agents 的证据归属；为类图增加逐对象来源并重排布局；新增范围标准与分层扩展建议 |
 | 1.1.0 | 2026-07-17 | 新增覆盖全部调研项目的四组 ToolDefinition 类图，并同步图源、SVG 与验证结果 |

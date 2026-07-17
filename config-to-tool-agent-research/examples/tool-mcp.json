@@ -23,6 +23,13 @@
       },
       "tags": ["github", "read"]
     },
+    "exposure": {
+      "mode": "deferred",
+      "searchable": true,
+      "aliases": ["find_pull_requests", "search_prs"],
+      "keywords": ["pull request", "code review", "github repository"],
+      "group": "github.read"
+    },
     "implementation": {
       "kind": "mcp",
       "driver": "core.mcp@2025-11-25",

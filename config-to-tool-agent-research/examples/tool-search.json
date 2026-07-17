@@ -1,0 +1,188 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Tool",
+  "metadata": {
+    "name": "platform.tool_search",
+    "version": "1.0.0",
+    "displayName": "Tool Search",
+    "description": "Searches the current agent's authorized tool catalog and optionally activates matching deferred tools for the session.",
+    "labels": {
+      "domain": "platform",
+      "capability": "tool-discovery",
+      "owner": "agent-runtime-team"
+    }
+  },
+  "spec": {
+    "descriptor": {
+      "name": "tool_search",
+      "title": "Search available tools",
+      "description": "Search the current agent's authorized Ready tool catalog by capability. Use searchAndActivate when the task requires tools that are not yet loaded into the model context. Filters only narrow results and never grant additional access.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Describe the capability needed using concrete task terms."
+          },
+          "filters": {
+            "type": "object",
+            "properties": {
+              "tags": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 },
+                "uniqueItems": true
+              },
+              "namespaces": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 },
+                "uniqueItems": true
+              },
+              "implementationKinds": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "builtinRef",
+                    "mcp",
+                    "openapi",
+                    "http",
+                    "command",
+                    "artifact",
+                    "workflow",
+                    "agentProxy"
+                  ]
+                },
+                "uniqueItems": true
+              },
+              "readOnly": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 5
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["searchOnly", "searchAndActivate"],
+            "default": "searchAndActivate"
+          }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "catalogRevision": { "type": "string" },
+          "matches": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "version": { "type": "string" },
+                    "namespace": { "type": "string" }
+                  },
+                  "required": ["name", "version"],
+                  "additionalProperties": false
+                },
+                "name": { "type": "string" },
+                "title": { "type": "string" },
+                "description": { "type": "string" },
+                "tags": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                },
+                "score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "activated": { "type": "boolean" }
+              },
+              "required": ["ref", "name", "description", "score", "activated"],
+              "additionalProperties": false
+            }
+          },
+          "activatedTools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "version": { "type": "string" },
+                "namespace": { "type": "string" }
+              },
+              "required": ["name", "version"],
+              "additionalProperties": false
+            },
+            "uniqueItems": true
+          },
+          "truncated": { "type": "boolean" }
+        },
+        "required": ["catalogRevision", "matches", "activatedTools", "truncated"],
+        "additionalProperties": false
+      },
+      "tags": ["platform", "discovery", "tool-catalog"]
+    },
+    "exposure": {
+      "mode": "eager",
+      "searchable": false,
+      "group": "platform.discovery"
+    },
+    "implementation": {
+      "kind": "builtinRef",
+      "driver": "core.tool-search@1",
+      "toolRef": "builtin://tool-catalog/search-and-activate",
+      "config": {
+        "catalogRef": "registry://tools/current-agent",
+        "scope": "resolvedAgentPlan",
+        "searchableStates": ["Ready"],
+        "candidateFields": [
+          "descriptor.name",
+          "descriptor.title",
+          "descriptor.description",
+          "descriptor.inputSchema.properties.*.description",
+          "descriptor.tags",
+          "exposure.aliases",
+          "exposure.keywords"
+        ],
+        "defaultLimit": 5,
+        "maxLimit": 20,
+        "rankingProfileRef": "ranking://tool-search/hybrid-v1",
+        "visibilityPolicyRef": "policy://tool-search/current-agent-visible-tools",
+        "activation": {
+          "enabled": true,
+          "lifetime": "session",
+          "requireReady": true,
+          "respectAgentSelection": true,
+          "maxToolsPerCall": 5,
+          "collisionPolicy": "qualifiedName",
+          "persistForSession": true
+        }
+      }
+    },
+    "semantics": {
+      "readOnly": true,
+      "destructive": false,
+      "idempotent": true,
+      "contextMutation": true,
+      "openWorld": false,
+      "timeoutMs": 3000,
+      "maxConcurrency": 1
+    },
+    "policy": {
+      "approval": "auto",
+      "audience": ["agent"]
+    }
+  }
+}

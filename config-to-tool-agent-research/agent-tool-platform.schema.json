@@ -69,6 +69,43 @@
         }
       }
     },
+    "ToolExposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "searchable"],
+      "properties": {
+        "mode": {
+          "enum": ["eager", "deferred", "hidden"],
+          "description": "Controls whether the full tool descriptor is always loaded, discovered on demand, or excluded from model exposure."
+        },
+        "searchable": {
+          "type": "boolean",
+          "description": "Whether an authorized tool-search service may index and return this tool."
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "uniqueItems": true
+        },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "uniqueItems": true
+        },
+        "group": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "hidden" } },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": { "searchable": { "const": false } }
+          }
+        }
+      ]
+    },
     "BuiltinImplementation": {
       "type": "object",
       "additionalProperties": false,
@@ -203,6 +240,11 @@
         "readOnly": { "type": "boolean", "default": false },
         "destructive": { "type": "boolean", "default": true },
         "idempotent": { "type": "boolean", "default": false },
+        "contextMutation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a call mutates session-local agent context, such as the currently activated tool set, without changing external state."
+        },
         "openWorld": { "type": "boolean", "default": true },
         "timeoutMs": { "type": "integer", "minimum": 1 },
         "maxConcurrency": { "type": "integer", "minimum": 1 },
@@ -247,6 +289,13 @@
           "required": ["descriptor", "implementation"],
           "properties": {
             "descriptor": { "$ref": "#/$defs/ToolDescriptor" },
+            "exposure": {
+              "$ref": "#/$defs/ToolExposure",
+              "default": {
+                "mode": "eager",
+                "searchable": true
+              }
+            },
             "implementation": { "$ref": "#/$defs/ToolImplementation" },
             "semantics": { "$ref": "#/$defs/ToolSemantics" },
             "requires": {
