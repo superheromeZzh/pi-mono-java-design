@@ -1,10 +1,10 @@
 # pi-mono Java ToB 记忆系统 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.2
-> 日期：2026-07-16
+> 版本：v0.3
+> 日期：2026-07-17
 > 状态：设计初稿
-> pi 源码基线：[`dcfe36c79702ec240b146c45f167ab75ecddd205`](https://github.com/badlogic/pi-mono/tree/dcfe36c79702ec240b146c45f167ab75ecddd205)
+> pi 源码基线：[`216e672e7c9fc65682553394b74e483c0c9e47f7`](https://github.com/badlogic/pi-mono/tree/216e672e7c9fc65682553394b74e483c0c9e47f7)
 > Java 源码基线：无；本文 Java 内容均为 target-only design
 
 ## 1. 结论
@@ -64,17 +64,19 @@ Java 目标新增以下 ToB 能力：
 
 本节只记录观察到的 pi 行为，不代表 Java 已有实现。
 
+相对上一版分析基线 `dcfe36c79702ec240b146c45f167ab75ecddd205`，当前基线中的 `SessionManager`、compaction、branch summarization 和文件跟踪实现未发生变化；`AgentSession` 改用 model runtime facade 获取模型认证信息，但 `navigateTree()` 的 leaf 选择、摘要生成和目标侧挂载语义未改变。
+
 ### 3.1 SessionEntry 是持久化事实源
 
 当前生产版 `SessionManager` 定义了 `message`、`thinking_level_change`、`model_change`、`compaction`、`branch_summary`、`custom`、`custom_message`、`label` 和 `session_info` 等 entry。`CompactionEntry` 使用 `summary`、`firstKeptEntryId`、`tokensBefore`、`details` 和 `fromHook`；`BranchSummaryEntry` 使用 `fromId`、`summary`、`details` 和 `fromHook`。
 
-源码证据：[`SessionEntry` types](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/session-manager.ts#L46-L143)。
+源码证据：[`SessionEntry` types](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L46-L143)。
 
 ### 3.2 Context rebuild 只选择当前路径
 
 `buildContextEntries()` 从当前 leaf 向 root 形成路径。如果路径中存在 compaction，它把最新 compaction 转为摘要消息，保留 `firstKeptEntryId` 到 compaction 之前的 entry，并保留 compaction 之后的 entry。随后 `buildSessionContext()` 将 entry 投影为 LLM 消息。
 
-源码证据：[`buildContextEntries()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/session-manager.ts#L406-L449)。
+源码证据：[`buildContextEntries()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L414-L449)。
 
 ### 3.3 普通写入是追加，production leaf 不是独立 entry
 
@@ -82,7 +84,7 @@ Java 目标新增以下 ToB 能力：
 
 这意味着 Java 若要在 ToB 场景中保证“只导航但尚未追加下一条消息”的状态可恢复，需要进行架构改造，不能直接假设 pi 的内存 leaf 语义已经持久化。
 
-源码证据：[`_appendEntry()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/session-manager.ts#L975-L980)、[`branch()` / `resetLeaf()` / `branchWithSummary()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/session-manager.ts#L1284-L1327)。
+源码证据：[`_appendEntry()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L975-L980)、[`branch()` / `resetLeaf()` / `branchWithSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L1289-L1326)。
 
 ### 3.4 Compaction 的触发、切割和增量摘要
 
@@ -94,17 +96,17 @@ contextTokens > contextWindow - reserveTokens
 
 切割点允许位于 user、assistant、bashExecution、custom、branchSummary 和 compactionSummary 消息，不能位于 toolResult。单个 turn 过大时，代码生成历史摘要和 turn prefix 摘要。
 
-源码证据：[`DEFAULT_COMPACTION_SETTINGS` / `shouldCompact()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L100-L110)、[`isCutPointMessage()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L282-L317)、[`prepareCompaction()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L633-L705)。
+源码证据：[`DEFAULT_COMPACTION_SETTINGS`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L106-L110)、[`shouldCompact()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L209-L215)、[`isCutPointMessage()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L282-L317)、[`prepareCompaction()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L633-L705)。
 
 重复压缩时，前一次非 hook compaction 的 summary 会作为 `previousSummary` 输入；生成结果追加为新的 compaction entry。
 
-源码证据：[`generateSummary()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L512-L608)、[`compact()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L740-L825)。
+源码证据：[`generateSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L546-L608)、[`compact()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L740-L825)。
 
 ### 3.5 Branch summary 的生成和挂载
 
 `collectEntriesForBranchSummary()` 找到旧 leaf 与目标 entry 的 common ancestor，收集旧路径上的 entry。`AgentSession.navigateTree()` 生成摘要后，把 `branch_summary` 挂到目标侧的 `newLeafId`，而不是挂到被离开的旧分支末尾。
 
-源码证据：[`collectEntriesForBranchSummary()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/branch-summarization.ts#L90-L139)、[`navigateTree()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/agent-session.ts#L2799-L2975)。
+源码证据：[`collectEntriesForBranchSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/branch-summarization.ts#L102-L145)、[`navigateTree()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/agent-session.ts#L2832-L3016)。
 
 ### 3.6 文件操作和序列化
 
@@ -117,13 +119,13 @@ readFiles = read - modifiedFiles
 
 tool result 在摘要序列化时最多保留 2000 个字符。compaction 会继承前一个 pi-generated compaction 的 file details；branch summary 会累计 branch summary 自身的 details。这两个累计链路在当前代码中不是跨机制合并。
 
-源码证据：[`computeFileLists()` / `serializeConversation()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/utils.ts#L26-L162)、[`extractFileOperations()`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/compaction/compaction.ts#L26-L64)。
+源码证据：[`extractFileOpsFromMessage()` / `computeFileLists()` / `serializeConversation()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/utils.ts#L29-L162)、[`extractFileOperations()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L41-L67)。
 
 ### 3.7 Extension hooks
 
 当前 production AgentSession 支持 `session_before_compact`、`session_compact`、`session_before_tree` 和 `session_tree`。压缩 hook 可以取消操作或提供自定义 summary、firstKeptEntryId、tokensBefore 和 details；tree hook 可以取消导航或提供自定义摘要。
 
-源码证据：[`SessionBeforeCompactEvent` / `SessionBeforeTreeEvent`](https://github.com/badlogic/pi-mono/blob/dcfe36c79702ec240b146c45f167ab75ecddd205/packages/coding-agent/src/core/extensions/types.ts#L577-L638)。
+源码证据：[`SessionBeforeCompactEvent` / `SessionBeforeTreeEvent`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/extensions/types.ts#L579-L638)。
 
 ## 4. Java 目标行为
 
@@ -583,5 +585,6 @@ tree navigation 与 compaction 使用同一 revision 机制。摘要生成过程
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.3 | 2026-07-17 | 将 pi 源码基线更新为 `216e672e7c9fc65682553394b74e483c0c9e47f7`，重新核对记忆相关实现和源码锚点；确认 model runtime facade 变更未改变记忆语义 |
 | v0.2 | 2026-07-16 | 为 DDL 草案中的全部表和字段补充数据库 COMMENT；不改变表结构和行为设计 |
 | v0.1 | 2026-07-15 | 以 pi commit `dcfe36c79702ec240b146c45f167ab75ecddd205` 为基线，建立 Java ToB GaussDB 持久化、租户隔离、事务一致性、幂等和迁移设计；明确 Java target-only 差异 |

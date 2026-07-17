@@ -4,7 +4,7 @@ title Java ToB Memory Persistence Architecture
 skinparam componentStyle rectangle
 
 ' Source evidence: packages/coding-agent/src/core/session-manager.ts: SessionEntry,
-' _appendEntry, buildContextEntries, commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' _appendEntry, buildContextEntries, commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
 ' Observed behavior: pi appends session entries and rebuilds context from the active leaf path.
 ' Design reason: keep context semantics in the application layer and make the database the durable source.
 ' Java divergence: tenant isolation, durable leaf events, revision checks, and idempotency are target-only.
@@ -48,7 +48,7 @@ title Append And Branch Transaction
 
 ' Source evidence: packages/coding-agent/src/core/session-manager.ts: _appendEntry,
 ' appendCompaction, branchWithSummary; packages/coding-agent/src/core/agent-session.ts:
-' compact and navigateTree; commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' compact and navigateTree; commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
 ' Observed behavior: pi generates summaries before appending compaction or branch_summary entries.
 ' Design reason: keep LLM latency outside the database lock while committing a short atomic state change.
 ' Java divergence: optimistic revision, idempotency record, and explicit leaf audit event are target-only.
@@ -89,7 +89,7 @@ end
 title Database Context Rebuild
 
 ' Source evidence: packages/coding-agent/src/core/session-manager.ts: buildSessionPath,
-' buildContextEntries, buildSessionContext; commit dcfe36c79702ec240b146c45f167ab75ecddd205.
+' buildContextEntries, buildSessionContext; commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
 ' Observed behavior: pi walks parentId to root, keeps the latest compaction boundary, and projects entries to messages.
 ' Design reason: SQL should fetch a stable tree path; Java should own prompt and message semantics.
 ' Java divergence: the path is fetched by a recursive SQL query and current leaf is durable in the target schema.
