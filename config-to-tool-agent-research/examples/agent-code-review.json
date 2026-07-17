@@ -1,0 +1,116 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Agent",
+  "metadata": {
+    "name": "engineering.code_reviewer",
+    "version": "1.3.0",
+    "displayName": "Code Reviewer",
+    "description": "Reviews a change set for correctness, security, and missing tests.",
+    "labels": {
+      "domain": "engineering",
+      "role": "reviewer"
+    }
+  },
+  "spec": {
+    "runtime": {
+      "factory": "core.react-agent@2",
+      "provider": "configured-provider",
+      "model": "configured-provider/reasoning-model",
+      "reasoningEffort": "high",
+      "maxTurns": 40,
+      "timeoutMs": 1200000
+    },
+    "instructions": {
+      "inline": "Review only the requested change set. Lead with actionable findings. Cite files and line numbers. Do not modify files.",
+      "refs": [
+        "policy://engineering/review-standard/4.0.0"
+      ]
+    },
+    "tools": [
+      {
+        "ref": {
+          "name": "repository.dependency_audit",
+          "version": "2.1.0"
+        },
+        "approval": "auto"
+      },
+      {
+        "selector": {
+          "tags": ["repository", "read"]
+        },
+        "exclude": ["shell_write"]
+      }
+    ],
+    "skills": [
+      {
+        "name": "secure-code-review",
+        "version": "3.0.0"
+      }
+    ],
+    "knowledge": [
+      "knowledge://engineering/architecture/current"
+    ],
+    "memory": {
+      "mode": "project",
+      "storeRef": "binding://memory/project-review",
+      "readOnly": false
+    },
+    "policy": {
+      "defaultApproval": "ask",
+      "sandbox": "worktree",
+      "permissions": [
+        {
+          "capability": "filesystem.read",
+          "effect": "allow"
+        },
+        {
+          "capability": "filesystem.write",
+          "effect": "deny"
+        },
+        {
+          "capability": "network",
+          "effect": "ask",
+          "match": ["github.example"]
+        }
+      ],
+      "maxParallelTools": 4,
+      "budgetRef": "policy://budgets/reviewer-standard"
+    },
+    "subagents": [
+      {
+        "ref": {
+          "name": "engineering.security_reviewer",
+          "version": "1.1.0"
+        },
+        "alias": "security",
+        "description": "Deep security review for high-risk changes.",
+        "maxConcurrency": 1
+      }
+    ],
+    "hooks": [
+      {
+        "event": "preToolUse",
+        "matcher": "*",
+        "handlerRef": "policy-handler://audit/tool-use"
+      }
+    ],
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": { "type": "string" },
+              "file": { "type": "string" },
+              "message": { "type": "string" }
+            },
+            "required": ["severity", "message"]
+          }
+        }
+      },
+      "required": ["findings"]
+    }
+  }
+}

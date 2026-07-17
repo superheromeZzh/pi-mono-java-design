@@ -6,6 +6,7 @@
 
 - [Command SR 设计](./pi-mono-java-command-SR设计.md)
 - [Skill Command SR 设计](./pi-mono-java-skill-command-SR设计.md)
+- [主流 Agent Tool/Agent 元数据机制调研与统一设计](./config-to-tool-agent-research/README.md)
 
 ## 约定
 

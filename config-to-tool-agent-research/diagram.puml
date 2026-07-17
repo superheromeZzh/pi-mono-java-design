@@ -1,0 +1,481 @@
+@startuml tool_realization_pipeline
+!pragma layout smetana
+' Source evidence: coze-studio backend/domain/plugin/conf/load_plugin.go loadPluginProductMeta.
+' Source evidence: coze-studio backend/domain/plugin/service/tool/invocation_http.go httpCallImpl.Do.
+' Source evidence: qwen-code packages/core/src/tools/tool-registry.ts DiscoveredToolInvocation.execute.
+' Source evidence: MCP schema/2025-11-25/schema.ts Tool, ListToolsResult, and CallToolRequest.
+' Observed behavior: metadata becomes executable only when a runtime driver or remote server handles the call.
+' Design reason: keep the model contract separate from implementation and deployment bindings.
+title Tool manifest realization pipeline
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam backgroundColor white
+
+actor Developer
+rectangle "Control plane" {
+  artifact "ToolManifest\nDescriptor + ImplementationRef" as Manifest
+  component "Schema Validator" as Validator
+  component "Manifest Compiler" as Compiler
+  component "Driver Registry" as Registry
+  component "Policy Compiler" as PolicyCompiler
+}
+
+rectangle "Runtime plane" {
+  component "Model Tool Adapter" as ModelAdapter
+  component "Policy Gate" as Gate
+  component "Tool Executor" as Executor
+  component "OpenAPI Driver" as OpenApiDriver
+  component "MCP Proxy Driver" as McpDriver
+  component "Command Driver" as CommandDriver
+  component "Artifact Driver" as ArtifactDriver
+  component "Workflow Driver" as WorkflowDriver
+  component "Agent Proxy Driver" as AgentDriver
+}
+
+cloud "External API" as Api
+node "MCP Server" as McpServer
+node "Pinned Artifact" as Artifact
+component "Workflow Runtime" as Workflow
+component "Agent Runtime" as Agent
+
+Developer --> Manifest
+Manifest --> Validator
+Validator --> Compiler
+Compiler --> ModelAdapter : descriptor
+Compiler --> Registry : implementation ref
+Compiler --> PolicyCompiler : semantics and policy
+PolicyCompiler --> Gate
+ModelAdapter --> Gate : validated call
+Gate --> Executor
+Registry --> Executor : resolved driver
+Executor --> OpenApiDriver
+Executor --> McpDriver
+Executor --> CommandDriver
+Executor --> ArtifactDriver
+Executor --> WorkflowDriver
+Executor --> AgentDriver
+OpenApiDriver --> Api
+McpDriver --> McpServer
+CommandDriver --> Artifact
+ArtifactDriver --> Artifact
+WorkflowDriver --> Workflow
+AgentDriver --> Agent
+@enduml
+
+@startuml agent_realization_pipeline
+!pragma layout smetana
+' Source evidence: codex codex-rs/core/src/config/agent_roles.rs load_agent_roles and parse_agent_role_file_contents.
+' Source evidence: opencode packages/core/src/config/plugin/agent.ts and packages/opencode/src/agent/agent.ts.
+' Source evidence: grok-build crates/codegen/xai-grok-agent/src/config.rs and builder.rs.
+' Source evidence: coze-studio backend/domain/agent/singleagent/internal/agentflow/agent_flow_builder.go BuildAgent.
+' Observed behavior: agent configuration is compiled by an existing generic agent runtime.
+' Design reason: resolve capabilities before starting a session and keep runtime state outside the manifest.
+title Agent manifest realization pipeline
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam backgroundColor white
+
+actor Developer
+artifact "AgentManifest" as AgentManifest
+artifact "Binding" as Binding
+component "Manifest Validator" as AgentValidator
+component "Agent Compiler" as AgentCompiler
+component "Model Resolver" as ModelResolver
+component "Instruction Resolver" as InstructionResolver
+component "Tool Resolver" as ToolResolver
+component "Skill and Knowledge Resolver" as KnowledgeResolver
+component "Memory Resolver" as MemoryResolver
+component "Policy Resolver" as PolicyResolver
+component "Subagent Resolver" as SubagentResolver
+component "Runtime Factory Registry" as FactoryRegistry
+component "Agent Runtime Factory" as AgentFactory
+node "Runnable Agent Instance" as AgentInstance
+database "Session State" as SessionState
+
+Developer --> AgentManifest
+AgentManifest --> AgentValidator
+Binding --> AgentValidator : deployment references
+AgentValidator --> AgentCompiler
+AgentCompiler --> ModelResolver
+AgentCompiler --> InstructionResolver
+AgentCompiler --> ToolResolver
+AgentCompiler --> KnowledgeResolver
+AgentCompiler --> MemoryResolver
+AgentCompiler --> PolicyResolver
+AgentCompiler --> SubagentResolver
+AgentCompiler --> FactoryRegistry
+FactoryRegistry --> AgentFactory
+ModelResolver --> AgentFactory
+InstructionResolver --> AgentFactory
+ToolResolver --> AgentFactory
+KnowledgeResolver --> AgentFactory
+MemoryResolver --> AgentFactory
+PolicyResolver --> AgentFactory
+SubagentResolver --> AgentFactory
+AgentFactory --> AgentInstance
+AgentInstance --> SessionState
+@enduml
+
+@startuml portable_manifest_and_binding
+!pragma layout smetana
+' Source evidence: Claude Managed Agents separates reusable MCP declarations from session authentication.
+' Source evidence: OpenClaw agents.list separates agent identity from routing bindings and workspace state.
+' Observed behavior: reusable configuration and deployment credentials have different lifecycles.
+' Target-only design: the three-resource split below is a proposed portable architecture, not an existing shared standard.
+' Design reason: secrets, workspaces, and mutable state must not be embedded in reusable manifests.
+title Portable manifest, binding, and state split
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam backgroundColor white
+
+package "Portable and versioned" {
+  artifact "ToolManifest" as ToolManifest
+  artifact "AgentManifest" as PortableAgentManifest
+}
+
+package "Environment-specific" {
+  artifact "Binding" as DeployBinding
+  component "Driver Registry" as DeployDriverRegistry
+  component "Runtime Factory Registry" as DeployFactoryRegistry
+  collections "Secret References" as SecretRefs
+  collections "Endpoint and Artifact Pins" as EndpointRefs
+  collections "Workspace and Identity Refs" as WorkspaceRefs
+}
+
+package "Mutable runtime state" {
+  database "Conversation" as Conversation
+  database "Memory" as Memory
+  database "Checkpoints and Tasks" as Checkpoints
+}
+
+ToolManifest --> DeployBinding : subject ref
+PortableAgentManifest --> DeployBinding : subject ref
+DeployBinding --> DeployDriverRegistry
+DeployBinding --> DeployFactoryRegistry
+DeployBinding --> SecretRefs
+DeployBinding --> EndpointRefs
+DeployBinding --> WorkspaceRefs
+DeployFactoryRegistry --> Conversation
+DeployFactoryRegistry --> Memory
+DeployFactoryRegistry --> Checkpoints
+@enduml
+
+@startuml inline_code_tool_definitions
+!pragma layout smetana
+' Source evidence: pi packages/coding-agent/src/core/extensions/types.ts ToolDefinition and ExtensionAPI.registerTool.
+' Source evidence: opencode packages/opencode/src/tool/tool.ts Tool.Definition and official Custom Tools documentation.
+' Source evidence: Amp Plugin API PluginToolDefinition and PluginAPI.registerTool, accessed 2026-07-17.
+' Source evidence: openclaw src/plugins/types.ts and src/agents/tools/common.ts plugin tool registration.
+' Observed behavior: these systems register executable code objects, not metadata-only tool manifests.
+' Design reason: distinguish model-facing fields from required callbacks and plugin packaging.
+title Inline code ToolDefinition models
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+
+package "Pi" {
+  class PiToolDefinition {
+    +name: string
+    +label: string
+    +description: string
+    +parameters: TypeBoxSchema
+    +promptSnippet: string [0..1]
+    +promptGuidelines: string[] [0..1]
+    +executionMode: sequential | parallel [0..1]
+    +prepareArguments(raw): params [0..1]
+    +execute(callId, params, signal, update, ctx): ToolResult
+    +renderCall(): Component [0..1]
+    +renderResult(): Component [0..1]
+  }
+  class PiExtensionAPI {
+    +registerTool(definition)
+    +setActiveTools(names)
+  }
+  PiExtensionAPI o-- PiToolDefinition : registers
+}
+
+package "OpenCode" {
+  class OpenCodeToolDefinition {
+    +name: derived from file and export
+    +description: string
+    +args: ZodSchemaMap
+    +execute(args, context): string
+  }
+  class OpenCodeToolContext {
+    +agent: string
+    +sessionID: string
+    +messageID: string
+    +directory: string
+    +worktree: string
+  }
+  OpenCodeToolDefinition --> OpenCodeToolContext : execute receives
+}
+
+package "Amp" {
+  class AmpPluginToolDefinition {
+    +name: string
+    +description: string
+    +inputSchema: JsonSchemaObject
+    +execute(input, context): PluginToolResult
+  }
+  class AmpPluginToolContext {
+    +ui: PluginUI
+    +logger: PluginLogger
+    +thread: PluginThread
+  }
+  AmpPluginToolDefinition --> AmpPluginToolContext : execute receives
+}
+
+package "OpenClaw" {
+  class OpenClawPluginManifest {
+    +contracts.tools: string[]
+  }
+  class OpenClawToolFactory {
+    +create(context): OpenClawAgentTool
+  }
+  class OpenClawAgentTool {
+    +name: string
+    +label: string
+    +description: string
+    +parameters: TypeBoxSchema
+    +execute(callId, params): ToolResult
+  }
+  OpenClawPluginManifest ..> OpenClawAgentTool : declares names only
+  OpenClawToolFactory --> OpenClawAgentTool : creates runtime object
+}
+@enduml
+
+@startuml separated_and_callback_tool_definitions
+!pragma layout smetana
+' Source evidence: cline sdk/packages/shared/src/agent.ts AgentToolDefinition and AgentTool.
+' Source evidence: grok-build xai-grok-tools tool_metadata.rs and xai-tool-runtime tool.rs.
+' Source evidence: Claude official Tool use and Managed Agents tools documentation, accessed 2026-07-17.
+' Source evidence: codex codex-rs/protocol/src/dynamic_tools.rs DynamicToolFunctionSpec and app-server README.
+' Observed behavior: Cline and Grok split metadata from runtime, while Claude and Codex route calls to a host.
+' Design reason: show that a complete callable tool still needs an executor even when the descriptor is independent.
+title Separated metadata and host callback models
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+
+package "Cline" {
+  class ClineAgentToolDefinition {
+    +name: string
+    +description: string
+    +inputSchema: JsonSchema
+  }
+  class ClineAgentTool {
+    +execute(input, context): ToolResult
+  }
+  ClineAgentToolDefinition <|-- ClineAgentTool
+}
+
+package "Grok Build" {
+  interface GrokToolMetadata {
+    +name(): string
+    +displayName(): string
+    +description(): string
+    +parameterSchema(): JsonSchema
+  }
+  interface GrokRuntimeTool {
+    +execute(input, context): ToolResult
+  }
+  class RegisteredGrokTool
+  GrokToolMetadata <|.. RegisteredGrokTool
+  GrokRuntimeTool <|.. RegisteredGrokTool
+}
+
+package "Claude" {
+  class ClaudeToolDefinition {
+    +name: string
+    +description: string
+    +input_schema: JsonSchema
+  }
+  interface ClaudeClientExecutor {
+    +handle(toolUse): ToolResult
+  }
+  ClaudeToolDefinition ..> ClaudeClientExecutor : tool_use routed to host
+}
+
+package "Codex" {
+  class DynamicToolFunctionSpec {
+    +name: string
+    +description: string
+    +inputSchema: JsonSchema
+    +deferLoading: boolean
+  }
+  class DynamicToolNamespace {
+    +name: string
+    +description: string
+    +tools: DynamicToolFunctionSpec[]
+  }
+  interface AppServerToolCallback {
+    +handle(item_tool_call): DynamicToolResponse
+  }
+  DynamicToolNamespace o-- DynamicToolFunctionSpec
+  DynamicToolFunctionSpec ..> AppServerToolCallback : invocation sent to client
+}
+@enduml
+
+@startuml generic_driver_tool_definitions
+!pragma layout smetana
+' Source evidence: MCP schema/2025-11-25/schema.ts Tool, ToolAnnotations, and CallToolRequest.
+' Source evidence: qwen-code packages/core/src/tools/tool-registry.ts DiscoveredTool and DiscoveredToolInvocation.
+' Source evidence: coze-studio backend/domain/plugin/conf/load_plugin.go and service/tool/invocation_http.go.
+' Source evidence: continue core/tools/callTool.ts HTTP, MCP, and built-in dispatch branches.
+' Observed behavior: a generic driver interprets the descriptor and routes execution without per-tool host adapters.
+' Design reason: these are the strongest baselines for configuration-created proxy or driver-backed tools.
+title Protocol and generic driver ToolDefinition models
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+
+package "MCP" {
+  class McpTool {
+    +name: string
+    +title: string [0..1]
+    +description: string [0..1]
+    +inputSchema: JsonSchema
+    +outputSchema: JsonSchema [0..1]
+    +annotations: ToolAnnotations [0..1]
+    +execution.taskSupport: enum [0..1]
+    +_meta: object [0..1]
+  }
+  interface McpServer {
+    +tools_list(): McpTool[]
+    +tools_call(name, arguments): CallToolResult
+  }
+  McpServer --> McpTool : publishes
+}
+
+package "Qwen Code" {
+  class QwenToolsConfig {
+    +discoveryCommand: string
+    +callCommand: string
+  }
+  class QwenFunctionDeclaration {
+    +name: string
+    +description: string
+    +parameters: JsonSchema
+  }
+  class QwenCommandDriver {
+    +discover(command): FunctionDeclaration[]
+    +call(command, toolName, jsonStdin): JsonResult
+  }
+  QwenToolsConfig --> QwenCommandDriver : configures
+  QwenCommandDriver --> QwenFunctionDeclaration : discovers
+}
+
+package "Coze Studio" {
+  class CozePluginManifest {
+    +schemaVersion: string
+    +nameForModel: string
+    +descriptionForModel: string
+    +auth: AuthConfig
+    +api.type: openapi
+  }
+  class OpenApiOperation {
+    +operationId: string
+    +summary: string
+    +description: string
+    +parameters: Parameter[]
+    +requestBody: RequestBody [0..1]
+  }
+  class CozeHttpExecutor {
+    +compile(operation): ModelTool
+    +invoke(method, url, headers, body): ToolResult
+  }
+  CozePluginManifest o-- OpenApiOperation
+  CozeHttpExecutor --> OpenApiOperation : compiles and executes
+}
+
+package "Continue" {
+  class ContinueToolDescriptor {
+    +name: string
+    +description: string
+    +parameters: JsonSchema
+    +uri: string [0..1]
+  }
+  class ContinueToolDispatcher {
+    +callBuiltIn(name, args): ToolResult
+    +callMcp(uri, args): ToolResult
+    +callHttp(uri, args): ToolResult
+  }
+  ContinueToolDispatcher --> ContinueToolDescriptor : dispatches by name or URI
+}
+@enduml
+
+@startuml mcp_consuming_agent_tool_definitions
+!pragma layout smetana
+' Source evidence: Kiro official Agent configuration reference and MCP configuration, accessed 2026-07-17.
+' Source evidence: goose crates/goose/src/agents/extension.rs ExtensionConfig and extension_manager.rs.
+' Source evidence: Devin official MCP and session API documentation, accessed 2026-07-17.
+' Source evidence: MCP schema/2025-11-25/schema.ts Tool and CallToolRequest.
+' Observed behavior: these agents select or bind MCP tools but do not define arbitrary local tool implementations in metadata.
+' Design reason: separate agent-level selection and server binding from the server-owned tool descriptor and behavior.
+title MCP-consuming agent tool models
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam backgroundColor white
+
+class ExternalMcpTool {
+  +name: string
+  +description: string [0..1]
+  +inputSchema: JsonSchema
+  +outputSchema: JsonSchema [0..1]
+}
+interface ExternalMcpServer {
+  +tools_list(): ExternalMcpTool[]
+  +tools_call(name, arguments): CallToolResult
+}
+ExternalMcpServer --> ExternalMcpTool : owns definition and behavior
+
+package "Kiro CLI" {
+  class KiroAgentProfile {
+    +tools: string[]
+    +allowedTools: string[]
+    +toolAliases: ToolAlias[]
+    +mcpServers: McpServerConfig[]
+  }
+  class KiroMcpServerConfig {
+    +command: string [0..1]
+    +args: string[] [0..1]
+    +url: string [0..1]
+    +envOrHeaders: SecretRefMap [0..1]
+    +disabledTools: string[] [0..1]
+  }
+  KiroAgentProfile o-- KiroMcpServerConfig
+  KiroAgentProfile ..> ExternalMcpTool : selects by at-server/tool
+  KiroMcpServerConfig --> ExternalMcpServer : starts or connects
+}
+
+package "Goose" {
+  class GooseExtensionConfig {
+    +type: stdio | sse | streamableHttp | builtin | inlinePython
+    +name: string
+    +cmdOrUri: string
+    +args: string[] [0..1]
+    +envs: SecretRefMap [0..1]
+  }
+  class GooseExtensionManager {
+    +start(config)
+    +listTools(): ExternalMcpTool[]
+    +callTool(name, args): CallToolResult
+  }
+  GooseExtensionConfig --> GooseExtensionManager : configures
+  GooseExtensionManager --> ExternalMcpServer : connects
+}
+
+package "Devin" {
+  class DevinMcpIntegration {
+    +serverUrl: string
+    +authRef: string [0..1]
+    +enabledTools: string[] [0..1]
+  }
+  class DevinManagedToolCatalog {
+    +builtInTools: ManagedTool[]
+  }
+  DevinMcpIntegration --> ExternalMcpServer : connects
+  DevinManagedToolCatalog ..> ExternalMcpTool : separate managed surface
+}
+@enduml

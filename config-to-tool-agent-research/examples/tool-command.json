@@ -1,0 +1,68 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Tool",
+  "metadata": {
+    "name": "repository.dependency_audit",
+    "version": "2.1.0",
+    "displayName": "Dependency Audit"
+  },
+  "spec": {
+    "descriptor": {
+      "name": "audit_dependencies",
+      "description": "Audit a repository manifest and return normalized findings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "manifestPath": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          }
+        },
+        "required": ["manifestPath"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "findings": {
+            "type": "array",
+            "items": { "type": "object" }
+          }
+        },
+        "required": ["findings"]
+      },
+      "tags": ["security", "repository"]
+    },
+    "implementation": {
+      "kind": "command",
+      "driver": "core.command@1",
+      "commandRef": "artifact://dependency-auditor/2.1.0",
+      "argsTemplate": ["audit", "--format", "json"],
+      "inputMode": "jsonStdin",
+      "outputMode": "jsonStdout",
+      "workingDirectoryRef": "binding://workspace"
+    },
+    "semantics": {
+      "readOnly": true,
+      "destructive": false,
+      "idempotent": true,
+      "openWorld": false,
+      "timeoutMs": 120000,
+      "maxConcurrency": 2
+    },
+    "requires": [
+      {
+        "name": "workspace",
+        "kind": "workspace"
+      },
+      {
+        "name": "dependency-auditor",
+        "kind": "artifact"
+      }
+    ],
+    "policy": {
+      "approval": "ask"
+    }
+  }
+}

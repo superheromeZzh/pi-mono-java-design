@@ -1,0 +1,54 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Tool",
+  "metadata": {
+    "name": "github.list_pull_requests",
+    "version": "1.0.0",
+    "displayName": "List pull requests"
+  },
+  "spec": {
+    "descriptor": {
+      "name": "list_pull_requests",
+      "description": "List pull requests for a repository through an existing MCP server.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repository": { "type": "string" },
+          "state": {
+            "type": "string",
+            "enum": ["open", "closed", "all"]
+          }
+        },
+        "required": ["repository"]
+      },
+      "tags": ["github", "read"]
+    },
+    "implementation": {
+      "kind": "mcp",
+      "driver": "core.mcp@2025-11-25",
+      "serverRef": "binding://mcp/github",
+      "toolName": "list_pull_requests",
+      "transport": "streamableHttp"
+    },
+    "semantics": {
+      "readOnly": true,
+      "destructive": false,
+      "idempotent": true,
+      "openWorld": true,
+      "timeoutMs": 30000
+    },
+    "requires": [
+      {
+        "name": "github-mcp-server",
+        "kind": "endpoint"
+      },
+      {
+        "name": "github-identity",
+        "kind": "identity"
+      }
+    ],
+    "policy": {
+      "approval": "auto"
+    }
+  }
+}

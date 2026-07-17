@@ -1,0 +1,41 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Binding",
+  "metadata": {
+    "name": "engineering.code_reviewer.development",
+    "version": "1.0.0",
+    "displayName": "Code Reviewer development binding"
+  },
+  "spec": {
+    "subjectRef": {
+      "kind": "Agent",
+      "name": "engineering.code_reviewer",
+      "version": "1.3.0"
+    },
+    "environment": "development",
+    "driverRegistryRef": "registry://drivers/development/2026-07-17",
+    "runtimeFactoryRegistryRef": "registry://agent-factories/development/2026-07-17",
+    "secrets": [
+      {
+        "name": "weather-api-token",
+        "secretRef": "vault://development/weather/service-token",
+        "target": {
+          "kind": "header",
+          "name": "Authorization"
+        }
+      }
+    ],
+    "endpoints": {
+      "weather-api-base-url": "https://weather.internal.example/v3",
+      "mcp/github": "https://mcp.internal.example/github"
+    },
+    "workspaceRef": "workspace://current",
+    "identityRef": "identity://current-developer",
+    "artifactPins": {
+      "dependency-auditor/2.1.0": "sha256:9c3d4f5a7b8e"
+    },
+    "policyOverrides": {
+      "networkEgressProfile": "development-restricted"
+    }
+  }
+}

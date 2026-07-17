@@ -1,0 +1,513 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/agent-tool-platform-v1alpha1.json",
+  "title": "Config-to-Tool and Config-to-Agent Platform Metadata",
+  "description": "Target-only portable manifests and deployment bindings. A manifest is executable only through a platform-supplied driver or runtime factory.",
+  "oneOf": [
+    { "$ref": "#/$defs/ToolManifest" },
+    { "$ref": "#/$defs/AgentManifest" },
+    { "$ref": "#/$defs/Binding" }
+  ],
+  "$defs": {
+    "ObjectSchema": {
+      "type": "object"
+    },
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "displayName": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 4096 },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 256 }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "ResourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ToolDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "inputSchema"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+        },
+        "title": { "type": "string", "maxLength": 160 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "inputSchema": { "$ref": "#/$defs/ObjectSchema" },
+        "outputSchema": { "$ref": "#/$defs/ObjectSchema" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "BuiltinImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "toolRef"],
+      "properties": {
+        "kind": { "const": "builtinRef" },
+        "driver": { "type": "string", "minLength": 1 },
+        "toolRef": { "type": "string", "minLength": 1 },
+        "config": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "McpImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "serverRef", "toolName"],
+      "properties": {
+        "kind": { "const": "mcp" },
+        "driver": { "type": "string", "minLength": 1 },
+        "serverRef": { "type": "string", "minLength": 1 },
+        "toolName": { "type": "string", "minLength": 1 },
+        "transport": { "enum": ["stdio", "streamableHttp", "managed"] }
+      }
+    },
+    "OpenApiImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "documentRef"],
+      "properties": {
+        "kind": { "const": "openapi" },
+        "driver": { "type": "string", "minLength": 1 },
+        "documentRef": { "type": "string", "minLength": 1 },
+        "operationId": { "type": "string", "minLength": 1 },
+        "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        "path": { "type": "string", "pattern": "^/" },
+        "serverVariableOverrides": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "oneOf": [
+        { "required": ["operationId"] },
+        { "required": ["method", "path"] }
+      ]
+    },
+    "HttpImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "method", "urlTemplate"],
+      "properties": {
+        "kind": { "const": "http" },
+        "driver": { "type": "string", "minLength": 1 },
+        "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        "urlTemplate": { "type": "string", "minLength": 1 },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "bodyTemplate": {},
+        "responseSelector": { "type": "string" }
+      }
+    },
+    "CommandImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "commandRef", "inputMode", "outputMode"],
+      "properties": {
+        "kind": { "const": "command" },
+        "driver": { "type": "string", "minLength": 1 },
+        "commandRef": { "type": "string", "minLength": 1 },
+        "argsTemplate": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "inputMode": { "enum": ["jsonStdin", "jsonArg", "environment"] },
+        "outputMode": { "enum": ["jsonStdout", "textStdout", "jsonLines"] },
+        "workingDirectoryRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ArtifactImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "artifactRef", "entrypoint"],
+      "properties": {
+        "kind": { "const": "artifact" },
+        "driver": { "type": "string", "minLength": 1 },
+        "artifactRef": { "type": "string", "minLength": 1 },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "runtime": { "enum": ["wasm", "javascript", "python", "container"] },
+        "integrity": { "type": "string", "minLength": 1 }
+      }
+    },
+    "WorkflowImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "workflowRef"],
+      "properties": {
+        "kind": { "const": "workflow" },
+        "driver": { "type": "string", "minLength": 1 },
+        "workflowRef": { "$ref": "#/$defs/ResourceRef" },
+        "inputMapping": { "type": "object", "additionalProperties": true },
+        "outputMapping": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "AgentProxyImplementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "driver", "agentRef", "promptTemplate"],
+      "properties": {
+        "kind": { "const": "agentProxy" },
+        "driver": { "type": "string", "minLength": 1 },
+        "agentRef": { "$ref": "#/$defs/ResourceRef" },
+        "promptTemplate": { "type": "string", "minLength": 1 },
+        "resultSelector": { "type": "string" }
+      }
+    },
+    "ToolImplementation": {
+      "oneOf": [
+        { "$ref": "#/$defs/BuiltinImplementation" },
+        { "$ref": "#/$defs/McpImplementation" },
+        { "$ref": "#/$defs/OpenApiImplementation" },
+        { "$ref": "#/$defs/HttpImplementation" },
+        { "$ref": "#/$defs/CommandImplementation" },
+        { "$ref": "#/$defs/ArtifactImplementation" },
+        { "$ref": "#/$defs/WorkflowImplementation" },
+        { "$ref": "#/$defs/AgentProxyImplementation" }
+      ]
+    },
+    "ToolSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "readOnly": { "type": "boolean", "default": false },
+        "destructive": { "type": "boolean", "default": true },
+        "idempotent": { "type": "boolean", "default": false },
+        "openWorld": { "type": "boolean", "default": true },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "maxConcurrency": { "type": "integer", "minimum": 1 },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxAttempts"],
+          "properties": {
+            "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "backoffMs": { "type": "integer", "minimum": 0 },
+            "retryOn": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "BindingRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["secret", "endpoint", "workspace", "identity", "artifact"] },
+        "optional": { "type": "boolean", "default": false },
+        "description": { "type": "string" }
+      }
+    },
+    "ToolManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "properties": {
+        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "kind": { "const": "Tool" },
+        "metadata": { "$ref": "#/$defs/Metadata" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["descriptor", "implementation"],
+          "properties": {
+            "descriptor": { "$ref": "#/$defs/ToolDescriptor" },
+            "implementation": { "$ref": "#/$defs/ToolImplementation" },
+            "semantics": { "$ref": "#/$defs/ToolSemantics" },
+            "requires": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/BindingRequirement" },
+              "uniqueItems": true
+            },
+            "policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "approval": { "enum": ["auto", "ask", "deny"] },
+                "audience": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                },
+                "rateLimitRef": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "InstructionBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inline": { "type": "string", "minLength": 1 },
+        "refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "anyOf": [
+        { "required": ["inline"] },
+        { "required": ["refs"] }
+      ]
+    },
+    "ToolSelection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref"],
+          "properties": {
+            "ref": { "$ref": "#/$defs/ResourceRef" },
+            "alias": { "type": "string" },
+            "approval": { "enum": ["inherit", "auto", "ask", "deny"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selector"],
+          "properties": {
+            "selector": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "matchLabels": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "tags": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                }
+              },
+              "minProperties": 1
+            },
+            "exclude": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          }
+        }
+      ]
+    },
+    "PermissionRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "effect"],
+      "properties": {
+        "capability": { "type": "string", "minLength": 1 },
+        "effect": { "enum": ["allow", "ask", "deny"] },
+        "match": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "AgentManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "properties": {
+        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "kind": { "const": "Agent" },
+        "metadata": { "$ref": "#/$defs/Metadata" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime", "instructions"],
+          "properties": {
+            "runtime": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["factory", "model"],
+              "properties": {
+                "factory": { "type": "string", "minLength": 1 },
+                "provider": { "type": "string", "minLength": 1 },
+                "model": { "type": "string", "minLength": 1 },
+                "reasoningEffort": { "enum": ["minimal", "low", "medium", "high", "xhigh"] },
+                "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+                "maxTurns": { "type": "integer", "minimum": 1 },
+                "timeoutMs": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "instructions": { "$ref": "#/$defs/InstructionBlock" },
+            "initialPrompt": { "type": "string" },
+            "tools": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ToolSelection" }
+            },
+            "skills": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ResourceRef" },
+              "uniqueItems": true
+            },
+            "knowledge": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "memory": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode"],
+              "properties": {
+                "mode": { "enum": ["none", "session", "project", "user", "managed"] },
+                "storeRef": { "type": "string" },
+                "readOnly": { "type": "boolean", "default": false }
+              }
+            },
+            "policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "defaultApproval": { "enum": ["auto", "ask", "deny"] },
+                "sandbox": { "enum": ["none", "workspaceWrite", "container", "worktree", "managed"] },
+                "permissions": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/PermissionRule" }
+                },
+                "maxParallelTools": { "type": "integer", "minimum": 1 },
+                "budgetRef": { "type": "string" }
+              }
+            },
+            "subagents": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ref"],
+                "properties": {
+                  "ref": { "$ref": "#/$defs/ResourceRef" },
+                  "alias": { "type": "string" },
+                  "description": { "type": "string" },
+                  "maxConcurrency": { "type": "integer", "minimum": 1 }
+                }
+              }
+            },
+            "hooks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["event", "handlerRef"],
+                "properties": {
+                  "event": { "enum": ["agentStart", "promptSubmit", "preToolUse", "postToolUse", "stop"] },
+                  "matcher": { "type": "string" },
+                  "handlerRef": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "outputSchema": { "$ref": "#/$defs/ObjectSchema" }
+          }
+        }
+      }
+    },
+    "SubjectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "version"],
+      "properties": {
+        "kind": { "enum": ["Tool", "Agent"] },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "SecretBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "secretRef", "target"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "secretRef": { "type": "string", "minLength": 1 },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": { "enum": ["environment", "header", "field", "vault"] },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "properties": {
+        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "kind": { "const": "Binding" },
+        "metadata": { "$ref": "#/$defs/Metadata" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subjectRef", "environment"],
+          "properties": {
+            "subjectRef": { "$ref": "#/$defs/SubjectRef" },
+            "environment": { "type": "string", "minLength": 1 },
+            "driverRegistryRef": { "type": "string", "minLength": 1 },
+            "runtimeFactoryRegistryRef": { "type": "string", "minLength": 1 },
+            "secrets": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/SecretBinding" }
+            },
+            "endpoints": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "workspaceRef": { "type": "string", "minLength": 1 },
+            "identityRef": { "type": "string", "minLength": 1 },
+            "artifactPins": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "policyOverrides": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

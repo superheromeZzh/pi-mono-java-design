@@ -1,0 +1,78 @@
+{
+  "apiVersion": "agentkit.example/v1alpha1",
+  "kind": "Tool",
+  "metadata": {
+    "name": "weather.current",
+    "version": "1.0.0",
+    "displayName": "Current Weather",
+    "description": "Returns current weather for a city.",
+    "labels": {
+      "domain": "weather",
+      "owner": "platform-team"
+    }
+  },
+  "spec": {
+    "descriptor": {
+      "name": "get_current_weather",
+      "title": "Get current weather",
+      "description": "Get current weather observations for one city.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "City name."
+          },
+          "units": {
+            "type": "string",
+            "enum": ["metric", "imperial"]
+          }
+        },
+        "required": ["city"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "temperature": { "type": "number" },
+          "conditions": { "type": "string" }
+        },
+        "required": ["temperature", "conditions"]
+      },
+      "tags": ["weather", "read"]
+    },
+    "implementation": {
+      "kind": "openapi",
+      "driver": "core.openapi@1",
+      "documentRef": "registry://openapi/weather-service/3.2.0",
+      "operationId": "getCurrentWeather"
+    },
+    "semantics": {
+      "readOnly": true,
+      "destructive": false,
+      "idempotent": true,
+      "openWorld": true,
+      "timeoutMs": 10000,
+      "retry": {
+        "maxAttempts": 2,
+        "backoffMs": 250,
+        "retryOn": ["timeout", "http_502", "http_503"]
+      }
+    },
+    "requires": [
+      {
+        "name": "weather-api-token",
+        "kind": "secret",
+        "description": "Service token supplied by the deployment binding."
+      },
+      {
+        "name": "weather-api-base-url",
+        "kind": "endpoint"
+      }
+    ],
+    "policy": {
+      "approval": "auto",
+      "audience": ["agent", "developer"]
+    }
+  }
+}
