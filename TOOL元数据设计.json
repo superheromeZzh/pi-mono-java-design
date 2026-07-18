@@ -1,0 +1,33 @@
+{
+  "id": "工具标识",
+  "type": "tool",
+  "version": 1,
+  "created_at": "创建时间,2026-07-18T00:00:00Z",
+  "updated_at": "更新时间,2026-07-18T00:00:00Z",
+  "archived_at": "归档时间,2026-07-18T00:00:00Z",
+
+  "name": "工具名称",
+  "description": "工具描述",
+  "source": "工具来源, AgentTool | MCPTool",
+
+  "definition": {
+    "type": "工具定义类型, AgentTool | MCPTool",
+    "mcp_server_name": "MCP类型时对应的服务名称",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+
+  "default_config": {
+    "enabled": true,
+    "permission_policy": {
+      "type": "always_allow"
+    }
+  },
+
+  "metadata": {
+    "example": "业务分类、所属团队、配置来源等"
+  }
+}

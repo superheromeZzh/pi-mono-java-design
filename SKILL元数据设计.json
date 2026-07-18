@@ -1,0 +1,18 @@
+{
+  "id": "技能标识",
+  "type": "skill",
+  "version": 1,
+  "latest_version": "最新版本标识",
+  "created_at": "创建时间,2026-07-18T00:00:00Z",
+  "updated_at": "更新时间,2026-07-18T00:00:00Z",
+  "archived_at": "归档时间,2026-07-18T00:00:00Z",
+
+  "name": "技能名称",
+  "display_title": "技能显示名称",
+  "description": "技能描述",
+  "source": "技能来源, campusmate | custom",
+  "content": "正文",
+  "metadata": {
+    "example": "业务分类、所属团队、适用场景、配置来源等"
+  }
+}
