@@ -1,0 +1,51 @@
+{
+    "id": "智能体标识",
+    "type": "agent",
+    "version": 1,
+    "created_at": "创建时间,2026-07-18T00:00:00Z",
+    "updated_at": "更新时间,2026-07-18T00:00:00Z",
+    "archived_at": "归档时间,2026-07-18T00:00:00Z",
+
+    "name":"智能体名称",
+    "description":"智能体描述",
+    "model":{
+        "id":"模型标识",
+        "speed":"推理速度, standard | fast | null"
+    },
+    "system":"智能体系统提示词",
+    "tools":[
+        {
+            "type":"工具类型, AgentTool | MCPTool",
+            "default_config": {
+                "enabled": "所有工具是否默认启用, true | false",
+                "permission": "工具权限, 自动执行或执行前询问"
+            },
+            "configs": [
+                {
+                    "name":"工具名称",
+                    "enabled":"工具是否启用, true | false",
+                    "permission":"工具权限, 自动执行或执行前询问"
+                }
+            ]
+        }
+    ],
+    "mcp_servers":[
+        {
+            "name":"服务名称, 长度为1-255个字符",
+            "type":"url",
+            "url":"MCP 服务的端点地址"
+        }
+    ],
+    "skills":[
+        {
+            "skill_id":"技能标识",
+            "type":"技能类型(目前只支持campusmate内置), campusmate | custom",
+            "version":"固定的版本。如果省略, 则默认为最新版本"
+        }
+    ],
+    "metadata":[
+        {
+            "example":"最多16个键值对, key最多64个字符, value最多512个字符, 标记环境development、production, 记录所属团队、业务类型或配置来源"
+        }
+    ]
+}
