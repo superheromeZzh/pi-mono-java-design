@@ -1,0 +1,280 @@
+' Generated from Anthropic public documentation accessed 2026-07-18.
+' Run from this directory: plantuml -tsvg diagram.puml
+' Source baseline: public documentation; Anthropic does not publish a source commit for this managed service.
+
+@startuml managed_agents_resource_model
+!pragma layout elk
+title Anthropic Managed Agents Public Resource Model
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam nodesep 45
+skinparam ranksep 55
+skinparam ArrowColor #53657D
+skinparam RectangleBorderColor #53657D
+skinparam RectangleBackgroundColor #F7F9FC
+
+' Source evidence:
+' - https://platform.claude.com/docs/en/managed-agents/agent-setup
+' - https://platform.claude.com/docs/en/managed-agents/sessions
+' - https://platform.claude.com/docs/en/managed-agents/environments
+' - https://platform.claude.com/docs/en/managed-agents/memory
+' - https://platform.claude.com/docs/en/managed-agents/vaults
+' - https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration
+' - https://platform.claude.com/docs/en/managed-agents/scheduled-deployments
+' Observed behavior: an agent is versioned, an environment is not versioned, and each session receives an isolated sandbox.
+' Observed behavior: vaults and memory stores are referenced by a session instead of being embedded in the reusable agent.
+' Design reason: the layout centers the session and records only public relationships without inferring internal implementation.
+
+rectangle "Skill\ncustom versions or Anthropic skill" as Skill #F3EEFF
+rectangle "Agent\nversioned reusable configuration" as Agent #EAF2FF
+rectangle "Environment\nunversioned sandbox configuration" as Environment #EAF2FF
+
+rectangle "Vault\nworkspace credentials\n0..20 credentials per vault" as Vault #FFF4E6
+rectangle "Session\nruntime state machine\nidle | running | rescheduling | terminated" as Session #E9F7EF
+rectangle "Memory Store\nworkspace text documents\nmounted through resources" as MemoryStore #FFF4E6
+rectangle "Deployment\nschedule plus session configuration" as Deployment #FDEEF4
+
+rectangle "Agent snapshot\nresolved id, version, and session overrides" as Snapshot #F7F9FC
+rectangle "Sandbox\nisolated per session" as Sandbox #F7F9FC
+rectangle "Session thread\ncontext-isolated conversation" as Thread #F7F9FC
+rectangle "Deployment run\nattempt with session_id or error" as DeploymentRun #F7F9FC
+rectangle "Event stream\nuser events, system.message, agent events, session events, span events" as Event #F7F9FC
+
+Skill -[hidden]right- Agent
+Agent -[hidden]right- Environment
+Vault -[hidden]right- Session
+Session -[hidden]right- MemoryStore
+MemoryStore -[hidden]right- Deployment
+Snapshot -[hidden]right- Sandbox
+Sandbox -[hidden]right- Thread
+Thread -[hidden]right- DeploymentRun
+
+Skill --> Agent : referenced by skills
+Agent --> Session : resolve id and version
+Environment --> Session : environment_id
+Vault --> Session : vault_ids
+MemoryStore --> Session : resources
+Session *--> Snapshot : freezes
+Session *--> Sandbox : provisions
+Session *--> Thread : contains 1..*
+Thread *--> Event : persists 0..*
+Deployment --> Agent : agent configuration
+Deployment --> Environment : environment configuration
+Deployment *--> DeploymentRun : records 0..*
+Deployment --> Session : creates scheduled sessions
+
+@enduml
+
+@startuml managed_agent_configuration_model
+!pragma layout smetana
+title Anthropic Managed Agent Public Configuration Model
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam nodesep 40
+skinparam ranksep 45
+skinparam classAttributeIconSize 0
+skinparam ArrowColor #53657D
+skinparam ClassBorderColor #53657D
+skinparam ClassBackgroundColor #F7F9FC
+
+' Source evidence:
+' - https://platform.claude.com/docs/en/managed-agents/agent-setup
+' - https://platform.claude.com/docs/en/managed-agents/tools
+' - https://platform.claude.com/docs/en/managed-agents/mcp-connector
+' - https://platform.claude.com/docs/en/managed-agents/skills
+' - https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration
+' Observed behavior: tools is a tagged union of the managed agent toolset, MCP toolsets, and custom tool contracts.
+' Observed behavior: an MCP server declaration and its MCP toolset reference must match by name.
+' Design reason: field names and discriminator values follow the public request and response contract.
+
+class ManagedAgent <<public API resource>> {
+  id: String
+  type: agent
+  version: Integer
+  name: String
+  description: String?
+  system: String?
+  metadata: Map<String, String>
+  created_at: Timestamp
+  updated_at: Timestamp
+  archived_at: Timestamp?
+}
+
+class ModelConfig {
+  id: String
+  speed: standard | fast
+}
+
+abstract class ToolDefinition <<tagged union>> {
+  type: String
+}
+
+class AgentToolset {
+  type: agent_toolset_20260401
+  default_config: ToolConfig?
+  configs: ToolConfig[]
+}
+
+class McpToolset {
+  type: mcp_toolset
+  mcp_server_name: String
+  default_config: ToolConfig?
+  configs: ToolConfig[]
+}
+
+class CustomTool {
+  type: custom
+  name: String
+  description: String
+  input_schema: JSONSchema
+}
+
+class ToolConfig {
+  name: String?
+  enabled: Boolean?
+  permission_policy: PermissionPolicy?
+}
+
+class PermissionPolicy <<tagged union>> {
+  type: always_allow | always_ask
+}
+
+class McpServer {
+  type: url
+  name: String
+  url: String
+}
+
+class SkillReference {
+  type: anthropic | custom
+  skill_id: String
+  version: String?
+}
+
+class MultiagentCoordinator {
+  type: coordinator
+  agents: AgentReference[]
+}
+
+class AgentReference <<tagged union>> {
+  type: agent | self
+  id: String?
+  version: Integer?
+}
+
+ManagedAgent *-- "1" ModelConfig : model
+ManagedAgent *-- "0..*" ToolDefinition : tools
+ToolDefinition <|-- AgentToolset
+ToolDefinition <|-- McpToolset
+ToolDefinition <|-- CustomTool
+AgentToolset *-- "0..*" ToolConfig : configures
+McpToolset *-- "0..*" ToolConfig : configures
+ToolConfig o-- "0..1" PermissionPolicy
+ManagedAgent *-- "0..20" McpServer : mcp_servers
+McpToolset --> "1" McpServer : matches by name
+ManagedAgent *-- "0..*" SkillReference : skills
+ManagedAgent *-- "0..1" MultiagentCoordinator : multiagent
+MultiagentCoordinator *-- "1..20" AgentReference : roster
+
+note right of ManagedAgent
+Create requires name and model.
+Update requires the current version.
+Configuration changes create a new version.
+end note
+
+note right of AgentToolset
+Built-in names:
+bash, read, write, edit,
+glob, grep, web_fetch, web_search
+end note
+
+note left of ToolDefinition
+Maximum 128 effective tools
+across all toolsets.
+end note
+
+note right of SkillReference
+The session-wide limit is 500 skills
+across every agent in the session.
+end note
+
+@enduml
+
+@startuml managed_agents_tool_execution_model
+title Anthropic Managed Agents Public Tool Execution Boundaries
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam sequenceArrowThickness 1
+skinparam sequenceParticipantBorderColor #53657D
+skinparam sequenceParticipantBackgroundColor #F7F9FC
+skinparam ArrowColor #53657D
+skinparam LifeLineBorderColor #90A0B5
+
+' Source evidence:
+' - https://platform.claude.com/docs/en/managed-agents/tools
+' - https://platform.claude.com/docs/en/managed-agents/mcp-connector
+' - https://platform.claude.com/docs/en/managed-agents/events-and-streaming
+' - https://platform.claude.com/docs/en/managed-agents/vaults
+' Observed behavior: built-in tools run in the session sandbox, MCP tools run on the declared remote server, and custom tools run in the client application.
+' Observed behavior: always_ask pauses the session for user.tool_confirmation; custom calls pause for user.custom_tool_result.
+' Design reason: the sequence separates declaration from runtime ownership and does not imply a shared executable format.
+
+actor User
+participant "Client application" as Client
+participant "Managed Agents API" as API
+participant "Session runtime" as Runtime
+participant "Session sandbox" as Sandbox
+participant "Vault service" as Vault
+participant "Remote MCP server" as MCP
+
+User -> Client : submit task
+Client -> API : create session(agent, environment_id, vault_ids)
+API -> Runtime : provision resolved agent snapshot
+Client -> API : user.message
+API -> Runtime : start work
+
+group Built-in agent tool
+  Runtime -> API : agent.tool_use
+  opt permission_policy = always_ask
+    API -->> Client : session.status_idle(requires_action)
+    Client -> API : user.tool_confirmation(allow | deny)
+  end
+  API -> Sandbox : execute built-in tool
+  Sandbox --> API : tool result
+  API --> Runtime : continue with result
+end
+
+group MCP tool
+  Runtime -> API : agent.mcp_tool_use
+  opt permission_policy = always_ask
+    API -->> Client : session.status_idle(requires_action)
+    Client -> API : user.tool_confirmation(allow | deny)
+  end
+  API -> Vault : resolve credential by server URL
+  Vault --> API : runtime credential
+  API -> MCP : invoke MCP tool
+  MCP --> API : MCP result
+  API --> Runtime : continue with result
+end
+
+group Custom tool
+  Runtime -> API : agent.custom_tool_use(name, input)
+  API -->> Client : event plus session.status_idle(requires_action)
+  Client -> Client : execute application code
+  Client -> API : user.custom_tool_result(custom_tool_use_id, content)
+  API -> Runtime : resume when all blocking calls resolve
+end
+
+Runtime --> API : agent.message and session status
+API -->> Client : event stream
+Client --> User : result
+
+@enduml
