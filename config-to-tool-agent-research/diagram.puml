@@ -196,7 +196,7 @@ PiExtensionAPI o-down-> PiToolDefinition : registers
 
 @startuml opencode_tool_model
 !pragma layout smetana
-' Source evidence: opencode commit 3a1c6df9e24672f0761a6ced18e1315d89334baf, packages/opencode/src/tool/tool.ts Tool.Definition.
+' Source evidence: opencode commit 3a1c6df9e24672f0761a6ced18e1315d89334baf, packages/opencode/src/tool/tool.ts Tool.Def.
 ' Observed behavior: the tool object contains its schema and execute callback and receives a runtime context.
 ' Design reason: show the single definition-to-context dependency without unrelated product packages.
 title OpenCode tool model
@@ -209,17 +209,23 @@ skinparam ranksep 35
 hide circle
 
 class OpenCodeToolDefinition {
-  +name: derived from file and export
+  +id: string
   +description: string
-  +args: ZodSchemaMap
-  +execute(args, context): string
+  +parameters: SchemaDecoder
+  +jsonSchema: JsonSchema [0..1]
+  +execute(args, context): ExecuteResult
+  +formatValidationError(error): string [0..1]
 }
 class OpenCodeToolContext {
-  +agent: string
   +sessionID: string
   +messageID: string
-  +directory: string
-  +worktree: string
+  +agent: string
+  +abort: AbortSignal
+  +callID: string [0..1]
+  +extra: Metadata [0..1]
+  +messages: SessionMessage[]
+  +metadata(input): Effect
+  +ask(request): Effect
 }
 OpenCodeToolDefinition -down-> OpenCodeToolContext : execute receives
 @enduml
@@ -323,13 +329,22 @@ skinparam ranksep 35
 hide circle
 
 interface GrokToolMetadata {
-  +name(): string
-  +displayName(): string
-  +description(): string
-  +parameterSchema(): JsonSchema
+  +kind(): ToolKind
+  +tool_namespace(): ToolNamespace
+  +description_template(): string
+  +is_read_only(): boolean [default]
+  +requires_expr(): Expr<ToolRequirement> [default]
+  +versioned_definition(...): ToolDefinition [default]
 }
 interface GrokRuntimeTool {
-  +execute(input, context): ToolResult
+  +Args: JsonSchema type
+  +Output: ToolOutput type
+  +id(): ToolId
+  +description(context): ToolDescription
+  +capabilities(): ToolCapabilities
+  +should_list(context): boolean
+  +execute(context, args): ToolStream
+  +run(context, args): ToolResult
 }
 class RegisteredGrokTool
 GrokToolMetadata <|.down. RegisteredGrokTool
@@ -525,7 +540,7 @@ ContinueToolDescriptor -down-> ContinueToolDispatcher : selects route
 
 @startuml claude_code_mcp_tool_model
 !pragma layout smetana
-' Source evidence: Claude Code MCP at https://code.claude.com/docs/en/mcp, accessed 2026-07-17.
+' Source evidence: Claude Code MCP at https://code.claude.com/docs/en/mcp, accessed 2026-07-18.
 ' Source evidence: MCP commit 26897cc322f356487da89113451bd16b520b9288, schema/2025-11-25/schema.ts Tool and CallToolRequest.
 ' Observed behavior: Claude Code configures an MCP client that discovers and calls server-owned tools.
 ' Design reason: keep the product configuration, client, server, and tool in one vertical ownership chain.
@@ -539,11 +554,16 @@ skinparam ranksep 35
 hide circle
 
 class ClaudeCodeMcpServerConfig {
-  +type: stdio | http | sse | websocket
-  +commandOrUrl: string
+  +type: stdio | http | sse | ws
+  +command: string [0..1]
+  +url: string [0..1]
   +args: string[] [0..1]
-  +envOrHeaders: SecretRefMap [0..1]
-  +scope: local | project | user
+  +env: StringMap [0..1]
+  +headers: StringMap [0..1]
+  +headersHelper: string [0..1]
+  +oauth: OAuthConfig [0..1]
+  +timeout: number [0..1]
+  +alwaysLoad: boolean [0..1]
 }
 class ClaudeCodeMcpClient {
   +discoverTools(): ExternalMcpTool[]
@@ -623,11 +643,13 @@ skinparam ranksep 35
 hide circle
 
 class GooseExtensionConfig {
-  +type: stdio | sse | streamableHttp | builtin | inlinePython
+  +type: stdio | sse | builtin | platform
+  +type: streamable_http | frontend | inline_python
   +name: string
-  +cmdOrUri: string
+  +cmdOrUri: string [0..1]
   +args: string[] [0..1]
-  +envs: SecretRefMap [0..1]
+  +envsOrHeaders: SecretRefMap [0..1]
+  +availableTools: string[] [0..1]
 }
 class GooseExtensionManager {
   +start(config)

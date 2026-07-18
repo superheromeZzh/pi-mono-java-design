@@ -1,5 +1,5 @@
 {
-  "apiVersion": "agentkit.example/v1alpha1",
+  "apiVersion": "agentkit.example/v1",
   "kind": "Tool",
   "metadata": {
     "name": "platform.tool_search",

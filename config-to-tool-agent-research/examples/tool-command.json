@@ -1,5 +1,5 @@
 {
-  "apiVersion": "agentkit.example/v1alpha1",
+  "apiVersion": "agentkit.example/v1",
   "kind": "Tool",
   "metadata": {
     "name": "repository.dependency_audit",
@@ -33,6 +33,12 @@
         "required": ["findings"]
       },
       "tags": ["security", "repository"]
+    },
+    "exposure": {
+      "mode": "eager",
+      "searchable": true,
+      "keywords": ["dependency audit", "vulnerability", "repository manifest"],
+      "group": "repository.security"
     },
     "implementation": {
       "kind": "command",

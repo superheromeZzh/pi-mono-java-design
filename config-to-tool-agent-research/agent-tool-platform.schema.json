@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/schemas/agent-tool-platform-v1alpha1.json",
-  "title": "Config-to-Tool and Config-to-Agent Platform Metadata",
-  "description": "Target-only portable manifests and deployment bindings. A manifest is executable only through a platform-supplied driver or runtime factory.",
+  "$id": "https://example.invalid/schemas/agent-tool-platform-v1.json",
+  "title": "Tool and Agent Metadata V1",
+  "description": "Target-only V1 portable manifests and deployment bindings. A manifest is executable only through a platform-supplied driver or runtime factory.",
   "oneOf": [
     { "$ref": "#/$defs/ToolManifest" },
     { "$ref": "#/$defs/AgentManifest" },
@@ -12,21 +12,28 @@
     "ObjectSchema": {
       "type": "object"
     },
+    "ResourceName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+      "maxLength": 64
+    },
+    "ExtensionPointRef": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]*(?:/[a-z][a-z0-9._-]*)*@[0-9A-Za-z][0-9A-Za-z._-]*$",
+      "maxLength": 256
+    },
     "Metadata": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "version"],
       "properties": {
-        "name": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
-          "maxLength": 128
-        },
-        "version": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
+        "name": { "$ref": "#/$defs/ResourceName" },
+        "version": { "$ref": "#/$defs/SemVer" },
         "displayName": { "type": "string", "maxLength": 160 },
         "description": { "type": "string", "maxLength": 4096 },
         "labels": {
@@ -42,10 +49,10 @@
     "ResourceRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": ["name", "version"],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 },
+        "name": { "$ref": "#/$defs/ResourceName" },
+        "version": { "$ref": "#/$defs/SemVer" },
         "namespace": { "type": "string", "minLength": 1 }
       }
     },
@@ -56,7 +63,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+          "pattern": "^[a-z][a-z0-9_-]{0,127}$"
         },
         "title": { "type": "string", "maxLength": 160 },
         "description": { "type": "string", "minLength": 1, "maxLength": 8192 },
@@ -112,7 +119,7 @@
       "required": ["kind", "driver", "toolRef"],
       "properties": {
         "kind": { "const": "builtinRef" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "toolRef": { "type": "string", "minLength": 1 },
         "config": { "type": "object", "additionalProperties": true }
       }
@@ -123,7 +130,7 @@
       "required": ["kind", "driver", "serverRef", "toolName"],
       "properties": {
         "kind": { "const": "mcp" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "serverRef": { "type": "string", "minLength": 1 },
         "toolName": { "type": "string", "minLength": 1 },
         "transport": { "enum": ["stdio", "streamableHttp", "managed"] }
@@ -135,7 +142,7 @@
       "required": ["kind", "driver", "documentRef"],
       "properties": {
         "kind": { "const": "openapi" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "documentRef": { "type": "string", "minLength": 1 },
         "operationId": { "type": "string", "minLength": 1 },
         "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
@@ -156,7 +163,7 @@
       "required": ["kind", "driver", "method", "urlTemplate"],
       "properties": {
         "kind": { "const": "http" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
         "urlTemplate": { "type": "string", "minLength": 1 },
         "headers": {
@@ -173,7 +180,7 @@
       "required": ["kind", "driver", "commandRef", "inputMode", "outputMode"],
       "properties": {
         "kind": { "const": "command" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "commandRef": { "type": "string", "minLength": 1 },
         "argsTemplate": {
           "type": "array",
@@ -190,7 +197,7 @@
       "required": ["kind", "driver", "artifactRef", "entrypoint"],
       "properties": {
         "kind": { "const": "artifact" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "artifactRef": { "type": "string", "minLength": 1 },
         "entrypoint": { "type": "string", "minLength": 1 },
         "runtime": { "enum": ["wasm", "javascript", "python", "container"] },
@@ -203,7 +210,7 @@
       "required": ["kind", "driver", "workflowRef"],
       "properties": {
         "kind": { "const": "workflow" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "workflowRef": { "$ref": "#/$defs/ResourceRef" },
         "inputMapping": { "type": "object", "additionalProperties": true },
         "outputMapping": { "type": "object", "additionalProperties": true }
@@ -215,7 +222,7 @@
       "required": ["kind", "driver", "agentRef", "promptTemplate"],
       "properties": {
         "kind": { "const": "agentProxy" },
-        "driver": { "type": "string", "minLength": 1 },
+        "driver": { "$ref": "#/$defs/ExtensionPointRef" },
         "agentRef": { "$ref": "#/$defs/ResourceRef" },
         "promptTemplate": { "type": "string", "minLength": 1 },
         "resultSelector": { "type": "string" }
@@ -236,16 +243,17 @@
     "ToolSemantics": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["readOnly", "destructive", "idempotent", "openWorld", "timeoutMs"],
       "properties": {
-        "readOnly": { "type": "boolean", "default": false },
-        "destructive": { "type": "boolean", "default": true },
-        "idempotent": { "type": "boolean", "default": false },
+        "readOnly": { "type": "boolean" },
+        "destructive": { "type": "boolean" },
+        "idempotent": { "type": "boolean" },
         "contextMutation": {
           "type": "boolean",
           "default": false,
           "description": "Whether a call mutates session-local agent context, such as the currently activated tool set, without changing external state."
         },
-        "openWorld": { "type": "boolean", "default": true },
+        "openWorld": { "type": "boolean" },
         "timeoutMs": { "type": "integer", "minimum": 1 },
         "maxConcurrency": { "type": "integer", "minimum": 1 },
         "retry": {
@@ -262,7 +270,18 @@
             }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "readOnly": { "const": true } },
+            "required": ["readOnly"]
+          },
+          "then": {
+            "properties": { "destructive": { "const": false } }
+          }
+        }
+      ]
     },
     "BindingRequirement": {
       "type": "object",
@@ -280,22 +299,16 @@
       "additionalProperties": false,
       "required": ["apiVersion", "kind", "metadata", "spec"],
       "properties": {
-        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "apiVersion": { "const": "agentkit.example/v1" },
         "kind": { "const": "Tool" },
         "metadata": { "$ref": "#/$defs/Metadata" },
         "spec": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["descriptor", "implementation"],
+          "required": ["descriptor", "exposure", "implementation", "semantics", "policy"],
           "properties": {
             "descriptor": { "$ref": "#/$defs/ToolDescriptor" },
-            "exposure": {
-              "$ref": "#/$defs/ToolExposure",
-              "default": {
-                "mode": "eager",
-                "searchable": true
-              }
-            },
+            "exposure": { "$ref": "#/$defs/ToolExposure" },
             "implementation": { "$ref": "#/$defs/ToolImplementation" },
             "semantics": { "$ref": "#/$defs/ToolSemantics" },
             "requires": {
@@ -306,6 +319,7 @@
             "policy": {
               "type": "object",
               "additionalProperties": false,
+              "required": ["approval"],
               "properties": {
                 "approval": { "enum": ["auto", "ask", "deny"] },
                 "audience": {
@@ -397,20 +411,20 @@
       "additionalProperties": false,
       "required": ["apiVersion", "kind", "metadata", "spec"],
       "properties": {
-        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "apiVersion": { "const": "agentkit.example/v1" },
         "kind": { "const": "Agent" },
         "metadata": { "$ref": "#/$defs/Metadata" },
         "spec": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["runtime", "instructions"],
+          "required": ["runtime", "instructions", "tools", "memory", "policy"],
           "properties": {
             "runtime": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["factory", "model"],
+              "required": ["factory", "provider", "model", "maxTurns", "timeoutMs"],
               "properties": {
-                "factory": { "type": "string", "minLength": 1 },
+                "factory": { "$ref": "#/$defs/ExtensionPointRef" },
                 "provider": { "type": "string", "minLength": 1 },
                 "model": { "type": "string", "minLength": 1 },
                 "reasoningEffort": { "enum": ["minimal", "low", "medium", "high", "xhigh"] },
@@ -443,11 +457,22 @@
                 "mode": { "enum": ["none", "session", "project", "user", "managed"] },
                 "storeRef": { "type": "string" },
                 "readOnly": { "type": "boolean", "default": false }
-              }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": { "mode": { "const": "none" } },
+                    "required": ["mode"]
+                  },
+                  "then": { "not": { "required": ["storeRef"] } },
+                  "else": { "required": ["storeRef"] }
+                }
+              ]
             },
             "policy": {
               "type": "object",
               "additionalProperties": false,
+              "required": ["defaultApproval", "sandbox", "maxParallelTools"],
               "properties": {
                 "defaultApproval": { "enum": ["auto", "ask", "deny"] },
                 "sandbox": { "enum": ["none", "workspaceWrite", "container", "worktree", "managed"] },
@@ -497,8 +522,8 @@
       "required": ["kind", "name", "version"],
       "properties": {
         "kind": { "enum": ["Tool", "Agent"] },
-        "name": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 }
+        "name": { "$ref": "#/$defs/ResourceName" },
+        "version": { "$ref": "#/$defs/SemVer" }
       }
     },
     "SecretBinding": {
@@ -524,7 +549,7 @@
       "additionalProperties": false,
       "required": ["apiVersion", "kind", "metadata", "spec"],
       "properties": {
-        "apiVersion": { "const": "agentkit.example/v1alpha1" },
+        "apiVersion": { "const": "agentkit.example/v1" },
         "kind": { "const": "Binding" },
         "metadata": { "$ref": "#/$defs/Metadata" },
         "spec": {

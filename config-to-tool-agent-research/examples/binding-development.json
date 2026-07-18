@@ -1,5 +1,5 @@
 {
-  "apiVersion": "agentkit.example/v1alpha1",
+  "apiVersion": "agentkit.example/v1",
   "kind": "Binding",
   "metadata": {
     "name": "engineering.code_reviewer.development",

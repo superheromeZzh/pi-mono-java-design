@@ -1,5 +1,5 @@
 {
-  "apiVersion": "agentkit.example/v1alpha1",
+  "apiVersion": "agentkit.example/v1",
   "kind": "Tool",
   "metadata": {
     "name": "weather.current",
@@ -40,6 +40,12 @@
         "required": ["temperature", "conditions"]
       },
       "tags": ["weather", "read"]
+    },
+    "exposure": {
+      "mode": "eager",
+      "searchable": true,
+      "keywords": ["weather", "temperature", "conditions"],
+      "group": "weather.read"
     },
     "implementation": {
       "kind": "openapi",
