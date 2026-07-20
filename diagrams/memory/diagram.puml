@@ -60,11 +60,20 @@ database "GaussDB" as db
 
 == Append message ==
 runtime -> memory : append(command, tenant, expectedRevision)
-memory -> db : lock session state
-memory -> db : insert entry and leaf event
-memory -> db : update leaf and revision
-db --> memory : committed entry id
-memory --> runtime : success
+group short database transaction
+  memory -> db : reserve idempotency operation
+  db --> memory : new operation or committed result
+  alt committed retry
+    memory --> runtime : stored result
+  else new operation
+    memory -> db : lock session state
+    memory -> db : insert entry and leaf event
+    memory -> db : update leaf and revision
+    memory -> db : commit operation result
+    db --> memory : committed entry id
+    memory --> runtime : success
+  end
+end
 
 == Compaction or branch summary ==
 runtime -> memory : prepare(snapshot request)
@@ -82,6 +91,93 @@ else revision unchanged
   db --> memory : committed
   memory --> runtime : success
 end
+
+@enduml
+
+@startuml memory-data-model
+title Session Event Plane Data Model
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam classBorderColor #53657D
+skinparam classBackgroundColor #F7F9FC
+
+' Source evidence: packages/coding-agent/src/core/session-manager.ts: SessionEntry,
+' _appendEntry, buildContextEntries, branch, resetLeaf, and branchWithSummary;
+' commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
+' Observed behavior: pi stores a session entry tree and rebuilds context from the
+' selected leaf path.
+' Design reason: constrain tenant and session ownership in the database while keeping
+' immutable entries separate from mutable leaf state and command governance.
+' Java divergence: relational foreign keys, leaf revisions, file projections, and
+' idempotency operation state are target-only reliability and security changes.
+
+class "agent_session" as agent_session <<table>> {
+  tenant_id : varchar(64) [PK]
+  session_id : varchar(128) [PK]
+  --
+  parent_session_id : varchar(128) [FK]
+  current_leaf_entry_id : varchar(128)
+  revision : bigint
+  next_append_seq : bigint
+}
+
+class "session_entry" as session_entry <<table>> {
+  tenant_id : varchar(64) [PK, FK]
+  session_id : varchar(128) [PK, FK]
+  entry_id : varchar(128) [PK]
+  --
+  parent_entry_id : varchar(128) [FK]
+  append_seq : bigint [UQ]
+  entry_type : varchar(64)
+  payload : jsonb
+}
+
+class "memory_write_operation" as memory_write_operation <<table>> {
+  tenant_id : varchar(64) [PK, FK]
+  operation_id : varchar(128) [PK]
+  --
+  session_id : varchar(128) [FK]
+  operation_type : varchar(32)
+  status : varchar(16)
+  request_hash : char(64)
+  result_payload : jsonb
+}
+
+class "session_leaf_event" as session_leaf_event <<table>> {
+  tenant_id : varchar(64) [PK, FK]
+  session_id : varchar(128) [PK, FK]
+  event_id : varchar(128) [PK]
+  --
+  session_revision : bigint [UQ]
+  from_leaf_entry_id : varchar(128) [FK]
+  to_leaf_entry_id : varchar(128) [FK]
+  operation_id : varchar(128) [FK]
+}
+
+class "session_file_operation" as session_file_operation <<table>> {
+  tenant_id : varchar(64) [PK, FK]
+  session_id : varchar(128) [PK, FK]
+  source_entry_id : varchar(128) [PK, FK]
+  operation_type : varchar(16) [PK]
+  file_path : text [PK]
+}
+
+agent_session ||--o{ agent_session
+agent_session ||--o{ session_entry
+session_entry ||--o{ session_entry
+agent_session ||--o{ memory_write_operation
+agent_session ||--o{ session_leaf_event
+memory_write_operation ||--o| session_leaf_event
+session_entry ||--o{ session_file_operation
+session_entry |o--o{ session_leaf_event
+
+note bottom of agent_session
+current_leaf_entry_id is validated in the write transaction.
+It has no immediate circular foreign key in this draft.
+end note
 
 @enduml
 

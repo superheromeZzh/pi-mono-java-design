@@ -7,6 +7,8 @@
 - [Command SR 设计](./pi-mono-java-command-SR设计.md)
 - [Skill Command SR 设计](./pi-mono-java-skill-command-SR设计.md)
 - [主流 Agent Tool/Agent 元数据机制调研与统一设计](./config-to-tool-agent-research/README.md)
+- [主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界](./agent-database-patterns/README.md)
+- [pi-mono Java ToB 记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
 
 ## 约定
 

@@ -1,0 +1,134 @@
+' Generated from public documentation and source repositories analyzed 2026-07-20.
+' Run from this directory: plantuml -tsvg diagram.puml
+
+@startuml agent-database-reference-layers
+!pragma layout elk
+title Agent Database Reference Layers
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam nodesep 35
+skinparam ranksep 45
+skinparam ArrowColor #53657D
+skinparam RectangleBorderColor #53657D
+skinparam RectangleBackgroundColor #F7F9FC
+
+' Source evidence:
+' - openai/openai-agents-python@2fa463571e76dae8ff267622f1018eaf06ffeb9f,
+'   src/agents/memory/sqlite_session.py: SQLiteSession._init_db_for_connection.
+' - langchain-ai/langgraph@49ae27c2ae983cfb92091b0dea9f7bc37a716479,
+'   libs/checkpoint-postgres/langgraph/checkpoint/postgres/base.py: MIGRATIONS.
+' - google/adk-python@be5828f317c7430411df29974cd9ccfa875e90de,
+'   src/google/adk/sessions/schemas/v1.py: StorageSession and StorageEvent.
+' - microsoft/agent-framework@7c6b1e975f75193ace223a05c6535b8556f93ee4,
+'   python/packages/azure-cosmos/agent_framework_azure_cosmos/_checkpoint_storage.py:
+'   CosmosCheckpointStorage.
+' - letta-ai/letta@b76da9092518cbaa2d09042e52fdcbde69243e18,
+'   letta/orm/agent.py: Agent; letta/orm/block.py: Block.
+' - Anthropic Managed Agents and AWS AgentCore public documentation accessed 2026-07-20.
+' Observed behavior: agent systems persist configuration, runtime events, checkpoints,
+' long-term memory, and audit data with different lifecycle and query semantics.
+' Design reason: separate data planes prevent conversation logs, execution recovery,
+' and cross-session memory from becoming one overloaded messages table.
+' Target-only mapping: the layer names below are a comparative model, not a claim that
+' every referenced product implements all layers with these exact names.
+
+rectangle "Control Plane\nagent definition and version\nenvironment and policy" as Control #EAF2FF
+rectangle "Session Event Plane\nsession and thread\nmessages, tool events, leaf" as Event #E9F7EF
+rectangle "Execution Checkpoint Plane\ncheckpoint and parent\nblob and pending writes" as Checkpoint #FFF4E6
+rectangle "Long-term Memory Plane\nstore, item, version\nnamespace and embedding" as Memory #F3EEFF
+rectangle "Audit And Operation Plane\nidempotency, approval\nretention and deletion" as Audit #FDEEF4
+
+rectangle "OpenAI SDK\nSession + Message" as OpenAI
+rectangle "Google ADK\nApp/User/Session + Event" as Google
+rectangle "Anthropic / AWS\nManaged event contracts" as Managed
+rectangle "LangGraph\nCheckpoint + Store" as LangGraph
+rectangle "Microsoft Agent Framework\nCosmos checkpoint document" as Microsoft
+rectangle "Letta\nAgent + Conversation + Block + Archive" as Letta
+
+OpenAI --> Event : conversation history
+Google --> Event : scoped event log
+Managed --> Event : managed events
+LangGraph --> Checkpoint : execution recovery
+LangGraph --> Memory : cross-thread store
+Microsoft --> Checkpoint : full workflow snapshot
+Letta --> Control : durable agent
+Letta --> Event : conversation messages
+Letta --> Memory : blocks and passages
+
+Control -[hidden]right- Event
+Event -[hidden]right- Checkpoint
+Checkpoint -[hidden]right- Memory
+Memory -[hidden]right- Audit
+
+Event --> Audit : append operation and retention
+Checkpoint --> Audit : restore and pruning
+Memory --> Audit : version and deletion
+Control --> Event : resolved configuration
+Event --> Checkpoint : recover in-flight work
+Event --> Memory : extract durable knowledge
+
+@enduml
+
+@startuml pi-memory-adoption-boundary
+!pragma layout smetana
+title Pi Memory SR Adoption Boundary
+left to right direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam componentStyle rectangle
+skinparam ArrowColor #53657D
+
+' Source evidence: badlogic/pi-mono@216e672e7c9fc65682553394b74e483c0c9e47f7,
+' packages/coding-agent/src/core/session-manager.ts: SessionEntry, _appendEntry,
+' buildContextEntries, branch, resetLeaf, and branchWithSummary.
+' Observed behavior: pi persists a tree of session entries and rebuilds model context
+' from the current leaf path; it does not expose a separate workflow checkpoint store
+' or cross-session memory database in this baseline.
+' Design reason: the current Memory SR should harden the session event plane without
+' presenting future checkpoint and long-term memory tables as current pi behavior.
+' Java divergence: durable leaf events, tenant isolation, revisions, and idempotency
+' are target-only reliability and security changes.
+
+package "Current SR Scope" #E9F7EF {
+  database "agent_session" as Session
+  database "session_entry" as Entry
+  database "session_leaf_event" as Leaf
+  database "session_file_operation" as FileOp
+  database "memory_write_operation" as WriteOp
+}
+
+package "Separate Future Topics" #F7F9FC {
+  rectangle "Agent Control Plane\nagent and version" as AgentControl
+  rectangle "Runtime Checkpoint Plane\nrun and checkpoint" as RuntimeCheckpoint
+  rectangle "Cross-session Memory Plane\nstore, item, version, embedding" as LongMemory
+  rectangle "Artifact Plane\nfile and object metadata" as Artifact
+}
+
+Session *--> Entry : owns immutable tree
+Session *--> Leaf : materializes leaf changes
+Entry *--> FileOp : derived projection
+WriteOp --> Session : idempotent command
+WriteOp --> Leaf : commits leaf change
+
+AgentControl ..> Session : future resolved snapshot reference
+Session ..> RuntimeCheckpoint : future in-flight recovery
+Entry ..> LongMemory : future extraction source
+Entry ..> Artifact : future content reference
+
+note bottom of Entry
+The current source of truth remains
+the active session entry path.
+end note
+
+note bottom of LongMemory
+Not part of SR-MEM-001 v0.4.
+Requires independent lifecycle,
+retrieval, retention, and deletion design.
+end note
+
+@enduml
