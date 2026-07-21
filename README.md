@@ -8,6 +8,7 @@
 - [Skill Command SR 设计](./pi-mono-java-skill-command-SR设计.md)
 - [主流 Agent Tool/Agent 元数据机制调研与统一设计](./config-to-tool-agent-research/README.md)
 - [主流 Agent 平台 Agent、Tool 与 Skill 创建官方文档](./主流Agent平台Agent-Tool-Skill创建官方文档.md)
+- [Anthropic Managed Agents 公开模型](./anthropic-managed-agents-public-model/README.md)
 - [主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界](./agent-database-patterns/README.md)
 - [pi-mono Java ToB 记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
 

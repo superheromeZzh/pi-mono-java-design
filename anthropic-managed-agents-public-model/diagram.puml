@@ -1,4 +1,4 @@
-' Generated from Anthropic public documentation accessed 2026-07-18.
+' Generated from Anthropic public documentation accessed 2026-07-21.
 ' Run from this directory: plantuml -tsvg diagram.puml
 ' Source baseline: public documentation; Anthropic does not publish a source commit for this managed service.
 
@@ -65,6 +65,170 @@ Deployment --> Agent : agent configuration
 Deployment --> Environment : environment configuration
 Deployment *--> DeploymentRun : records 0..*
 Deployment --> Session : creates scheduled sessions
+
+@enduml
+
+@startuml session_agent_creation_sequence
+title Session Creation from a Versioned Agent Configuration
+
+autonumber
+hide footbox
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceArrowThickness 1
+skinparam sequenceParticipantBorderColor #53657D
+skinparam sequenceParticipantBackgroundColor #F7F9FC
+skinparam ArrowColor #53657D
+skinparam LifeLineBorderColor #90A0B5
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign center
+
+' Source evidence:
+' - https://platform.claude.com/docs/en/managed-agents/sessions
+' - https://platform.claude.com/docs/en/api/beta/sessions/create
+' - https://platform.claude.com/docs/en/managed-agents/environments
+' - https://platform.claude.com/docs/en/managed-agents/tools
+' - https://platform.claude.com/docs/en/managed-agents/mcp-connector
+' - https://platform.claude.com/docs/en/managed-agents/skills
+' Observed behavior: a session stores a resolved agent snapshot, provisions an isolated sandbox, starts idle, and begins work only after a user event is sent.
+' Logical inference: component boundaries and the exact preparation order below are explanatory architecture, not claims about Anthropic internal implementation.
+' Design reason: separate immutable agent version resolution from session-local overrides and runtime resource preparation so the resulting session is traceable.
+
+actor Caller
+boundary "Session API" as SessionAPI
+database "Agent Store" as AgentStore
+control "Config Resolver" as Resolver
+database "Environment Store" as EnvStore
+control "Sandbox Provisioner" as Sandbox
+control "Resource and Skill Mounter" as Mounter
+control "Vault and MCP Binder" as VaultBinder
+control "Tool Registry" as ToolRegistry
+database "Session Store" as SessionStore
+boundary "Event API" as EventAPI
+control "Agent Runtime" as Runtime
+entity "Claude Model" as Model
+
+Caller -> SessionAPI: POST /v1/sessions\nagent, environment_id, resources, vault_ids
+activate SessionAPI
+
+group Resolve the base agent version [Observed result]
+  SessionAPI -> AgentStore: Resolve agent ID and requested version
+  alt Agent ID string or version omitted
+    AgentStore -> AgentStore: Select latest version at creation time
+  else Explicit version
+    AgentStore -> AgentStore: Select the requested immutable version
+  end
+  AgentStore --> SessionAPI: AgentVersion(id, version, configuration)
+end
+
+group Materialize the effective agent [Observed rules, inferred component]
+  SessionAPI -> Resolver: Build effective configuration
+  activate Resolver
+  Resolver -> Resolver: Deep-copy the base AgentVersion
+
+  loop model, system, tools, mcp_servers, skills
+    alt Override field is omitted
+      Resolver -> Resolver: Inherit the base field
+    else Override is null or an empty list
+      Resolver -> Resolver: Clear the field
+    else Override has a value
+      Resolver -> Resolver: Replace the complete field; do not merge
+    end
+  end
+
+  Resolver -> Resolver: Require a model
+  Resolver -> Resolver: Validate skills and read-tool compatibility
+  Resolver -> Resolver: Validate MCP server and toolset references
+
+  alt Effective configuration is invalid
+    Resolver --> SessionAPI: Validation error
+    deactivate Resolver
+    SessionAPI --> Caller: 400 error
+    deactivate SessionAPI
+  else Effective configuration is valid
+    Resolver -> Resolver: Resolve defaults and concrete references
+    note right of Resolver
+      Examples:
+      - Normalize model and speed
+      - Expand tool defaults
+      - Resolve skill versions
+      - Keep concrete subagent versions
+    end note
+    Resolver --> SessionAPI: ResolvedAgentSnapshot
+    deactivate Resolver
+  end
+end
+
+group Prepare the session runtime [Observed effects, inferred order]
+  SessionAPI -> EnvStore: Read environment configuration
+  EnvStore --> SessionAPI: Packages, networking, runtime settings
+
+  SessionAPI -> Sandbox: Provision a fresh isolated sandbox
+  activate Sandbox
+  Sandbox -> Sandbox: Install or attach environment packages
+  Sandbox -> Sandbox: Apply networking policy
+  Sandbox --> SessionAPI: Sandbox handle
+  deactivate Sandbox
+
+  SessionAPI -> Mounter: Mount session resources
+  activate Mounter
+  opt Files or repositories are attached
+    Mounter -> Mounter: Mount files and clone requested revisions
+  end
+  opt Memory stores are attached
+    Mounter -> Mounter: Mount stores and prepare memory instructions
+  end
+  Mounter -> Mounter: Mount resolved agent skills
+  Mounter --> SessionAPI: Mounted resource descriptors
+  deactivate Mounter
+
+  SessionAPI -> VaultBinder: Bind vault credentials to MCP server URLs
+  activate VaultBinder
+  VaultBinder -> VaultBinder: Prepare MCP connections without storing secrets in the agent
+  VaultBinder --> SessionAPI: Session-local MCP bindings
+  deactivate VaultBinder
+
+  SessionAPI -> ToolRegistry: Register effective tools and permission policies
+  activate ToolRegistry
+  ToolRegistry -> ToolRegistry: Register built-in, MCP, and custom tool contracts
+  ToolRegistry --> SessionAPI: Effective tool registry
+  deactivate ToolRegistry
+end
+
+group Persist the session boundary [Observed result]
+  SessionAPI -> SessionStore: Create session with resolved agent snapshot
+  activate SessionStore
+  SessionStore -> SessionStore: Store base agent ID and concrete version
+  SessionStore -> SessionStore: Store environment, resources, vault IDs, and metadata
+  SessionStore -> SessionStore: Initialize primary thread and status = idle
+  SessionStore --> SessionAPI: Session(id, agent snapshot, status = idle)
+  deactivate SessionStore
+  note over SessionAPI, SessionStore
+    POST /v1/sessions provisions the runtime boundary.
+    It does not send task work to the model.
+  end note
+end
+
+SessionAPI --> Caller: 200 Session
+deactivate SessionAPI
+
+== Work starts in a separate event request ==
+
+Caller -> EventAPI: POST /v1/sessions/{id}/events\nuser.message
+activate EventAPI
+EventAPI -> SessionStore: Load session and resolved snapshot
+SessionStore --> EventAPI: Session status = idle
+EventAPI -> Runtime: Start agent turn with snapshot and user event
+activate Runtime
+Runtime -> SessionStore: Set status = running
+Runtime -> Model: Invoke resolved model with system, history, and tools
+activate Model
+Model --> Runtime: Message or tool request
+deactivate Model
+Runtime --> EventAPI: Stream agent and session events
+deactivate Runtime
+EventAPI --> Caller: Event stream or acknowledgement
+deactivate EventAPI
 
 @enduml
 

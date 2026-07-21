@@ -1,8 +1,8 @@
 # Anthropic Managed Agents 公开模型（官方契约基线）
 
-> 文档版本：`v0.1.0`<br>
-> 状态：第一阶段草案，待逐节确认<br>
-> 资料核对日期：`2026-07-18`<br>
+> 文档版本：`v0.2.0`<br>
+> 状态：公开契约基线，已补充 Session 创建顺序<br>
+> 资料核对日期：`2026-07-21`<br>
 > 范围：仅提取 Anthropic 公开的 Managed Agents 模型，不掺入我们的 Tool/Agent 元数据设计。
 
 ## 1. 本轮结论
@@ -55,6 +55,7 @@ Managed Agents 是 Anthropic 托管服务，本轮没有可对齐的官方开源
 | Environment | [Cloud environment setup](https://platform.claude.com/docs/en/managed-agents/environments) | Environment 生命周期和 Session 沙箱隔离 |
 | Environment API | [Environments API](https://platform.claude.com/docs/en/api/beta/environments) | `cloud` / `self_hosted` 配置联合 |
 | Session | [Start a session](https://platform.claude.com/docs/en/managed-agents/sessions) | Agent 引用、版本锁定、单次覆盖 |
+| Session API | [Create Session API Reference](https://platform.claude.com/docs/en/api/beta/sessions/create) | `POST /v1/sessions` 请求联合类型和解析快照响应 |
 | Events | [Session event stream](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) | 任务启动、Tool 调用、确认与回传 |
 | Vault | [Authenticate with vaults](https://platform.claude.com/docs/en/managed-agents/vaults) | Session 级凭据、MCP 和环境变量凭据 |
 | Memory | [Using agent memory](https://platform.claude.com/docs/en/managed-agents/memory) | Memory Store 资源和 Session 挂载 |
@@ -86,6 +87,23 @@ PlantUML：[查看源码](./diagram.puml#L5)
 | `Event` | 客户端向 Session 发送的 `user.*` / `system.message` 事件，以及服务返回的 `agent.*` / `session.*` / `span.*` 事件 |
 
 Session 创建只准备运行环境，不自动开始任务；客户端发送 `user.message` 后才触发工作。公开状态包括 `idle`、`running`、`rescheduling` 和 `terminated`。
+
+#### 4.2.1 Session 基于 Agent 配置的创建顺序
+
+![Session 基于版本化 Agent 配置的创建顺序](./session_agent_creation_sequence.svg)
+
+PlantUML：[查看源码](./diagram.puml#L71)
+
+顺序图将 `POST /v1/sessions` 分为四个逻辑阶段：
+
+1. 根据 Agent ID 解析创建时的最新版本，或读取调用方显式锁定的版本。
+2. 深复制基础 Agent 配置，并对 `model`、`system`、`tools`、`mcp_servers`、`skills` 应用 Session 级完整字段替换。
+3. 根据 Environment 创建独立 Sandbox，挂载 Session Resources 和已解析 Skills，绑定 Vault 与 MCP，并形成有效 Tool Registry。
+4. 保存包含 Agent ID、具体版本和解析配置的 Session 快照，初始化主 Thread，并以 `idle` 状态返回。
+
+`POST /v1/sessions` 本身不发送任务给模型。后续 `POST /v1/sessions/{id}/events` 中的 `user.message` 才使 Session 从 `idle` 进入 `running` 并启动 Agent turn。
+
+图中的版本解析、完整替换、解析快照、独立 Sandbox 和事件启动边界来自公开文档。`Config Resolver`、`Resource and Skill Mounter`、`Tool Registry` 等参与者及其精确先后顺序是用于解释职责的逻辑推断，不表示 Anthropic 已公开这些内部服务或源码符号。
 
 ### 4.3 Session 级数据与凭据
 
@@ -133,7 +151,7 @@ Session 创建只准备运行环境，不自动开始任务；客户端发送 `u
 
 ![Anthropic Managed Agent 公开配置模型](./managed_agent_configuration_model.svg)
 
-PlantUML：[查看源码](./diagram.puml#L71)
+PlantUML：[查看源码](./diagram.puml#L235)
 
 ### 6.1 `agent_toolset_20260401`
 
@@ -186,7 +204,7 @@ MCP 配置被拆成两个互相校验的部分：
 
 ![Anthropic Managed Agents Tool 执行边界](./managed_agents_tool_execution_model.svg)
 
-PlantUML：[查看源码](./diagram.puml#L209)
+PlantUML：[查看源码](./diagram.puml#L373)
 
 | Tool 类型 | 定义在哪里 | 真正执行者 | 结果如何回到 Agent |
 |---|---|---|---|
@@ -367,7 +385,7 @@ Agent 可通过以下形状成为 Coordinator：
 
 ## 10. 图表维护与校验
 
-本主题的三个图统一维护在 [diagram.puml](./diagram.puml) 中。图源只使用英文和 ASCII；SVG 是 PlantUML 生成物，不得手工编辑。
+本主题的四个图统一维护在 [diagram.puml](./diagram.puml) 中。图源只使用英文和 ASCII；SVG 是 PlantUML 生成物，不得手工编辑。
 
 标准生成命令：
 
@@ -379,4 +397,5 @@ plantuml -tsvg diagram.puml
 
 | 版本 | 日期 | 变化 |
 |---|---|---|
+| `v0.2.0` | 2026-07-21 | 增加 Session 基于版本化 Agent 配置创建的顺序图，区分官方观察行为与服务端逻辑推断；更新根文档索引 |
 | `v0.1.0` | 2026-07-18 | 建立 Anthropic Managed Agents 官方公开契约基线；整理资源、Agent 字段、三类 Tool、Session、Vault、Memory、Skill、Multiagent 和 Deployment；未加入目标元数据设计 |
