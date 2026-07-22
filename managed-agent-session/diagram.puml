@@ -44,9 +44,14 @@ Loop -> Session: state = idle
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/prompt/SystemPromptBuilder.java build
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/tool/catalog/DefaultToolCatalog.java resolve
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillLoader.java loadFromDirectory
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java wireServerRoutes
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handle and handleCommand
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java createSessionWithPersistence
-' Observed behavior: each Java session resolves local tools and skills, builds a prompt, creates a stateful Agent, and restores messages.
-' Design reason: show the current loading path before introducing manager-backed assembly.
+' Source evidence: docs/asyncapi/chat-ws.yaml channels.chat, sendCommand, and receiveEvent
+' Observed behavior: the WebSocket handshake creates or restores one session by conversation id before any prompt command is received.
+' Observed behavior: each new Java session resolves local tools and skills, builds a prompt, creates a stateful Agent, and restores messages.
+' Java divergence: the current handshake has no agent id or agent version and every pooled session shares one base configuration.
+' Design reason: show only the current WebSocket loading path before introducing manager-backed assembly.
 @startuml pi_mono_java_current_loading
 !theme plain
 skinparam backgroundColor white
@@ -57,8 +62,9 @@ skinparam sequenceParticipantBorderColor #B8BCC4
 skinparam sequenceParticipantBackgroundColor #EAF5FB
 skinparam sequenceLifeLineBorderColor #B8BCC4
 
-actor Client
-participant "CLI or ServerMode" as Entry
+actor "WebSocket Client" as Client
+participant "Reactor Netty Route" as Route
+participant "ChatWebSocketHandler" as Handler
 participant SessionPool
 participant AgentSession
 participant ToolCatalog
@@ -68,23 +74,36 @@ participant PromptBuilder
 participant "Stateful Agent" as Agent
 database SessionManager
 
-Client -> Entry: open conversation
-Entry -> SessionPool: getOrCreate(conversation_id)
-SessionPool -> AgentSession: new AgentSession(...)
-SessionPool -> AgentSession: initialize(baseConfig)
-AgentSession -> ToolCatalog: refresh and resolve selection
-ToolCatalog --> AgentSession: List<AgentTool>
-AgentSession -> SkillLoader: scan local SKILL.md files
-SkillLoader --> AgentSession: List<Skill with Path>
-AgentSession -> ContextLoader: load context and system files
-ContextLoader --> AgentSession: context files and prompt overrides
-AgentSession -> PromptBuilder: build(tools, skills, context, env)
-PromptBuilder --> AgentSession: system prompt
-AgentSession -> Agent: create and set model, prompt, tools
-SessionPool -> SessionManager: create or load JSONL
-SessionManager --> AgentSession: restored messages
-SessionPool --> Entry: AgentSession
-Entry --> Client: conversation_id
+Client -> Route: GET /api/ws/chat?conversation_id=optional
+Route -> Handler: upgrade and handle(conversation_id)
+Handler -> SessionPool: getOrCreate(conversation_id)
+alt active conversation exists
+  SessionPool --> Handler: existing AgentSession
+else create or restore conversation
+  SessionPool -> AgentSession: new AgentSession(...)
+  SessionPool -> SessionManager: create or load JSONL
+  SessionManager --> SessionPool: restored messages
+  SessionPool -> AgentSession: initialize(shared baseConfig)
+  AgentSession -> ToolCatalog: refresh and resolve selection
+  ToolCatalog --> AgentSession: List<AgentTool>
+  AgentSession -> SkillLoader: scan local SKILL.md files
+  SkillLoader --> AgentSession: List<Skill with Path>
+  AgentSession -> ContextLoader: load context and system files
+  ContextLoader --> AgentSession: context files and prompt overrides
+  AgentSession -> PromptBuilder: build(tools, skills, context, env)
+  PromptBuilder --> AgentSession: system prompt
+  AgentSession -> Agent: create and set model, prompt, tools
+  SessionPool -> AgentSession: restore messages
+  SessionPool --> Handler: new AgentSession
+end
+Handler -> AgentSession: subscribe to AgentEvent
+Handler --> Client: WebSocket command and event channel
+Client -> Handler: prompt command
+Handler --> Client: correlated response accepted
+Handler -> AgentSession: prompt(message)
+AgentSession -> Agent: start AgentLoop
+Agent --> Handler: AgentEvent stream
+Handler --> Client: message, tool, done, or error frames
 @enduml
 
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/AgentTool.java
@@ -207,14 +226,18 @@ else any required runtime fails
 end
 @enduml
 
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java wireServerRoutes
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handle, handleCommand, handlePrompt, and buildCloseHook
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/SessionManager.java loadSession
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java setModel setSystemPrompt setTools replaceMessages
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
-' Target-only architecture: AgentRuntimeRegistry, managed session factory, manager manifests, and SessionSnapshotV2 are new integration components.
-' Java divergence: the current SessionConfig has only model, cwd, customPrompt, and mode, and AgentLoop executes AgentTool instances.
-' Design reason: create isolated sessions only from preloaded runtimes without configuration loading or manager binding.
+' Source evidence: docs/asyncapi/chat-ws.yaml channels.chat, sendCommand, and receiveEvent
+' Target-only architecture: handshake agent identity, AgentRuntimeRegistry, managed session pool, manager manifests, SessionSnapshotV2, and approval frames are new integration components.
+' Observed behavior: the current WebSocket handler acknowledges prompt before Agent events and maps AgentEvent objects to outbound JSON frames.
+' Java divergence: the current handshake reads only conversation id, SessionConfig is shared, and AgentLoop executes AgentTool instances.
+' Design reason: open isolated WebSocket sessions only from preloaded runtimes and keep model, tool, skill, approval, and event streaming on one connection.
 @startuml pi_session_creation
 !theme plain
 skinparam backgroundColor white
@@ -225,58 +248,72 @@ skinparam sequenceParticipantBorderColor #B8BCC4
 skinparam sequenceParticipantBackgroundColor #EAF5FB
 skinparam sequenceLifeLineBorderColor #B8BCC4
 
-actor Client
-participant "Managed Session Factory" as Factory
+actor "WebSocket Client" as Client
+participant "Reactor Netty Route" as Route
+participant "Managed ChatWebSocketHandler" as Handler
+participant "Managed Session Pool" as Pool
 database "Agent Runtime Registry" as Registry
-participant "Model Manager" as ModelManager
-participant "ModelManagerInvoker" as ModelInvoker
-participant "Runtime Tool Set" as ToolSet
-participant "ToolCallDispatcher" as Dispatcher
-participant "SkillCallDispatcher" as SkillDispatcher
-participant "Managed Prompt Builder" as Prompt
+database "Session and Run Stores" as Store
+participant "Managed Session Factory" as Factory
 participant "pi-mono-java AgentSession" as JavaSession
+participant "Model Manager" as ModelManager
 participant "Tool Manager" as ToolManager
 participant "Skill Manager" as SkillManager
-database "Session Manager JSONL" as History
-database "Session Snapshot Store" as Store
 
-Client -> Factory: createSession(agent_id, requested_version)
-Factory -> Registry: require READY preloaded runtime
-Registry --> Factory: immutable runtime + manifest ids + tool set
-Factory -> Store: reserve session id
-Store --> Factory: session id
-Factory -> ModelManager: select from pinned manifest
+Client -> Route: WebSocket handshake(conversation id, agent id, version)
+Route -> Registry: require READY
+Registry --> Route: ready
+Route -> Pool: prepare handshake and getOrCreate(SessionKey)
+Pool -> Store: load snapshot when resuming
+Store --> Pool: pinned AgentKey and manifest ids or new session
+Pool -> Registry: require preloaded AgentKey
+Registry --> Pool: immutable runtime
+Pool -> Factory: create(runtime, session id, connection context)
+Factory -> ModelManager: select from pinned model manifest
 ModelManager --> Factory: opaque binding + public descriptor
-Factory -> ModelInvoker: bind model selection and session context
-ModelInvoker --> Factory: model execution entry
-Factory -> ToolSet: read model tools
-ToolSet --> Factory: model tools
-Factory -> Dispatcher: bind tool set, manager, session context
-Dispatcher --> Factory: direct execution entry
-Factory -> SkillDispatcher: bind skill set, manager, session context
-SkillDispatcher --> Factory: activation entry
-Factory -> Prompt: append session context to static prompt
-Prompt --> Factory: final system prompt
-Factory -> History: create or open session JSONL
-History --> Factory: restored messages
-Factory -> JavaSession: createManaged(invoker, prompt, model tools, dispatchers, messages)
+Factory -> Store: load messages and validate or commit snapshot
+Store --> Factory: restored messages and fixed identity
+Factory -> JavaSession: create from runtime and bind manager ports
 JavaSession --> Factory: idle AgentSession
-Factory -> Store: commit SessionSnapshotV2
-Factory --> Client: session_id + status idle
+Factory --> Pool: AgentSession
+Pool --> Route: prepared AgentSession + SessionKey
+Route -> Handler: upgrade with prepared session
+Handler -> JavaSession: subscribe to AgentEvent
+Handler --> Client: WebSocket established
 
-Client -> JavaSession: prompt(message)
-JavaSession -> ModelInvoker: normalized request(system, messages, tools)
-ModelInvoker -> ModelManager: stream(model binding, request)
-ModelManager --> ModelInvoker: normalized assistant stream
-ModelInvoker --> JavaSession: text or call blocks
-JavaSession -> Dispatcher: dispatch(tool call)
-Dispatcher -> ToolManager: invoke(manifest, binding, context, arguments)
-ToolManager --> Dispatcher: result
-Dispatcher --> JavaSession: ToolResultMessage
-JavaSession -> SkillDispatcher: activate(skill call)
-SkillDispatcher -> SkillManager: activate(manifest, binding, context)
-SkillManager --> SkillDispatcher: instructions + pinned overlay
-SkillDispatcher --> JavaSession: activated skill result
+Client -> Handler: prompt(id, message)
+Handler --> Client: response(id, accepted, conversation id, AgentKey)
+Handler -> Store: append UserMessage
+Handler -> JavaSession: prompt(message)
+JavaSession -> ModelManager: stream via ModelManagerInvoker
+ModelManager --> JavaSession: normalized assistant stream
+JavaSession --> Handler: AgentEvent stream
+Handler --> Client: message events
+
+alt tool call
+  JavaSession -> ToolManager: invoke via ToolCallDispatcher
+  alt completed, denied, or failed
+    ToolManager --> JavaSession: ToolInvocationResult
+    JavaSession --> Handler: tool events and continuation
+    Handler --> Client: tool events
+  else approval required
+    ToolManager --> JavaSession: ApprovalRequired
+    JavaSession -> Store: persist WAITING_APPROVAL checkpoint
+    JavaSession --> Handler: approval required event
+    Handler --> Client: approval_required frame
+    Client -> Handler: submit_approval(id, run id, approval id, decision)
+    Handler -> JavaSession: resumeApproval(...)
+    JavaSession -> ToolManager: resume(approval id, decision)
+    ToolManager --> JavaSession: completed, denied, or failed
+    JavaSession -> Store: append result and clear pending state
+  end
+else skill call
+  JavaSession -> SkillManager: activate via SkillCallDispatcher
+  SkillManager --> JavaSession: instructions + pinned overlay
+end
+
+JavaSession --> Handler: done or error event
+Handler --> Client: done or error frame
 @enduml
 
 ' Source evidence: packages/agent/src/agent.ts Agent.prompt, Agent.continue, and Agent.runWithLifecycle
@@ -335,9 +372,10 @@ CANCELLED --> [*]
 
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java runToolPhase
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handleCommand and forwardSessionEvent
 ' Target-only architecture: Tool Manager bindings, approval records, resume tokens, and durable run checkpoints are not implemented in the Java baseline.
 ' Observed behavior: current Java tool execution validates and calls AgentTool.execute without a durable approval suspension protocol.
-' Java divergence: permission is resolved and stored only by Tool Manager; Agent Runtime branches only on the returned invocation result type.
+' Java divergence: permission is resolved and stored only by Tool Manager; Agent Runtime branches only on the returned invocation result type; submit approval and approval required WebSocket frames are new.
 ' Design reason: bind approval to the exact manifest, binding, call, argument hash, actor, and expiry to prevent policy bypass and replay.
 @startuml tool_approval_resume_sequence
 !theme plain
@@ -350,6 +388,8 @@ skinparam sequenceParticipantBackgroundColor #EAF5FB
 skinparam sequenceLifeLineBorderColor #B8BCC4
 
 actor User
+participant "WebSocket Client" as Client
+participant "ChatWebSocketHandler" as Handler
 participant "Agent Runtime" as Runtime
 participant "ToolCallDispatcher" as Dispatcher
 participant "Tool Manager" as ToolManager
@@ -376,8 +416,12 @@ else permission requires approval
   ToolManager --> Dispatcher: ApprovalRequired(approval id)
   Dispatcher --> Runtime: suspend result
   Runtime -> CheckpointStore: persist messages, call index, and approval id
-  Runtime --> User: approval required event
-  User -> Runtime: submit decision
+  Runtime -> Handler: approval required event
+  Handler -> Client: approval_required frame
+  Client --> User: show approval request
+  User -> Client: approve or deny
+  Client -> Handler: submit_approval frame
+  Handler -> Runtime: resumeApproval(run id, approval id, decision)
   Runtime -> ToolManager: resume(approval id, decision)
   ToolManager -> ApprovalStore: atomically consume and validate record
   ApprovalStore --> ToolManager: bound invocation or rejection
