@@ -131,7 +131,8 @@ skinparam rectangleBackgroundColor #F2F2F2
 
 rectangle "Agent Config vN" as Config
 rectangle "Runtime Assembler\nforward raw manager config\ncompile static prompt" as Assembler
-rectangle "ResolvedAgentRuntime\npreloaded prompt\nmodel, tool, skill manifests" as Runtime
+rectangle "ResolvedAgentRuntimeRevision\nimmutable prompt and manifests" as Revision
+rectangle "ManagedAgentInstance\natomic active revision" as Instance
 rectangle "Managed Session Factory" as Factory
 rectangle "AgentSession + AgentLoop\nmessages, turns, run state" as Loop
 
@@ -148,8 +149,9 @@ package "Independent manager plane" {
 }
 
 Config -right-> Assembler
-Assembler -right-> Runtime: static prompt and pinned manifests
-Runtime -right-> Factory: preloaded runtime
+Assembler -right-> Revision: static prompt and pinned manifests
+Revision -right-> Instance: atomic publish
+Instance -right-> Factory: acquire RuntimeLease
 Factory -right-> Loop: isolated session
 
 Assembler --> ModelManager: bind models
@@ -167,7 +169,7 @@ SkillDispatcher --> SkillManager: activate
 
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java createSessionWithPersistence
-' Target-only architecture: AgentDeploymentPlan, AgentRuntimeBootstrap, AgentRuntimeRegistry, and readiness gating are new components.
+' Target-only architecture: AgentDeploymentPlan, AgentRuntimeBootstrap, ManagedAgentInstance, AgentRuntimeRegistry, and readiness gating are new components.
 ' Observed behavior: current Java loading occurs inside each AgentSession initialization, not before container readiness.
 ' Java divergence: the target eagerly assembles every required runtime and never assembles one on the session request path.
 ' Design reason: fail startup on invalid required agents and keep session creation free of configuration and manager binding work.
@@ -211,8 +213,8 @@ loop each required AgentConfig
   SkillManager --> Assembler: pinned skill manifest
   Assembler -> Prompt: compile static system + lists
   Prompt --> Assembler: static system prompt
-  Assembler --> Bootstrap: immutable ResolvedAgentRuntime
-  Bootstrap -> Registry: register while BOOTSTRAPPING
+  Assembler --> Bootstrap: immutable runtime revision
+  Bootstrap -> Registry: register instance with active revision
 end
 
 alt all required runtimes registered
@@ -226,6 +228,59 @@ else any required runtime fails
 end
 @enduml
 
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution
+' Target-only architecture: runtime revision reconciliation, dependency indexing, atomic publication, and revision leases are not implemented in the Java baseline.
+' Observed behavior: current Java sessions own stateful Agent objects and each Agent run is carried by the virtual-thread executor.
+' Java divergence: the target creates a stable container-level ManagedAgentInstance and publishes immutable revisions without mutating active sessions.
+' Design reason: management updates must become visible to new sessions atomically while existing conversations remain reproducible and approvable against their pinned revision.
+@startuml managed_agent_revision_reconcile
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+actor Administrator
+participant "Management Plane" as Management
+participant "Model, Tool, or Skill Manager" as Manager
+database "Dependency Index" as Index
+participant "Runtime Reconciler" as Reconciler
+participant "Runtime Assembler" as Assembler
+participant "ManagedAgentInstance" as Instance
+participant "Existing AgentSession" as Existing
+participant "New AgentSession" as NewSession
+database "Runtime Status" as Status
+
+Administrator -> Management: update managed resource
+Management -> Manager: persist new resource version
+Manager --> Management: committed version
+Management -> Index: find affected AgentKeys
+Index --> Management: AgentKey set
+Management -> Reconciler: request desired revision per AgentKey
+Reconciler -> Instance: mark RECONCILING
+Reconciler -> Assembler: build complete revision from exact dependencies
+Assembler --> Reconciler: immutable next revision
+Reconciler -> Reconciler: validate prompt, schemas, and manifests
+Reconciler -> Instance: compareAndSet(old, next)
+Instance --> Reconciler: published
+Reconciler -> Status: acknowledge applied revision
+
+Existing -> Instance: retain pinned old revision lease
+Instance --> Existing: old revision remains available
+NewSession -> Instance: acquire active revision
+Instance --> NewSession: next revision lease
+
+alt rebuild or publication fails
+  Reconciler -> Instance: keep serving old revision
+  Reconciler -> Status: report DEGRADED with error
+end
+@enduml
+
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java wireServerRoutes
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handle, handleCommand, handlePrompt, and buildCloseHook
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence
@@ -234,7 +289,7 @@ end
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
 ' Source evidence: docs/asyncapi/chat-ws.yaml channels.chat, sendCommand, and receiveEvent
-' Target-only architecture: handshake agent identity, AgentRuntimeRegistry, managed session pool, manager manifests, SessionSnapshotV2, and approval frames are new integration components.
+' Target-only architecture: handshake agent identity, ManagedAgentInstance, runtime revision leases, managed session pool, manager manifests, SessionSnapshotV2, and approval frames are new integration components.
 ' Observed behavior: the current WebSocket handler acknowledges prompt before Agent events and maps AgentEvent objects to outbound JSON frames.
 ' Java divergence: the current handshake reads only conversation id, SessionConfig is shared, and AgentLoop executes AgentTool instances.
 ' Design reason: open isolated WebSocket sessions only from preloaded runtimes and keep model, tool, skill, approval, and event streaming on one connection.
@@ -266,14 +321,14 @@ Registry --> Route: ready
 Route -> Pool: prepare handshake and getOrCreate(SessionKey)
 Pool -> Store: load snapshot when resuming
 Store --> Pool: pinned AgentKey and manifest ids or new session
-Pool -> Registry: require preloaded AgentKey
-Registry --> Pool: immutable runtime
-Pool -> Factory: create(runtime, session id, connection context)
+Pool -> Registry: acquire active or snapshot-pinned revision
+Registry --> Pool: RuntimeLease with immutable revision
+Pool -> Factory: create(lease, session id, connection context)
 Factory -> ModelManager: select from pinned model manifest
 ModelManager --> Factory: opaque binding + public descriptor
 Factory -> Store: load messages and validate or commit snapshot
 Store --> Factory: restored messages and fixed identity
-Factory -> JavaSession: create from runtime and bind manager ports
+Factory -> JavaSession: create from revision and bind manager ports
 JavaSession --> Factory: idle AgentSession
 Factory --> Pool: AgentSession
 Pool --> Route: prepared AgentSession + SessionKey
