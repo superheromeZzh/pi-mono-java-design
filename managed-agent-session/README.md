@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.1.0 |
+| 文档版本 | 1.2.0 |
 | 状态 | Draft，供架构评审 |
 | pi-mono 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
 | pi-mono-java 源码基线 | `b99871a0321b73606a8f074c42050f28f52fdfca` |
@@ -344,7 +344,23 @@ function buildManagedAgentInstance(agentConfig):
 
 `ToolManager.resolveAgentTools()` 接收完整 Tool 配置，因此 enabled、permission、默认值和逐项覆盖都由 Tool Manager 处理。
 
-## 5. ToB AgentSession 与 Agent 类结构
+## 5. pi-mono 与 ToB pi-mono-java 类结构对比
+
+### 5.1 pi-mono 当前源码类图
+
+![AgentSession and Agent](../pi-mono-agent-session/pi_mono_agent_session_agent_class.svg)
+
+[PlantUML 源码](../pi-mono-agent-session/diagram.puml#L8)
+
+这张图表示 pi-mono 基线 `216e672e7c9fc65682553394b74e483c0c9e47f7` 中已经存在的结构：
+
+- `AgentSession` 持有一个独立的有状态 `Agent`。
+- `AgentSession` 协调 `SessionManager`、`SettingsManager`、`ResourceLoader`、`ModelRuntime` 和 `ExtensionRunner`。
+- `Agent` 持有 `MutableAgentState`、当前 `ActiveRun` 和两条消息队列。
+- `MutableAgentState.tools` 是同时包含模型 Schema 和本地 `execute()` 的 `AgentTool[]`。
+- Agent 通过注入的 `streamFn` 进入 `ModelRuntime`，通过 `AgentLoop` 完成模型和 Tool 循环。
+
+### 5.2 ToB pi-mono-java 目标类图
 
 ![Simplified ManagedAgentInstance, AgentSession and Agent](simplified_managed_agent_class.svg)
 
@@ -363,7 +379,25 @@ Agent
     保存模型上下文和当前 Run 状态
 ```
 
-### 5.1 创建 AgentSession 需要的字段
+### 5.3 类结构差异
+
+| 对比项 | pi-mono 当前结构 | ToB pi-mono-java 目标结构 | 差异类型 |
+|---|---|---|---|
+| Agent 定义输入 | 没有独立的 ManagedAgentInstance | `ManagedAgentInstance` 提供版本化、只读的 Session 构造字段 | 架构变更 |
+| Session 与 Agent | 一个 `AgentSession` 组合一个 `Agent` | 保持一个 `AgentSession` 组合一个独立 `Agent` | 保持一致 |
+| 本地资源加载 | `SettingsManager + ResourceLoader + ExtensionRunner` | Managed 路径不保留这些本地资源组件 | 产品约束 |
+| 模型执行 | `ModelRuntime` 与注入的 `streamFn` | `ModelManagerInvoker` | 架构变更 |
+| Agent 中的模型 | 完整 `Model` | `modelId` | 安全与职责收敛 |
+| Agent 中的 Tool | 带本地 `execute()` 的 `AgentTool[]` | 仅模型 Schema 的 `ModelTool[]` | 架构变更 |
+| Tool 调用 | Agent 进程内执行 | `ToolCallInvoker` 转发 Tool Manager | 架构变更 |
+| Skill 发现 | ResourceLoader 返回本地路径 | `resolvedSkills` 来自 Skill Manager | 产品约束 |
+| Skill 激活 | read Tool 或 AgentSession 读取 `SKILL.md` | Runtime 控制调用或 AgentSession 转发 Skill Manager | 架构变更 |
+| Session 持久化 | `SessionManager` | 继续保留 Server Session Store/SessionManager | 保持一致 |
+| Run 和消息队列 | Agent 持有 | Agent 继续持有 | 保持一致 |
+
+核心关系没有改变：`AgentSession` 仍是会话编排对象，`Agent` 仍是有状态模型循环对象。变化集中在资源和执行边界：本地 `ResourceLoader/ModelRuntime/AgentTool.execute()` 被版本化的 `ManagedAgentInstance` 与三个独立 Manager 替代。
+
+### 5.4 创建 AgentSession 需要的字段
 
 假设 pi-mono-java 与 pi-mono 的职责对齐，ToB `AgentSession` 需要：
 
@@ -391,7 +425,7 @@ class AgentSession:
 
 AgentSession 不需要复制完整 Agent 元数据。它只保存会话身份和运行时需要的解析结果。
 
-### 5.2 创建 Agent 需要的字段
+### 5.5 创建 Agent 需要的字段
 
 ToB `Agent` 仍保持 pi-mono 的有状态模型循环职责：
 
@@ -982,6 +1016,7 @@ ToolCallInvoker
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.2.0 | 2026-07-23 | 在 ToB 目标类图前加入 pi-mono 当前 `AgentSession and Agent` 源码类图，并增加类结构差异对照 |
 | 1.1.0 | 2026-07-23 | 增加本地基线与 Manager 目标下的 Tool 发现/调用、Skill 描述发现/渐进式激活对照；定义 Runtime 自有的 `activate_skill` 控制协议 |
 | 1.0.0 | 2026-07-23 | 按 Agent/Tool/Skill 元数据收敛 ManagedAgentInstance；移除元数据中不存在的 Binding、Manifest、RuntimeRevision 和 RuntimeLease；增加具体实例、AgentSession/Agent 字段映射、ToB 删除字段、创建流程和 Manager 直接调用设计 |
 | 0.9.0 | 2026-07-22 | 旧方案；使用 PublishedAgentRevision、Manifest、Binding、RuntimeCallableRegistry 和 RuntimeLease，已被 1.0.0 简化方案替代 |
