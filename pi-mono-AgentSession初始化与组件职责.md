@@ -88,18 +88,13 @@ CLI 主路径使用上述层次。SDK 调用方也可以直接调用 `createAgen
 
 ```text
 async function createPiAgentSession(options):
-    // 解析当前 Session 使用的工作目录。
-    // cwd 决定项目配置、Skill、Extension
-    // 和上下文文件的加载范围。
+    // 解析当前 Session 使用的工作目录；cwd 决定项目配置、Skill、Extension 和上下文文件的加载范围。
     cwd = resolveCwd(options)
 
-    // 解析 Agent 全局配置目录。
-    // 该目录包含 auth.json、models.json
-    // 以及用户级资源。
+    // 解析 Agent 全局配置目录，该目录包含 auth.json、models.json 以及用户级资源。
     agentDir = resolveAgentDir(options)
 
-    // 创建或复用模型运行环境。
-    // ModelRuntime 负责模型注册、认证和模型调用。
+    // 创建或复用模型运行环境；ModelRuntime 负责模型注册、认证和模型调用。
     modelRuntime =
         options.modelRuntime
         ?? createModelRuntime(agentDir)
@@ -109,8 +104,7 @@ async function createPiAgentSession(options):
         options.settingsManager
         ?? createSettingsManager(cwd, agentDir)
 
-    // 创建新 SessionManager，或打开已有 Session。
-    // SessionManager 负责 JSONL 与会话树，不调用模型。
+    // 创建新 SessionManager 或打开已有 Session；SessionManager 负责 JSONL 与会话树，不调用模型。
     sessionManager =
         options.sessionManager
         ?? createOrOpenSession(cwd, options)
@@ -124,23 +118,15 @@ async function createPiAgentSession(options):
             settingsManager
         })
 
-    // 只有由当前函数新建 Loader 时才在此 reload。
-    // CLI services 路径会在 createAgentSessionServices()
-    // 中提前完成该步骤。
+    // 只有由当前函数新建 Loader 时才在此 reload；CLI services 路径会在 createAgentSessionServices() 中提前完成该步骤。
     if resourceLoader is newly created:
         await resourceLoader.reload()
 
-    // 从 SessionManager 解析当前分支的会话上下文。
-    // 新 Session 返回空消息；恢复 Session 时
-    // 包含历史消息、模型和 thinking level。
+    // 从 SessionManager 解析当前分支的会话上下文；新 Session 返回空消息，恢复 Session 时包含历史消息、模型和 thinking level。
     existingSession =
         sessionManager.buildSessionContext()
 
-    // 按优先级选择模型：
-    // 1. 调用方显式模型；
-    // 2. Session 保存的模型；
-    // 3. Settings 默认模型；
-    // 4. 可用 Provider 默认模型。
+    // 按优先级选择模型：1. 调用方显式模型；2. Session 保存的模型；3. Settings 默认模型；4. 可用 Provider 默认模型。
     model = resolveModel({
         requestedModel: options.model,
         restoredModel: existingSession.model,
@@ -148,8 +134,7 @@ async function createPiAgentSession(options):
         modelRuntime
     })
 
-    // 按调用参数、Session 记录、Settings 和 pi 默认值
-    // 选择 thinking level，再根据模型能力进行 clamp。
+    // 按调用参数、Session 记录、Settings 和 pi 默认值选择 thinking level，再根据模型能力进行 clamp。
     thinkingLevel = resolveThinkingLevel({
         requestedLevel: options.thinkingLevel,
         restoredLevel:
@@ -158,8 +143,7 @@ async function createPiAgentSession(options):
         model
     })
 
-    // 计算初始启用的 Tool 名称。
-    // 此时只确定名称选择，还没有构建最终 Tool 实例。
+    // 计算初始启用的 Tool 名称；此时只确定名称选择，还没有构建最终 Tool 实例。
     activeToolNames = resolveInitialToolNames({
         defaults: [
             "read",
@@ -172,9 +156,7 @@ async function createPiAgentSession(options):
         noTools: options.noTools
     })
 
-    // 先创建底层有状态 Agent。
-    // 最终 Tool 和 system prompt 会由后续
-    // AgentSession 构造阶段完成，因此先使用空值。
+    // 先创建底层有状态 Agent；最终 Tool 和 system prompt 会由后续 AgentSession 构造阶段完成，因此先使用空值。
     agent = new Agent({
         initialState: {
             systemPrompt: "",
@@ -197,13 +179,11 @@ async function createPiAgentSession(options):
             settingsManager.getFollowUpMode()
     })
 
-    // 恢复历史消息。
-    // 对新 Session，existingSession.messages 是空列表。
+    // 恢复历史消息；对新 Session，existingSession.messages 是空列表。
     agent.state.messages =
         existingSession.messages
 
-    // 新 Session 会记录初始模型和 thinking level，
-    // 便于之后恢复。
+    // 新 Session 会记录初始模型和 thinking level，便于之后恢复。
     if existingSession is empty:
         if model exists:
             sessionManager.appendModelChange(model)
@@ -211,9 +191,7 @@ async function createPiAgentSession(options):
             thinkingLevel
         )
 
-    // 创建上层 AgentSession。
-    // 构造函数会订阅 Agent 事件、安装 Tool Hook，
-    // 并同步调用私有 _buildRuntime()。
+    // 创建上层 AgentSession；构造函数会订阅 Agent 事件、安装 Tool Hook，并同步调用私有 _buildRuntime()。
     session = new AgentSession({
         agent,
         sessionManager,
@@ -231,8 +209,7 @@ async function createPiAgentSession(options):
             options.customTools
     })
 
-    // 此时 Agent 已具备最终 Tool、Skill 清单和 system prompt。
-    // 创建 Session 本身不会立即调用模型。
+    // 此时 Agent 已具备最终 Tool、Skill 清单和 system prompt；创建 Session 本身不会立即调用模型。
     return session
 ```
 
@@ -242,15 +219,13 @@ async function createPiAgentSession(options):
 
 ```text
 async function ResourceLoader.reload(options):
-    // 如果要求项目信任确认，先以未信任状态
-    // 加载安全的 Extension 集合，再获取信任决定。
+    // 如果要求项目信任确认，先以未信任状态加载安全的 Extension 集合，再获取信任决定。
     resolveProjectTrustIfRequired(options)
 
     // 按当前信任状态重载用户级和项目级 Settings。
     await settingsManager.reload()
 
-    // 解析 Package 和显式资源路径，
-    // 并过滤 enabled=false 的资源。
+    // 解析 Package 和显式资源路径，并过滤 enabled=false 的资源。
     resolvedResources =
         await packageManager.resolve()
 
@@ -269,8 +244,7 @@ async function ResourceLoader.reload(options):
         resolvedResources.prompts
     )
 
-    // 加载 Theme。Theme 主要服务 UI，
-    // 不直接进入 Agent 模型上下文。
+    // 加载 Theme。Theme 主要服务 UI，不直接进入 Agent 模型上下文。
     themes = loadThemes(
         resolvedResources.themes
     )
@@ -298,15 +272,13 @@ function AgentSession.constructor(config):
     // 保存 Agent 和五个主要协作组件。
     save(config)
 
-    // 订阅 AgentEvent，用于持久化、重试、压缩
-    // 和对上层转发事件。
+    // 订阅 AgentEvent，用于持久化、重试、压缩和对上层转发事件。
     subscribeToAgentEvents()
 
     // 安装 Tool 调用前后的 Extension Hook。
     installAgentToolHooks()
 
-    // 保证每个新 Turn 获取当前有效的
-    // system prompt、Tool、model 和 thinking level 快照。
+    // 保证每个新 Turn 获取当前有效的 system prompt、Tool、model 和 thinking level 快照。
     installAgentNextTurnRefresh()
 
     // 私有、同步调用。
@@ -321,9 +293,7 @@ function AgentSession.constructor(config):
 
 ```text
 function AgentSession._buildRuntime(options):
-    // 根据 cwd 和 Settings 创建 pi 内置 Tool 定义。
-    // 默认包括 read、bash、edit 和 write；
-    // 内部也可构建 grep、find、ls 等定义。
+    // 根据 cwd 和 Settings 创建 pi 内置 Tool 定义；默认包括 read、bash、edit 和 write，内部也可构建 grep、find、ls 等定义。
     builtinToolDefinitions =
         createBuiltinToolDefinitions({
             cwd,
@@ -331,8 +301,7 @@ function AgentSession._buildRuntime(options):
             shellSettings
         })
 
-    // ResourceLoader 只负责加载 Extension 定义。
-    // AgentSession 在这里为它们创建可执行 ExtensionRunner。
+    // ResourceLoader 只负责加载 Extension 定义；AgentSession 在这里为它们创建可执行 ExtensionRunner。
     extensions =
         resourceLoader.getExtensions()
 
@@ -343,16 +312,11 @@ function AgentSession._buildRuntime(options):
         modelRegistry
     )
 
-    // 向 Extension 暴露 Session、Tool、Model、UI 等运行 API，
-    // 并应用 Extension 注册的 Binding。
+    // 向 Extension 暴露 Session、Tool、Model、UI 等运行 API，并应用 Extension 注册的 Binding。
     bindExtensionCore(extensionRunner)
     applyExtensionBindings(extensionRunner)
 
-    // 合并三类 Tool：
-    // 1. pi 内置 Tool；
-    // 2. Extension 注册 Tool；
-    // 3. SDK 调用方传入的 custom Tool。
-    // 合并后应用 allowlist、denylist 和默认启用规则。
+    // 合并 pi 内置 Tool、Extension 注册 Tool 和 SDK 调用方传入的 custom Tool，再应用 allowlist、denylist 和默认启用规则。
     tools = refreshToolRegistry({
         builtinTools:
             builtinToolDefinitions,
@@ -365,18 +329,14 @@ function AgentSession._buildRuntime(options):
             options.activeToolNames
     })
 
-    // 将最终启用的 Tool 放入 Agent state。
-    // Tool 对象携带 name、description、parameters
-    // 和执行函数，并用于生成模型请求 tools 字段。
+    // 将最终启用的 Tool 放入 Agent state；Tool 对象携带 name、description、parameters 和执行函数，并用于生成模型请求 tools 字段。
     agent.state.tools = tools
 
-    // 从当前启用 Tool 中提取 system prompt 需要的
-    // promptSnippet 和 promptGuidelines。
+    // 从当前启用 Tool 中提取 system prompt 需要的 promptSnippet 和 promptGuidelines。
     toolPromptData =
         resolveToolPromptData(tools)
 
-    // 读取 ResourceLoader 已加载的快照，
-    // 不在此重新扫描文件系统。
+    // 读取 ResourceLoader 已加载的快照，不在此重新扫描文件系统。
     skills =
         resourceLoader.getSkills()
 
@@ -389,9 +349,7 @@ function AgentSession._buildRuntime(options):
     appendSystem =
         resourceLoader.getAppendSystemPrompt()
 
-    // 组装最终 system prompt。
-    // Tool 的完整 parameters Schema 不复制到 system prompt；
-    // system prompt 中的 Available tools 来自 promptSnippet。
+    // 组装最终 system prompt；Tool 的完整 parameters Schema 不复制到 system prompt，system prompt 中的 Available tools 来自 promptSnippet。
     systemPrompt = buildSystemPrompt({
         cwd,
         selectedTools:
@@ -408,8 +366,7 @@ function AgentSession._buildRuntime(options):
             appendSystem
     })
 
-    // 将最终 system prompt 放入 Agent state。
-    // 后续每个 Turn 会使用当前快照。
+    // 将最终 system prompt 放入 Agent state；后续每个 Turn 会使用当前快照。
     agent.state.systemPrompt =
         systemPrompt
 ```
