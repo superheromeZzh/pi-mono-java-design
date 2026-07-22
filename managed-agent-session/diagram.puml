@@ -93,7 +93,7 @@ Entry --> Client: conversation_id
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/provider/anthropic/AnthropicProvider.java buildParams and convertTools
 ' Official source evidence: https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
-' Target-only architecture: Tool Manager and Skill Manager own configuration parsing, manifests, permission, content loading, and execution.
+' Target-only architecture: Model Manager, Tool Manager, and Skill Manager own binding and execution in their capability domains.
 ' Observed behavior: Context already separates tools from the system prompt, but AgentTool combines model metadata and local execution.
 ' Java divergence: RuntimeToolSet and ToolCallDispatcher do not exist in the current pi-mono-java baseline.
 ' Design reason: eagerly build the static prompt and tool set from one descriptor snapshot, then forward calls without mapping each tool to a Java execution type.
@@ -103,68 +103,47 @@ left to right direction
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
 skinparam shadowing false
+skinparam linetype ortho
 skinparam ArrowColor #3D8DFF
 skinparam packageBorderColor #B8BCC4
 skinparam packageBackgroundColor white
 skinparam rectangleBorderColor #B8BCC4
 skinparam rectangleBackgroundColor #F2F2F2
 
-package "Agent control plane" {
-  rectangle "Agent Config vN" as Config
-  rectangle "Runtime Assembler" as Assembler
-  rectangle "Prompt Compiler" as Prompt
-  rectangle "Model Manager" as ModelManager
+rectangle "Agent Config vN" as Config
+rectangle "Runtime Assembler\nforward raw manager config\ncompile static prompt" as Assembler
+rectangle "ResolvedAgentRuntime\npreloaded prompt\nmodel, tool, skill manifests" as Runtime
+rectangle "Managed Session Factory" as Factory
+rectangle "AgentSession + AgentLoop\nmessages, turns, run state" as Loop
+
+package "Runtime execution ports" {
+  rectangle "ModelManagerInvoker\nnormalized streaming request" as ModelInvoker
+  rectangle "ToolCallDispatcher\npinned RuntimeToolSet" as Dispatcher
+  rectangle "SkillCallDispatcher\ndirect activation" as SkillDispatcher
 }
 
 package "Independent manager plane" {
-  rectangle "Tool Manager\nparse toolsets and permission\nresolve and invoke" as ToolManager
-  rectangle "Skill Manager\nresolve versions\nactivate instructions" as SkillManager
-  rectangle "Tool Manifest\nmodel descriptors + opaque bindings" as ToolManifest
-  rectangle "Skill Manifest\nprompt descriptors + opaque bindings" as SkillManifest
+  rectangle "Model Manager\nmodel binding and execution" as ModelManager
+  rectangle "Tool Manager\nschema, permission, approval, execution" as ToolManager
+  rectangle "Skill Manager\nversioned instruction activation" as SkillManager
 }
 
-package "pi-mono-java runtime" {
-  rectangle "ResolvedAgentRuntime\npreloaded, immutable, versioned" as Runtime
-  rectangle "RuntimeToolSet\npinned tool list" as ToolSet
-  rectangle "ToolCallDispatcher\ndirect forwarding" as Dispatcher
-  rectangle "Managed Skill Adapter" as SkillAdapter
-  rectangle "Managed Prompt Builder\nstatic prompt + session context" as ManagedPrompt
-  rectangle "AgentSession + Agent" as Session
-  rectangle "AgentLoop" as Loop
-  rectangle "Provider Adapter" as ProviderAdapter
-  rectangle "ManagerBackedAgentTool\ncompatibility only" as CompatAdapter
-}
+Config -right-> Assembler
+Assembler -right-> Runtime: static prompt and pinned manifests
+Runtime -right-> Factory: preloaded runtime
+Factory -right-> Loop: isolated session
 
-Config --> Assembler
-Assembler --> ToolManager: raw tools config
-Assembler --> SkillManager: raw skill refs
-Assembler --> ModelManager: model refs
-Assembler --> Prompt: structured system
-ToolManager --> ToolManifest
-SkillManager --> SkillManifest
-ToolManifest --> Assembler: model descriptors
-SkillManifest --> Assembler: prompt descriptors
-Prompt --> Assembler: compiled system
-Assembler --> ManagedPrompt: build static prompt from descriptors
-ManagedPrompt --> Assembler: static system prompt
-Assembler --> Runtime
-Runtime --> ToolSet: contains prebuilt tool set
-Runtime --> Dispatcher: bind manifest
-Runtime --> SkillAdapter: create per session
-Runtime --> ManagedPrompt: append session context
-ManagedPrompt --> Session: final system prompt
-ToolSet --> Session: model tools
-Dispatcher --> Session: execution entry
-SkillAdapter --> Session
-Session --> Loop
-Loop --> ProviderAdapter: system, messages, tools
-ProviderAdapter --> Loop: tool call
-Loop --> Dispatcher: name and arguments
-Dispatcher --> ToolManager: invoke opaque binding
-Loop --> SkillAdapter: activate skill
-SkillAdapter --> SkillManager: activate opaque binding
-Runtime ..> CompatAdapter: optional transition
-CompatAdapter ..> ToolManager: invoke opaque binding
+Assembler --> ModelManager: bind models
+Assembler --> ToolManager: bind tools
+Assembler --> SkillManager: bind skills
+
+Loop -right-> ModelInvoker
+ModelInvoker --> ModelManager: stream
+ModelManager --> ModelInvoker: events
+Loop -right-> Dispatcher
+Dispatcher --> ToolManager: invoke
+Loop -right-> SkillDispatcher
+SkillDispatcher --> SkillManager: activate
 @enduml
 
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
@@ -250,12 +229,14 @@ actor Client
 participant "Managed Session Factory" as Factory
 database "Agent Runtime Registry" as Registry
 participant "Model Manager" as ModelManager
+participant "ModelManagerInvoker" as ModelInvoker
 participant "Runtime Tool Set" as ToolSet
 participant "ToolCallDispatcher" as Dispatcher
+participant "SkillCallDispatcher" as SkillDispatcher
 participant "Managed Prompt Builder" as Prompt
 participant "pi-mono-java AgentSession" as JavaSession
-participant "Provider Adapter" as Provider
 participant "Tool Manager" as ToolManager
+participant "Skill Manager" as SkillManager
 database "Session Manager JSONL" as History
 database "Session Snapshot Store" as Store
 
@@ -265,25 +246,150 @@ Registry --> Factory: immutable runtime + manifest ids + tool set
 Factory -> Store: reserve session id
 Store --> Factory: session id
 Factory -> ModelManager: select from pinned manifest
-ModelManager --> Factory: concrete Model
+ModelManager --> Factory: opaque binding + public descriptor
+Factory -> ModelInvoker: bind model selection and session context
+ModelInvoker --> Factory: model execution entry
 Factory -> ToolSet: read model tools
 ToolSet --> Factory: model tools
 Factory -> Dispatcher: bind tool set, manager, session context
 Dispatcher --> Factory: direct execution entry
+Factory -> SkillDispatcher: bind skill set, manager, session context
+SkillDispatcher --> Factory: activation entry
 Factory -> Prompt: append session context to static prompt
 Prompt --> Factory: final system prompt
 Factory -> History: create or open session JSONL
 History --> Factory: restored messages
-Factory -> JavaSession: createManaged(model, prompt, model tools, dispatcher, messages)
+Factory -> JavaSession: createManaged(invoker, prompt, model tools, dispatchers, messages)
 JavaSession --> Factory: idle AgentSession
 Factory -> Store: commit SessionSnapshotV2
 Factory --> Client: session_id + status idle
 
 Client -> JavaSession: prompt(message)
-JavaSession -> Provider: Context(system, messages, tools)
-Provider --> JavaSession: tool call(name, arguments)
+JavaSession -> ModelInvoker: normalized request(system, messages, tools)
+ModelInvoker -> ModelManager: stream(model binding, request)
+ModelManager --> ModelInvoker: normalized assistant stream
+ModelInvoker --> JavaSession: text or call blocks
 JavaSession -> Dispatcher: dispatch(tool call)
 Dispatcher -> ToolManager: invoke(manifest, binding, context, arguments)
 ToolManager --> Dispatcher: result
 Dispatcher --> JavaSession: ToolResultMessage
+JavaSession -> SkillDispatcher: activate(skill call)
+SkillDispatcher -> SkillManager: activate(manifest, binding, context)
+SkillManager --> SkillDispatcher: instructions + pinned overlay
+SkillDispatcher --> JavaSession: activated skill result
+@enduml
+
+' Source evidence: packages/agent/src/agent.ts Agent.prompt, Agent.continue, and Agent.runWithLifecycle
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java runInternal, invokeModel, and runToolPhase
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution and continueExecution
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java executeAll
+' Target-only architecture: ModelManagerInvoker, ToolCallDispatcher, SkillCallDispatcher, RunCheckpoint, and approval suspension are new components.
+' Observed behavior: the current loop is synchronous inside one virtual-thread execution and converts every tool call to a local AgentTool execution.
+' Java divergence: the target loop returns a suspended run instead of blocking a virtual thread while user approval is pending.
+' Design reason: managers own execution policy while Agent Runtime owns message order, run state, persistence, and continuation.
+@startuml managed_agent_run_state_machine
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam stateBorderColor #B8BCC4
+skinparam stateBackgroundColor #F2F2F2
+
+state "Preparing run" as PREPARING
+state "Model streaming" as MODEL_STREAMING
+state "Dispatching calls" as DISPATCHING
+state "Invoking Tool Manager" as INVOKING_TOOL
+state "Waiting for approval" as WAITING_APPROVAL
+state "Resuming Tool Manager" as RESUMING_TOOL
+state "Activating Skill Manager" as ACTIVATING_SKILL
+state "Appending call results" as APPENDING_RESULTS
+state "Checking follow-up" as CHECKING_FOLLOWUP
+state "Completed" as COMPLETED
+state "Failed" as FAILED
+state "Cancelled" as CANCELLED
+
+[*] --> PREPARING: session prompt
+PREPARING --> MODEL_STREAMING: append user message
+MODEL_STREAMING --> DISPATCHING: tool or skill calls
+MODEL_STREAMING --> CHECKING_FOLLOWUP: normal stop without calls
+MODEL_STREAMING --> FAILED: model manager failure
+MODEL_STREAMING --> CANCELLED: cancellation
+DISPATCHING --> INVOKING_TOOL: tool binding
+DISPATCHING --> ACTIVATING_SKILL: skill binding
+DISPATCHING --> APPENDING_RESULTS: unknown call
+INVOKING_TOOL --> WAITING_APPROVAL: ApprovalRequired
+INVOKING_TOOL --> APPENDING_RESULTS: completed, denied, or failed
+WAITING_APPROVAL --> RESUMING_TOOL: user decision or expiry
+WAITING_APPROVAL --> CANCELLED: cancellation
+RESUMING_TOOL --> APPENDING_RESULTS: completed, denied, or failed
+ACTIVATING_SKILL --> APPENDING_RESULTS: activated or failed
+APPENDING_RESULTS --> DISPATCHING: more calls in batch
+APPENDING_RESULTS --> MODEL_STREAMING: call batch complete
+CHECKING_FOLLOWUP --> MODEL_STREAMING: follow-up queued
+CHECKING_FOLLOWUP --> COMPLETED: no follow-up
+COMPLETED --> [*]
+FAILED --> [*]
+CANCELLED --> [*]
+@enduml
+
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java runToolPhase
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
+' Target-only architecture: Tool Manager bindings, approval records, resume tokens, and durable run checkpoints are not implemented in the Java baseline.
+' Observed behavior: current Java tool execution validates and calls AgentTool.execute without a durable approval suspension protocol.
+' Java divergence: permission is resolved and stored only by Tool Manager; Agent Runtime branches only on the returned invocation result type.
+' Design reason: bind approval to the exact manifest, binding, call, argument hash, actor, and expiry to prevent policy bypass and replay.
+@startuml tool_approval_resume_sequence
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+actor User
+participant "Agent Runtime" as Runtime
+participant "ToolCallDispatcher" as Dispatcher
+participant "Tool Manager" as ToolManager
+database "Binding Store" as BindingStore
+database "Approval Store" as ApprovalStore
+participant "Tool Executor" as Executor
+database "Run Checkpoint Store" as CheckpointStore
+participant "Model Manager" as ModelManager
+
+Runtime -> Dispatcher: dispatch(tool call, run context)
+Dispatcher -> ToolManager: invoke(manifest, binding, call, argument hash)
+ToolManager -> BindingStore: load immutable binding and permission
+BindingStore --> ToolManager: schema, executor, effective permission
+ToolManager -> ToolManager: validate binding, actor, and arguments
+
+alt permission allows immediate execution
+  ToolManager -> Executor: execute validated request
+  Executor --> ToolManager: normalized result
+  ToolManager --> Dispatcher: Completed
+  Dispatcher --> Runtime: ToolResultMessage
+else permission requires approval
+  ToolManager -> ApprovalStore: create bound approval record
+  ApprovalStore --> ToolManager: approval id
+  ToolManager --> Dispatcher: ApprovalRequired(approval id)
+  Dispatcher --> Runtime: suspend result
+  Runtime -> CheckpointStore: persist messages, call index, and approval id
+  Runtime --> User: approval required event
+  User -> Runtime: submit decision
+  Runtime -> ToolManager: resume(approval id, decision)
+  ToolManager -> ApprovalStore: atomically consume and validate record
+  ApprovalStore --> ToolManager: bound invocation or rejection
+  alt approved and valid
+    ToolManager -> Executor: execute original bound invocation
+    Executor --> ToolManager: normalized result
+    ToolManager --> Runtime: Completed
+  else denied, expired, or invalid
+    ToolManager --> Runtime: Denied or Failed
+  end
+  Runtime -> CheckpointStore: append result and clear pending approval
+end
+
+Runtime -> ModelManager: continue with ToolResultMessage
 @enduml
