@@ -1,363 +1,133 @@
 ' Source baseline: pi-mono commit 216e672e7c9fc65682553394b74e483c0c9e47f7
 ' Source baseline: pi-mono-java commit b99871a0321b73606a8f074c42050f28f52fdfca
-' Official source evidence: https://platform.claude.com/docs/en/managed-agents/agent-setup
-' Official source evidence: https://platform.claude.com/docs/en/managed-agents/sessions
-' Official source evidence: https://platform.claude.com/docs/en/managed-agents/events-and-streaming
-' Observed behavior: a managed Agent is versioned configuration; a Session is created idle and a user message starts or resumes the loop.
-' Design reason: keep the upstream lifecycle baseline separate from the target Java integration.
-@startuml anthropic_managed_lifecycle
+' Source evidence: packages/coding-agent/src/core/agent-session.ts AgentSession fields and constructor
+' Source evidence: packages/agent/src/agent.ts Agent fields and constructor
+' Source evidence: packages/agent/src/types.ts AgentState and AgentTool
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java fields and initialize
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java fields and constructor
+' Target-only architecture: ManagedAgentInstance and manager-backed AgentSession construction are not implemented in either baseline.
+' Observed behavior: pi and pi-mono-java create one stateful Agent per AgentSession and keep messages and active run state in that Agent.
+' Java divergence: the ToB target removes local resource loaders and replaces local model and tool execution with manager invokers.
+' Design reason: keep ManagedAgentInstance as a small immutable construction input and keep all conversation state inside AgentSession and Agent.
+@startuml simplified_managed_agent_class
 !theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam sequenceParticipantBorderColor #B8BCC4
-skinparam sequenceParticipantBackgroundColor #EAF5FB
-skinparam sequenceLifeLineBorderColor #B8BCC4
-
-actor Client
-control "Managed Agent API" as API
-database "Agent vN\nversioned config" as Agent
-participant Environment
-database "Session\nstate: idle" as Session
-participant "Agent loop" as Loop
-participant "Resolved tools" as Tools
-
-Client -> API: createAgent(config)
-API -> Agent: persist immutable version
-Client -> API: createEnvironment(resources)
-API -> Environment: provision runtime context
-Client -> API: createSession(agent_id, environment_id)
-API -> Session: create durable idle state
-Client -> API: user.message
-API -> Loop: start or resume
-loop until model stops
-  Loop -> Tools: invoke tool
-  Tools --> Loop: result
-  Loop -> Session: append events and checkpoint
-end
-Loop --> Client: stream output events
-Loop -> Session: state = idle
-@enduml
-
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/prompt/SystemPromptBuilder.java build
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/tool/catalog/DefaultToolCatalog.java resolve
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillLoader.java loadFromDirectory
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java wireServerRoutes
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handle and handleCommand
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java createSessionWithPersistence
-' Source evidence: docs/asyncapi/chat-ws.yaml channels.chat, sendCommand, and receiveEvent
-' Observed behavior: the WebSocket handshake creates or restores one session by conversation id before any prompt command is received.
-' Observed behavior: each new Java session resolves local tools and skills, builds a prompt, creates a stateful Agent, and restores messages.
-' Java divergence: the current handshake has no agent id or agent version and every pooled session shares one base configuration.
-' Design reason: show only the current WebSocket loading path before introducing manager-backed assembly.
-@startuml pi_mono_java_current_loading
-!theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam sequenceParticipantBorderColor #B8BCC4
-skinparam sequenceParticipantBackgroundColor #EAF5FB
-skinparam sequenceLifeLineBorderColor #B8BCC4
-
-actor "WebSocket Client" as Client
-participant "Reactor Netty Route" as Route
-participant "ChatWebSocketHandler" as Handler
-participant SessionPool
-participant AgentSession
-participant ToolCatalog
-participant SkillLoader
-participant ContextLoader
-participant PromptBuilder
-participant "Stateful Agent" as Agent
-database SessionManager
-
-Client -> Route: GET /api/ws/chat?conversation_id=optional
-Route -> Handler: upgrade and handle(conversation_id)
-Handler -> SessionPool: getOrCreate(conversation_id)
-alt active conversation exists
-  SessionPool --> Handler: existing AgentSession
-else create or restore conversation
-  SessionPool -> AgentSession: new AgentSession(...)
-  SessionPool -> SessionManager: create or load JSONL
-  SessionManager --> SessionPool: restored messages
-  SessionPool -> AgentSession: initialize(shared baseConfig)
-  AgentSession -> ToolCatalog: refresh and resolve selection
-  ToolCatalog --> AgentSession: List<AgentTool>
-  AgentSession -> SkillLoader: scan local SKILL.md files
-  SkillLoader --> AgentSession: List<Skill with Path>
-  AgentSession -> ContextLoader: load context and system files
-  ContextLoader --> AgentSession: context files and prompt overrides
-  AgentSession -> PromptBuilder: build(tools, skills, context, env)
-  PromptBuilder --> AgentSession: system prompt
-  AgentSession -> Agent: create and set model, prompt, tools
-  SessionPool -> AgentSession: restore messages
-  SessionPool --> Handler: new AgentSession
-end
-Handler -> AgentSession: subscribe to AgentEvent
-Handler --> Client: WebSocket command and event channel
-Client -> Handler: prompt command
-Handler --> Client: correlated response accepted
-Handler -> AgentSession: prompt(message)
-AgentSession -> Agent: start AgentLoop
-Agent --> Handler: AgentEvent stream
-Handler --> Client: message, tool, done, or error frames
-@enduml
-
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/AgentTool.java
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel and toLlmTools
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
-' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
-' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/provider/anthropic/AnthropicProvider.java buildParams and convertTools
-' Official source evidence: https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
-' Target-only architecture: the control plane publishes exact manager manifests; runtime replicas only load and execute those pinned resources.
-' Observed behavior: Context already separates tools from the system prompt, but AgentTool combines model metadata and local execution.
-' Java divergence: PublishedAgentRevision, RemoteManifestLoader, RuntimeCallableRegistry, and CallDispatcher do not exist in the current pi-mono-java baseline.
-' Design reason: prohibit local file discovery and runtime rebinding, then route only normalized structured calls to the independent managers.
-@startuml external_tool_manager_architecture
-!theme plain
-left to right direction
+top to bottom direction
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
 skinparam shadowing false
 skinparam linetype ortho
 skinparam ArrowColor #3D8DFF
-skinparam packageBorderColor #B8BCC4
-skinparam packageBackgroundColor white
-skinparam rectangleBorderColor #B8BCC4
-skinparam rectangleBackgroundColor #F2F2F2
+skinparam classBorderColor #B8BCC4
+skinparam classBackgroundColor #F7F8FA
+skinparam interfaceBorderColor #B8BCC4
+skinparam interfaceBackgroundColor #EAF5FB
+skinparam classAttributeIconSize 0
 
-rectangle "PublishedAgentRevision\nAgentConfig plus exact manifest ids" as Publication
-rectangle "RemoteManifestLoader\nfetch exact immutable manifests" as Loader
-rectangle "Runtime Assembler\nvalidate and compile static prompt" as Assembler
-rectangle "ResolvedAgentRuntimeRevision\nprompt, manifests, callable registry" as Revision
-rectangle "ManagedAgentInstance\natomic active revision" as Instance
-rectangle "Managed Session Factory" as Factory
-rectangle "AgentSession + AgentLoop\nmessages, turns, run state" as Loop
+title Simplified ManagedAgentInstance, AgentSession and Agent
 
-package "Runtime execution ports" {
-  rectangle "ModelManagerInvoker\nnormalized streaming request" as ModelInvoker
-  rectangle "CallDispatcher\npinned RuntimeCallableRegistry" as Dispatcher
+class ManagedAgentInstance <<immutable construction input>> {
+  +agentId: String
+  +agentVersion: int
+  +compiledSystemPrompt: String
+  +resolvedModels: List<ResolvedModel>
+  +resolvedTools: List<ResolvedTool>
+  +resolvedSkills: List<ResolvedSkill>
 }
 
-package "Independent manager plane" {
-  rectangle "Model Manager\nmodel binding and execution" as ModelManager
-  rectangle "Tool Manager\nschema, permission, approval, execution" as ToolManager
-  rectangle "Skill Manager\nversioned instruction activation" as SkillManager
+class ResolvedModel {
+  +id: String
+  +name: String
 }
 
-Publication -right-> Loader
-Loader --> ModelManager: get exact manifest
-Loader --> ToolManager: get exact tool and overlay manifests
-Loader --> SkillManager: get exact manifest
-Loader -right-> Assembler: immutable resource bundle
-Assembler -right-> Revision: static prompt and pinned manifests
-Revision -right-> Instance: atomic publish
-Instance -right-> Factory: acquire RuntimeLease
-Factory -right-> Loop: isolated session
+class ResolvedTool {
+  +name: String
+  +description: String
+  +inputSchema: JsonSchema
+}
 
-Loop -right-> ModelInvoker
-ModelInvoker --> ModelManager: stream
-ModelManager --> ModelInvoker: events
-Loop -right-> Dispatcher
-Dispatcher --> ToolManager: TOOL invoke
-Dispatcher --> SkillManager: SKILL_ACTIVATION
+class ResolvedSkill {
+  +skillId: String
+  +version: int
+  +name: String
+  +description: String
+}
+
+class ManagedAgentSessionFactory {
+  +create(instance, sessionId, context): AgentSession
+}
+
+class AgentSession <<conversation orchestration>> {
+  +sessionId: String
+  +agentId: String
+  +agentVersion: int
+  +agent: Agent
+  +sessionManager: SessionManager
+  +resolvedSkills: List<ResolvedSkill>
+  +skillManager: SkillManager
+  +sessionContext: SessionContext
+  +prompt(input)
+  +activateSkill(skillId, version)
+}
+
+class Agent <<stateful loop>> {
+  -state: AgentState
+  -modelInvoker: ModelManagerInvoker
+  -toolInvoker: ToolManagerInvoker
+  -activeRun: ActiveRun
+  -steeringQueue: MessageQueue
+  -followUpQueue: MessageQueue
+  +prompt(input)
+  +abort()
+}
+
+class AgentState {
+  +systemPrompt: String
+  +modelId: String
+  +thinkingLevel: ThinkingLevel
+  +tools: List<ResolvedTool>
+  +messages: List<Message>
+  +streaming: boolean
+  +pendingToolCalls: Set<String>
+}
+
+class SessionManager
+interface ModelManagerInvoker
+interface ToolManagerInvoker
+interface SkillManager
+
+ManagedAgentInstance *-- ResolvedModel
+ManagedAgentInstance *-- ResolvedTool
+ManagedAgentInstance *-- ResolvedSkill
+ManagedAgentSessionFactory ..> ManagedAgentInstance : reads current fields
+ManagedAgentSessionFactory ..> Agent : creates
+ManagedAgentSessionFactory ..> AgentSession : creates
+AgentSession *-- "1" Agent : owns
+AgentSession o-- "1" SessionManager : persistence
+AgentSession --> SkillManager : activates skill
+Agent *-- "1" AgentState : state
+Agent --> ModelManagerInvoker : model execution
+Agent --> ToolManagerInvoker : tool execution
+
+note right of ManagedAgentInstance
+  No bindingId, manifestId,
+  session messages, or run state.
+end note
+
+note bottom of AgentSession
+  No cwd, ResourceLoader,
+  local SkillLoader, or ExtensionRunner.
+end note
 @enduml
 
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel and runToolPhase
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillExpander.java expand
-' Target-only architecture: RuntimeCallableRegistry, normalized CallBlock, and manager-backed skill activation are not implemented in the Java baseline.
-' Observed behavior: current Java resolves local AgentTool implementations and expands local skill files.
-' Java divergence: managed discovery happens only from exact remote manifests and invocation happens only from structured calls or an explicit skill command.
-' Design reason: separate published capability discovery from per-run invocation and prevent text or tool results from becoming executable instructions.
-@startuml managed_callable_discovery_dispatch
-!theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam sequenceParticipantBorderColor #B8BCC4
-skinparam sequenceParticipantBackgroundColor #EAF5FB
-skinparam sequenceLifeLineBorderColor #B8BCC4
-
-participant "Remote Manifest Loader" as Loader
-participant "Runtime Assembler" as Assembler
-database "RuntimeCallableRegistry" as Registry
-participant "AgentLoop" as Loop
-participant "Model Manager" as ModelManager
-participant "CallDispatcher" as Dispatcher
-participant "Tool Manager" as ToolManager
-participant "Skill Manager" as SkillManager
-
-== Container startup discovery ==
-Loader -> Assembler: exact model, tool, and skill manifests
-Assembler -> Registry: register TOOL descriptors
-Assembler -> Registry: register reserved activate_skill
-Assembler -> Registry: validate unique names and pinned targets
-
-== Per-run invocation ==
-Loop -> Registry: asModelTools()
-Registry --> Loop: name, description, input schema
-Loop -> ModelManager: stream(prompt, messages, tools)
-ModelManager --> Loop: normalized text and CallBlocks
-
-alt structured TOOL CallBlock
-  Loop -> Dispatcher: dispatch(call)
-  Dispatcher -> Registry: resolve name
-  Registry --> Dispatcher: TOOL manifest and binding
-  Dispatcher -> ToolManager: invoke pinned target
-  ToolManager --> Dispatcher: result or approval required
-else structured SKILL_ACTIVATION CallBlock
-  Loop -> Dispatcher: dispatch(activate_skill)
-  Dispatcher -> Registry: resolve skill activation target
-  Registry --> Dispatcher: skill manifest
-  Dispatcher -> SkillManager: activate pinned skill binding
-  SkillManager --> Dispatcher: instructions and tool overlay
-else ordinary text or result text
-  Loop -> Loop: append only; never scan for calls
-end
-@enduml
-
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
+' Source evidence: packages/coding-agent/src/core/agent-session.ts AgentSession constructor
+' Source evidence: packages/agent/src/agent.ts Agent constructor and createContextSnapshot
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java createSessionWithPersistence
-' Target-only architecture: AgentDeploymentPlan, PublishedAgentRevision, RemoteManifestLoader, AgentRuntimeBootstrap, ManagedAgentInstance, AgentRuntimeRegistry, and readiness gating are new components.
-' Observed behavior: current Java loading occurs inside each AgentSession initialization, not before container readiness.
-' Java divergence: the target eagerly assembles every required runtime and never assembles one on the session request path.
-' Design reason: fail startup on invalid exact publications and keep session creation free of configuration, manifest fetch, file loading, and manager binding work.
-@startuml agent_runtime_eager_startup
-!theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam sequenceParticipantBorderColor #B8BCC4
-skinparam sequenceParticipantBackgroundColor #EAF5FB
-skinparam sequenceLifeLineBorderColor #B8BCC4
-
-participant "Spring Container" as Container
-database "Agent Deployment Plan" as Plan
-database "Agent Control Plane" as ControlPlane
-participant "Agent Runtime Bootstrap" as Bootstrap
-participant "Remote Manifest Loader" as Loader
-participant "Runtime Assembler" as Assembler
-participant "Model Manager" as ModelManager
-participant "Tool Manager" as ToolManager
-participant "Skill Manager" as SkillManager
-participant "Managed Prompt Builder" as Prompt
-database "Agent Runtime Registry" as Registry
-participant "Readiness Gate" as Readiness
-
-Container -> Bootstrap: start
-Bootstrap -> Readiness: REFUSING_TRAFFIC
-Bootstrap -> Registry: begin BOOTSTRAPPING
-Bootstrap -> Plan: list required publication ids
-Plan --> Bootstrap: pinned publication ids
-
-loop each required publication id
-  Bootstrap -> Loader: loadPublishedRevision(id)
-  Loader -> ControlPlane: get exact publication
-  ControlPlane --> Loader: AgentConfig and manifest ids
-  Loader -> ModelManager: getManifest(exact id)
-  ModelManager --> Loader: immutable model manifest
-  Loader -> ToolManager: get base and overlay manifests by exact ids
-  ToolManager --> Loader: immutable tool manifests
-  Loader -> SkillManager: getManifest(exact id)
-  SkillManager --> Loader: immutable skill manifest
-  Loader --> Bootstrap: verified resource bundle
-  Bootstrap -> Assembler: assemble(bundle)
-  Assembler -> Prompt: compile static system + lists
-  Prompt --> Assembler: static system prompt
-  Assembler -> Assembler: build callable registry
-  Assembler --> Bootstrap: immutable runtime revision
-  Bootstrap -> Registry: register instance with active revision
-end
-
-alt all required runtimes registered
-  Bootstrap -> Registry: complete bootstrap and set READY
-  Bootstrap -> Readiness: ACCEPTING_TRAFFIC
-  Bootstrap --> Container: startup complete
-else any required runtime fails
-  Bootstrap -> Registry: set FAILED
-  Bootstrap -> Readiness: remain REFUSING_TRAFFIC
-  Bootstrap --> Container: fail startup
-end
-@enduml
-
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution
-' Target-only architecture: runtime revision reconciliation, dependency indexing, atomic publication, and revision leases are not implemented in the Java baseline.
-' Observed behavior: current Java sessions own stateful Agent objects and each Agent run is carried by the virtual-thread executor.
-' Java divergence: the target creates a stable container-level ManagedAgentInstance and publishes immutable revisions without mutating active sessions.
-' Design reason: management updates must become visible to new sessions atomically while existing conversations remain reproducible and approvable against their pinned revision.
-@startuml managed_agent_revision_reconcile
-!theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam sequenceParticipantBorderColor #B8BCC4
-skinparam sequenceParticipantBackgroundColor #EAF5FB
-skinparam sequenceLifeLineBorderColor #B8BCC4
-
-actor Administrator
-participant "Management Plane" as Management
-participant "Model, Tool, or Skill Manager" as Manager
-database "Dependency Index" as Index
-database "Agent Publication Store" as Publication
-participant "Runtime Reconciler" as Reconciler
-participant "Remote Manifest Loader" as Loader
-participant "Runtime Assembler" as Assembler
-participant "ManagedAgentInstance" as Instance
-participant "Existing AgentSession" as Existing
-participant "New AgentSession" as NewSession
-database "Runtime Status" as Status
-
-Administrator -> Management: update managed resource
-Management -> Manager: persist new resource version
-Manager --> Management: committed version
-Management -> Index: find affected AgentKeys
-Index --> Management: AgentKey set
-Management -> Publication: publish exact manifests per AgentKey
-Publication --> Management: publication id
-Management -> Reconciler: reconcile publication id
-Reconciler -> Instance: mark RECONCILING
-Reconciler -> Loader: load exact published resource bundle
-Loader --> Reconciler: AgentConfig and exact manifests
-Reconciler -> Assembler: build complete revision from bundle
-Assembler --> Reconciler: immutable next revision
-Reconciler -> Reconciler: validate prompt, schemas, and manifests
-Reconciler -> Instance: compareAndSet(old, next)
-Instance --> Reconciler: published
-Reconciler -> Status: acknowledge applied revision
-
-Existing -> Instance: retain pinned old revision lease
-Instance --> Existing: old revision remains available
-NewSession -> Instance: acquire active revision
-Instance --> NewSession: next revision lease
-
-alt rebuild or publication fails
-  Reconciler -> Instance: keep serving old revision
-  Reconciler -> Status: report DEGRADED with error
-end
-@enduml
-
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java wireServerRoutes
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handle, handleCommand, handlePrompt, and buildCloseHook
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/SessionManager.java loadSession
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java setModel setSystemPrompt setTools replaceMessages
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel
-' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
-' Source evidence: docs/asyncapi/chat-ws.yaml channels.chat, sendCommand, and receiveEvent
-' Target-only architecture: handshake agent identity, ManagedAgentInstance, runtime revision leases, PinnedSessionResourceView, managed session pool, manager manifests, SessionSnapshotV2, and approval frames are new integration components.
-' Observed behavior: the current WebSocket handler acknowledges prompt before Agent events and maps AgentEvent objects to outbound JSON frames.
-' Java divergence: the current handshake reads only conversation id, SessionConfig is shared, and AgentLoop executes AgentTool instances.
-' Design reason: open isolated WebSocket sessions only from preloaded resources, perform no file or manifest loading in session creation, and route only structured calls on the connection.
-@startuml pi_session_creation
+' Target-only architecture: ManagedAgentRegistry and ManagedAgentSessionFactory are new components.
+' Observed behavior: current implementations restore messages, create an Agent, and then wrap it in an AgentSession.
+' Java divergence: the target reads resolved remote manager data instead of loading local files and executable AgentTool objects.
+' Design reason: show exactly which ManagedAgentInstance fields enter Agent and which fields remain session-specific.
+@startuml managed_session_agent_creation
 !theme plain
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
@@ -368,137 +138,42 @@ skinparam sequenceParticipantBackgroundColor #EAF5FB
 skinparam sequenceLifeLineBorderColor #B8BCC4
 
 actor "WebSocket Client" as Client
-participant "Reactor Netty Route" as Route
-participant "Managed ChatWebSocketHandler" as Handler
-participant "Managed Session Pool" as Pool
-database "Agent Runtime Registry" as Registry
-database "Session and Run Stores" as Store
 participant "Managed Session Factory" as Factory
-participant "Pinned Session Resource View" as Resources
-participant "pi-mono-java AgentSession" as JavaSession
-participant "Model Manager" as ModelManager
-participant "Tool Manager" as ToolManager
-participant "Skill Manager" as SkillManager
+database "Managed Agent Registry" as Registry
+database "Session Store" as Store
+participant "Model Manager Adapter" as ModelAdapter
+participant "Tool Manager Adapter" as ToolAdapter
+participant Agent
+participant AgentSession
 
-Client -> Route: WebSocket handshake(conversation id, agent id, version)
-Route -> Registry: require READY
-Registry --> Route: ready
-Route -> Pool: prepare handshake and getOrCreate(SessionKey)
-Pool -> Store: load snapshot when resuming
-Store --> Pool: pinned AgentKey and manifest ids or new session
-Pool -> Registry: acquire active or snapshot-pinned revision
-Registry --> Pool: RuntimeLease with immutable revision
-Pool -> Factory: create(lease, session id, connection context)
-Factory -> Resources: create read-only view from lease
-Resources --> Factory: prompt, model, tools, skills, callable registry
-Factory -> Factory: select model binding locally
-Factory -> Store: load messages and validate or commit snapshot
-Store --> Factory: restored messages and fixed identity
-Factory -> JavaSession: create from revision and bind manager ports
-JavaSession --> Factory: idle AgentSession
-Factory --> Pool: AgentSession
-Pool --> Route: prepared AgentSession + SessionKey
-Route -> Handler: upgrade with prepared session
-Handler -> JavaSession: subscribe to AgentEvent
-Handler --> Client: WebSocket established
+Client -> Factory: create session(agent id, version, session id)
+Factory -> Registry: require(agent id, version)
+Registry --> Factory: ManagedAgentInstance
+Factory -> Factory: select model from resolvedModels
+Factory -> Store: open or create session
+Store --> Factory: restored messages or empty list
+Factory -> ModelAdapter: create(model id)
+Factory -> ToolAdapter: create(agent id, version)
+Factory -> Agent: create(prompt, model id, tools, messages, invokers)
+Agent --> Factory: idle stateful Agent
+Factory -> AgentSession: create(agent id, version, Agent, Store, skills)
+AgentSession --> Factory: idle AgentSession
+Factory --> Client: session created
 
-Client -> Handler: prompt(id, message)
-Handler --> Client: response(id, accepted, conversation id, AgentKey)
-Handler -> Store: append UserMessage
-Handler -> JavaSession: prompt(message)
-JavaSession -> ModelManager: stream with pinned binding and schemas
-ModelManager --> JavaSession: normalized text and CallBlocks
-JavaSession --> Handler: AgentEvent stream
-Handler --> Client: message events
-
-alt TOOL CallBlock
-  JavaSession -> ToolManager: invoke via CallDispatcher
-  alt completed, denied, or failed
-    ToolManager --> JavaSession: ToolInvocationResult
-    JavaSession --> Handler: tool events and continuation
-    Handler --> Client: tool events
-  else approval required
-    ToolManager --> JavaSession: ApprovalRequired
-    JavaSession -> Store: persist WAITING_APPROVAL checkpoint
-    JavaSession --> Handler: approval required event
-    Handler --> Client: approval_required frame
-    Client -> Handler: submit_approval(id, run id, approval id, decision)
-    Handler -> JavaSession: resumeApproval(...)
-    JavaSession -> ToolManager: resume(approval id, decision)
-    ToolManager --> JavaSession: completed, denied, or failed
-    JavaSession -> Store: append result and clear pending state
-  end
-else SKILL_ACTIVATION CallBlock or explicit command
-  JavaSession -> SkillManager: activate via CallDispatcher
-  SkillManager --> JavaSession: instructions + pinned overlay
-end
-
-JavaSession --> Handler: done or error event
-Handler --> Client: done or error frame
+note over Factory,AgentSession
+  Session creation does not call the model.
+  Each session owns a new Agent.
+end note
 @enduml
 
-' Source evidence: packages/agent/src/agent.ts Agent.prompt, Agent.continue, and Agent.runWithLifecycle
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java runInternal, invokeModel, and runToolPhase
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution and continueExecution
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java executeAll
-' Target-only architecture: ModelManagerInvoker, RuntimeCallableRegistry, CallDispatcher, RunCheckpoint, and approval suspension are new components.
-' Observed behavior: the current loop is synchronous inside one virtual-thread execution and converts every tool call to a local AgentTool execution.
-' Java divergence: the target loop returns a suspended run instead of blocking a virtual thread while user approval is pending.
-' Design reason: managers own execution policy while Agent Runtime owns message order, structured call routing, run state, persistence, and continuation; text is never scanned for calls.
-@startuml managed_agent_run_state_machine
-!theme plain
-skinparam backgroundColor white
-skinparam defaultFontName Helvetica
-skinparam shadowing false
-skinparam ArrowColor #3D8DFF
-skinparam stateBorderColor #B8BCC4
-skinparam stateBackgroundColor #F2F2F2
-
-state "Preparing run" as PREPARING
-state "Model streaming" as MODEL_STREAMING
-state "Resolving structured CallBlocks" as DISPATCHING
-state "Invoking Tool Manager" as INVOKING_TOOL
-state "Waiting for approval" as WAITING_APPROVAL
-state "Resuming Tool Manager" as RESUMING_TOOL
-state "Activating Skill Manager" as ACTIVATING_SKILL
-state "Appending call results" as APPENDING_RESULTS
-state "Checking follow-up" as CHECKING_FOLLOWUP
-state "Completed" as COMPLETED
-state "Failed" as FAILED
-state "Cancelled" as CANCELLED
-
-[*] --> PREPARING: session prompt
-PREPARING --> MODEL_STREAMING: append user message
-MODEL_STREAMING --> DISPATCHING: normalized CallBlocks
-MODEL_STREAMING --> CHECKING_FOLLOWUP: normal stop without calls
-MODEL_STREAMING --> FAILED: model manager failure
-MODEL_STREAMING --> CANCELLED: cancellation
-DISPATCHING --> INVOKING_TOOL: TOOL target
-DISPATCHING --> ACTIVATING_SKILL: SKILL_ACTIVATION target
-DISPATCHING --> APPENDING_RESULTS: unknown call
-INVOKING_TOOL --> WAITING_APPROVAL: ApprovalRequired
-INVOKING_TOOL --> APPENDING_RESULTS: completed, denied, or failed
-WAITING_APPROVAL --> RESUMING_TOOL: user decision or expiry
-WAITING_APPROVAL --> CANCELLED: cancellation
-RESUMING_TOOL --> APPENDING_RESULTS: completed, denied, or failed
-ACTIVATING_SKILL --> APPENDING_RESULTS: activated or failed
-APPENDING_RESULTS --> DISPATCHING: more calls in batch
-APPENDING_RESULTS --> MODEL_STREAMING: call batch complete
-CHECKING_FOLLOWUP --> MODEL_STREAMING: follow-up queued
-CHECKING_FOLLOWUP --> COMPLETED: no follow-up
-COMPLETED --> [*]
-FAILED --> [*]
-CANCELLED --> [*]
-@enduml
-
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java runToolPhase
-' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
-' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java handleCommand and forwardSessionEvent
-' Target-only architecture: Tool Manager bindings, approval records, resume tokens, and durable run checkpoints are not implemented in the Java baseline.
-' Observed behavior: current Java tool execution validates and calls AgentTool.execute without a durable approval suspension protocol.
-' Java divergence: permission is resolved and stored only by Tool Manager; Agent Runtime branches only on the returned invocation result type; submit approval and approval required WebSocket frames are new.
-' Design reason: bind approval to the exact manifest, binding, call, argument hash, actor, and expiry to prevent policy bypass and replay.
-@startuml tool_approval_resume_sequence
+' Source evidence: packages/agent/src/agent-loop.ts streamAssistantResponse and tool execution flow
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel and runToolPhase
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java prompt
+' Target-only architecture: independent Model, Tool, and Skill managers execute all remote capabilities.
+' Observed behavior: current Agent sends system prompt, messages, and tool schemas to the model and executes returned ToolCalls.
+' Java divergence: the target forwards execution by existing metadata identifiers and has no local tool or skill file execution.
+' Design reason: avoid synthetic binding identifiers and use model id, tool name, and skill id plus version directly.
+@startuml tob_manager_call_flow
 !theme plain
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
@@ -508,53 +183,24 @@ skinparam sequenceParticipantBorderColor #B8BCC4
 skinparam sequenceParticipantBackgroundColor #EAF5FB
 skinparam sequenceLifeLineBorderColor #B8BCC4
 
-actor User
-participant "WebSocket Client" as Client
-participant "ChatWebSocketHandler" as Handler
-participant "Agent Runtime" as Runtime
-participant "CallDispatcher" as Dispatcher
-participant "Tool Manager" as ToolManager
-database "Binding Store" as BindingStore
-database "Approval Store" as ApprovalStore
-participant "Tool Executor" as Executor
-database "Run Checkpoint Store" as CheckpointStore
+participant AgentSession
+participant Agent
 participant "Model Manager" as ModelManager
+participant "Tool Manager" as ToolManager
+participant "Skill Manager" as SkillManager
 
-Runtime -> Dispatcher: dispatch(tool call, run context)
-Dispatcher -> ToolManager: invoke(manifest, binding, call, argument hash)
-ToolManager -> BindingStore: load immutable binding and permission
-BindingStore --> ToolManager: schema, executor, effective permission
-ToolManager -> ToolManager: validate binding, actor, and arguments
+AgentSession -> Agent: prompt(user message)
+Agent -> ModelManager: stream(model id, prompt, messages, tool schemas)
+ModelManager --> Agent: text and structured ToolCalls
 
-alt permission allows immediate execution
-  ToolManager -> Executor: execute validated request
-  Executor --> ToolManager: normalized result
-  ToolManager --> Dispatcher: Completed
-  Dispatcher --> Runtime: ToolResultMessage
-else permission requires approval
-  ToolManager -> ApprovalStore: create bound approval record
-  ApprovalStore --> ToolManager: approval id
-  ToolManager --> Dispatcher: ApprovalRequired(approval id)
-  Dispatcher --> Runtime: suspend result
-  Runtime -> CheckpointStore: persist messages, call index, and approval id
-  Runtime -> Handler: approval required event
-  Handler -> Client: approval_required frame
-  Client --> User: show approval request
-  User -> Client: approve or deny
-  Client -> Handler: submit_approval frame
-  Handler -> Runtime: resumeApproval(run id, approval id, decision)
-  Runtime -> ToolManager: resume(approval id, decision)
-  ToolManager -> ApprovalStore: atomically consume and validate record
-  ApprovalStore --> ToolManager: bound invocation or rejection
-  alt approved and valid
-    ToolManager -> Executor: execute original bound invocation
-    Executor --> ToolManager: normalized result
-    ToolManager --> Runtime: Completed
-  else denied, expired, or invalid
-    ToolManager --> Runtime: Denied or Failed
-  end
-  Runtime -> CheckpointStore: append result and clear pending approval
+alt tool call
+  Agent -> ToolManager: invoke(agent id, version, tool name, arguments)
+  ToolManager -> ToolManager: schema, permission, approval, execution
+  ToolManager --> Agent: ToolResult
+  Agent -> ModelManager: continue with ToolResult
+else explicit skill activation
+  AgentSession -> SkillManager: activate(agent id, version, skill id, skill version)
+  SkillManager --> AgentSession: instructions and resources
+  AgentSession -> Agent: append instructions to messages
 end
-
-Runtime -> ModelManager: continue with ToolResultMessage
 @enduml
