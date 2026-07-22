@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 0.2.0 |
+| 文档版本 | 0.2.1 |
 | 状态 | Draft，供架构分析 |
 | pi-mono 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
 | 基线日期 | 2026-07-22 |
@@ -390,7 +390,7 @@ function AgentSession._buildRuntime(options):
 
 ### 4.1 源码类图
 
-![pi-mono AgentSession 与 Agent 类图](pi-mono-agent-session/pi_mono_agent_session_agent_class.svg)
+![AgentSession and Agent](pi-mono-agent-session/pi_mono_agent_session_agent_class.svg)
 
 [PlantUML 源码](pi-mono-agent-session/diagram.puml#L8)
 
@@ -899,5 +899,6 @@ Agent / read Tool
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 0.2.1 | 2026-07-22 | 将类图可见名称统一为 `AgentSession and Agent` |
 | 0.2.0 | 2026-07-22 | 增加基于 pi-mono 源码的 AgentSession/Agent PlantUML 类图，区分 Session 组合、外部注入组件、Agent 状态与 Run 对象 |
 | 0.1.0 | 2026-07-22 | 首版；整理 AgentSession/Agent 关系、同粒度初始化伪代码、五个协作组件、Session 替换语义与源码证据 |

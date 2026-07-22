@@ -19,7 +19,7 @@ skinparam classBackgroundColor #F7F8FA
 skinparam interfaceBorderColor #B8BCC4
 skinparam interfaceBackgroundColor #EAF5FB
 
-title pi-mono AgentSession and Agent
+title AgentSession and Agent
 
 class AgentSession {
   +agent: Agent {readOnly}
