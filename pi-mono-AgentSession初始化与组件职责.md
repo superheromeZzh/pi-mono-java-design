@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 0.1.0 |
+| 文档版本 | 0.2.0 |
 | 状态 | Draft，供架构分析 |
 | pi-mono 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
 | 基线日期 | 2026-07-22 |
 | 范围 | `AgentSession`、`Agent`、`SessionManager`、`SettingsManager`、`ResourceLoader`、`ModelRuntime`、`ExtensionRunner` 的初始化、职责和协作 |
-| 图示形式 | 按明确要求仅使用 Markdown 表格和 `text` 代码块，不使用 PlantUML |
+| 图示形式 | Markdown 与 PlantUML 类图；PlantUML 源码与生成 SVG 同步维护 |
 
 除明确标记的 Managed Agent 对照外，本文描述的是上述 pi-mono 源码基线中观察到的行为。伪代码会隐藏错误诊断、项目信任 UI、传输参数等细节，不代表存在同名公开 API。
 
@@ -388,7 +388,21 @@ function AgentSession._buildRuntime(options):
 
 ## 4. AgentSession 与 Agent
 
-### 4.1 职责区别
+### 4.1 源码类图
+
+![pi-mono AgentSession 与 Agent 类图](pi-mono-agent-session/pi_mono_agent_session_agent_class.svg)
+
+[PlantUML 源码](pi-mono-agent-session/diagram.puml#L8)
+
+类图中的组合与关联区分如下：
+
+- `AgentSession *-- Agent`：每个 Session 使用一个独立的有状态 Agent，Agent 不跨 Session 共享。
+- `AgentSession o-- SessionManager/SettingsManager/ResourceLoader/ModelRuntime`：这些对象从外部注入，AgentSession 保存引用并协调它们。
+- `AgentSession *-- ExtensionRunner`：`_buildRuntime()` 基于 ResourceLoader 中的 Extension 定义创建和更新 Runner。
+- `Agent *-- MutableAgentState/ActiveRun/PendingMessageQueue`：Agent 自身持有对话快照、当前 Run 和 steering/follow-up 队列。
+- `Agent ..> ModelRuntime`：Agent 不直接依赖 `ModelRuntime` 类型，而是通过注入的 `streamFn` 回调进入 ModelRuntime。
+
+### 4.2 职责区别
 
 | 维度 | `AgentSession` | `Agent` |
 |---|---|---|
@@ -400,7 +414,7 @@ function AgentSession._buildRuntime(options):
 | Extension | 创建 Runner，绑定生命周期和 API | 只通过被注入的 Hook 与之交互 |
 | Run | 协调重试、压缩、转发事件和 settled 状态 | 持有 active Run、取消状态和 steering/follow-up 队列 |
 
-### 4.2 用户输入调用链
+### 4.3 用户输入调用链
 
 ```text
 用户输入
@@ -417,7 +431,7 @@ function AgentSession._buildRuntime(options):
     -> AgentSession 转发给 UI 或宿主
 ```
 
-### 4.3 恢复会话
+### 4.4 恢复会话
 
 ```text
 读取 Session JSONL
@@ -429,7 +443,7 @@ function AgentSession._buildRuntime(options):
 -> 开始后续 Run
 ```
 
-### 4.4 Session 替换
+### 4.5 Session 替换
 
 当前基线中，跨 Session 替换由 `AgentSessionRuntime` 管理：
 
@@ -885,4 +899,5 @@ Agent / read Tool
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 0.2.0 | 2026-07-22 | 增加基于 pi-mono 源码的 AgentSession/Agent PlantUML 类图，区分 Session 组合、外部注入组件、Agent 状态与 Run 对象 |
 | 0.1.0 | 2026-07-22 | 首版；整理 AgentSession/Agent 关系、同粒度初始化伪代码、五个协作组件、Session 替换语义与源码证据 |

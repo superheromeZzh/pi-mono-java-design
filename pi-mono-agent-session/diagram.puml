@@ -1,0 +1,103 @@
+' Source baseline: pi-mono commit 216e672e7c9fc65682553394b74e483c0c9e47f7
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
+' Source evidence: packages/coding-agent/src/core/agent-session.ts AgentSession fields, constructor, _buildRuntime, _refreshToolRegistry, and _rebuildSystemPrompt
+' Source evidence: packages/agent/src/agent.ts Agent fields, prompt, continue, createContextSnapshot, and runWithLifecycle
+' Source evidence: packages/coding-agent/src/core/session-manager.ts SessionManager
+' Observed behavior: each AgentSession holds one stateful Agent, subscribes to its events, installs hooks, and rebuilds session runtime resources around it.
+' Design reason: distinguish the session orchestration object, the stateful loop executor, injected collaborators, and per-run state.
+@startuml pi_mono_agent_session_agent_class
+!theme plain
+top to bottom direction
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam ArrowColor #3D8DFF
+skinparam classBorderColor #B8BCC4
+skinparam classBackgroundColor #F7F8FA
+skinparam interfaceBorderColor #B8BCC4
+skinparam interfaceBackgroundColor #EAF5FB
+
+title pi-mono AgentSession and Agent
+
+class AgentSession {
+  +agent: Agent {readOnly}
+  +sessionManager: SessionManager {readOnly}
+  +settingsManager: SettingsManager {readOnly}
+  +modelRuntime: ModelRuntime {readOnly}
+  -resourceLoader: ResourceLoader
+  -extensionRunner: ExtensionRunner
+  -toolRegistry: Map
+  -baseSystemPrompt: string
+  -isAgentRunActive: boolean
+  +prompt(input): Promise
+  +subscribe(listener): Unsubscribe
+  +dispose(): void
+  -buildRuntime(options): void
+  -refreshToolRegistry(options): void
+  -rebuildSystemPrompt(): void
+  -handleAgentEvent(event): Promise
+}
+
+class Agent {
+  -state: MutableAgentState
+  -activeRun: ActiveRun
+  -steeringQueue: PendingMessageQueue
+  -followUpQueue: PendingMessageQueue
+  +streamFn: StreamFn
+  +beforeToolCall: Hook
+  +afterToolCall: Hook
+  +prepareNextTurn: Hook
+  +prompt(input): Promise
+  +continue(): Promise
+  +steer(message): void
+  +followUp(message): void
+  +abort(): void
+  +waitForIdle(): Promise
+  +subscribe(listener): Unsubscribe
+  -createContextSnapshot(): AgentContext
+  -runWithLifecycle(executor): Promise
+}
+
+class MutableAgentState {
+  +systemPrompt: string
+  +model: Model
+  +thinkingLevel: ThinkingLevel
+  +tools: AgentTool[]
+  +messages: AgentMessage[]
+  +isStreaming: boolean
+  +pendingToolCalls: Set
+}
+
+class ActiveRun {
+  +promise: Promise
+  +abortController: AbortController
+}
+
+class PendingMessageQueue {
+  +mode: QueueMode
+  +enqueue(message): void
+  +drain(): AgentMessage[]
+}
+
+class SessionManager
+class SettingsManager
+interface ResourceLoader
+class ModelRuntime
+class ExtensionRunner
+class AgentLoop
+
+AgentSession *-- "1" Agent : owns
+AgentSession o-- "1" SessionManager : persistence
+AgentSession o-- "1" SettingsManager : settings
+AgentSession o-- "1" ResourceLoader : resources
+AgentSession o-- "1" ModelRuntime : models
+AgentSession *-- "1" ExtensionRunner : extensions
+
+Agent *-- "1" MutableAgentState : state
+Agent *-- "0..1" ActiveRun : run
+Agent *-- "2" PendingMessageQueue : queues
+Agent --> AgentLoop : executes
+Agent ..> ModelRuntime : calls through injected streamFn
+@enduml
