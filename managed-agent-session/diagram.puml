@@ -72,7 +72,7 @@ class AgentSession <<conversation orchestration>> {
 class Agent <<stateful loop>> {
   -state: AgentState
   -modelInvoker: ModelManagerInvoker
-  -toolInvoker: ToolManagerInvoker
+  -toolInvoker: ToolCallInvoker
   -activeRun: ActiveRun
   -steeringQueue: MessageQueue
   -followUpQueue: MessageQueue
@@ -84,7 +84,7 @@ class AgentState {
   +systemPrompt: String
   +modelId: String
   +thinkingLevel: ThinkingLevel
-  +tools: List<ResolvedTool>
+  +tools: List<ModelTool>
   +messages: List<Message>
   +streaming: boolean
   +pendingToolCalls: Set<String>
@@ -92,7 +92,7 @@ class AgentState {
 
 class SessionManager
 interface ModelManagerInvoker
-interface ToolManagerInvoker
+interface ToolCallInvoker
 interface SkillManager
 
 ManagedAgentInstance *-- ResolvedModel
@@ -106,7 +106,7 @@ AgentSession o-- "1" SessionManager : persistence
 AgentSession --> SkillManager : activates skill
 Agent *-- "1" AgentState : state
 Agent --> ModelManagerInvoker : model execution
-Agent --> ToolManagerInvoker : tool execution
+Agent --> ToolCallInvoker : business or skill control call
 
 note right of ManagedAgentInstance
   No bindingId, manifestId,
@@ -117,6 +117,145 @@ note bottom of AgentSession
   No cwd, ResourceLoader,
   local SkillLoader, or ExtensionRunner.
 end note
+@enduml
+
+' Source evidence: packages/coding-agent/src/core/agent-session.ts _buildRuntime and _refreshToolRegistry
+' Source evidence: packages/agent/src/agent-loop.ts streamAssistantResponse, prepareToolCall, and executePreparedToolCall
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/tool/catalog/DefaultToolCatalog.java buildSnapshot and resolve
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel and resolveToolCallsSafe
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
+' Target-only architecture: Tool Manager resolution and invocation are not implemented in either baseline.
+' Observed behavior: current runtimes discover executable AgentTool objects locally and invoke execute after matching ToolCall by name.
+' Java divergence: the target stores only model-facing schemas in the Agent and forwards execution to Tool Manager.
+' Design reason: preserve the model ToolCall protocol while moving discovery policy, permission, and execution outside Agent Runtime.
+@startuml tool_discovery_invocation_comparison
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+title Tool Discovery and Invocation: Local Baseline vs Manager Target
+
+actor "Container / Session Startup" as Startup
+participant "Local Tool Sources" as LocalSources
+participant "ResourceLoader / ToolCatalog" as LocalCatalog
+participant AgentSession
+participant Agent
+participant Model
+participant "Local AgentTool" as LocalTool
+participant "Tool Manager" as ToolManager
+database "Managed Agent Registry" as Registry
+
+== Local baseline ==
+Startup -> LocalCatalog: refresh local tool sources
+LocalCatalog -> LocalSources: load built-ins, extensions, Spring, or MCP adapters
+LocalSources --> LocalCatalog: executable AgentTool definitions
+LocalCatalog -> LocalCatalog: merge by name and apply selection
+LocalCatalog --> AgentSession: selected AgentTool list
+AgentSession -> Agent: set schema plus execute implementation
+Agent -> Model: request with tool schemas
+Model --> Agent: ToolCall(name, arguments)
+Agent -> Agent: find by name and validate arguments
+Agent -> LocalTool: execute(call id, arguments)
+LocalTool --> Agent: ToolResult
+Agent -> Model: continue with ToolResult
+
+== Manager-backed target ==
+Startup -> ToolManager: resolveAgentTools(agent id, version, tool config)
+ToolManager -> ToolManager: resolve names, enabled state, permission, and schemas
+ToolManager --> Startup: ResolvedTool(name, description, input schema)
+Startup -> Registry: publish complete ManagedAgentInstance
+Registry --> AgentSession: current ManagedAgentInstance
+AgentSession -> Agent: set model-facing schemas only
+Agent -> Model: request with tool schemas
+Model --> Agent: ToolCall(name, arguments)
+Agent -> Agent: check name exists in resolved tools
+Agent -> ToolManager: invoke(agent id, version, session id, name, arguments)
+ToolManager -> ToolManager: validate, approve if required, and execute
+ToolManager --> Agent: ToolResult
+Agent -> Model: continue with ToolResult
+@enduml
+
+' Source evidence: packages/coding-agent/src/core/skills.ts loadSkills, loadSkillsFromDir, and formatSkillsForPrompt
+' Source evidence: packages/coding-agent/src/core/agent-session.ts _expandSkillCommand
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillLoader.java loadFromDirectory
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillPromptFormatter.java format
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillExpander.java expand
+' Target-only architecture: Skill Manager descriptors and activate_skill routing are not implemented in either baseline.
+' Observed behavior: current runtimes place skill metadata and a local path in the prompt, then load full SKILL.md content only on demand.
+' Java divergence: the target removes local paths and replaces read or direct file expansion with Skill Manager activation.
+' Design reason: retain progressive disclosure without granting Agent Runtime local file access.
+@startuml skill_progressive_loading_comparison
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+title Skill Progressive Loading: Local Baseline vs Manager Target
+
+actor User
+actor "Container Startup" as Startup
+participant "ResourceLoader / SkillLoader" as LocalLoader
+database "Local SKILL.md Files" as LocalFiles
+participant AgentSession
+participant Agent
+participant Model
+participant "Local Read Tool" as ReadTool
+participant "Skill Manager" as SkillManager
+database "Managed Agent Registry" as Registry
+
+== Local baseline discovery ==
+LocalLoader -> LocalFiles: scan configured skill directories
+LocalFiles --> LocalLoader: SKILL.md frontmatter
+LocalLoader -> LocalLoader: parse name, description, and file path
+LocalLoader --> AgentSession: Skill descriptors with local locations
+AgentSession -> Agent: system prompt lists name, description, and location
+
+== Local baseline progressive loading ==
+alt model selects a skill
+  Agent -> Model: prompt with available skill list
+  Model --> Agent: read(location)
+  Agent -> ReadTool: execute local read
+  ReadTool -> LocalFiles: read SKILL.md body
+  LocalFiles --> Agent: full skill instructions
+else user selects a skill explicitly
+  User -> AgentSession: /skill:name arguments
+  AgentSession -> LocalFiles: read matched SKILL.md body
+  LocalFiles --> AgentSession: full skill instructions
+  AgentSession -> Agent: expanded skill prompt plus arguments
+end
+
+== Manager-backed target discovery ==
+Startup -> SkillManager: describeSkills(skill id and optional version refs)
+SkillManager --> Startup: ResolvedSkill(id, version, name, description)
+Startup -> Registry: publish complete ManagedAgentInstance
+Registry --> AgentSession: current ManagedAgentInstance
+AgentSession -> Agent: system prompt skill list plus activate_skill schema
+
+== Manager-backed target progressive activation ==
+alt model selects a skill
+  Agent -> Model: prompt with available skill list
+  Model --> Agent: activate_skill(name)
+  Agent -> Agent: map name to resolved skill id and version
+  Agent -> SkillManager: activate(agent id, version, session id, skill id, skill version)
+  SkillManager --> Agent: full instructions and resources as ToolResult
+  Agent -> Model: continue with full skill instructions
+else user selects a skill explicitly
+  User -> AgentSession: /skill:name arguments
+  AgentSession -> AgentSession: map name to resolved skill id and version
+  AgentSession -> SkillManager: activate(agent id, version, session id, skill id, skill version)
+  SkillManager --> AgentSession: full instructions and resources
+  AgentSession -> Agent: append activation result and arguments
+  Agent -> Model: continue with full skill instructions
+end
 @enduml
 
 ' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
@@ -198,7 +337,12 @@ alt tool call
   ToolManager -> ToolManager: schema, permission, approval, execution
   ToolManager --> Agent: ToolResult
   Agent -> ModelManager: continue with ToolResult
-else explicit skill activation
+else model skill activation
+  Agent -> Agent: map skill name to id and version
+  Agent -> SkillManager: activate(agent id, version, session id, skill id, skill version)
+  SkillManager --> Agent: instructions and resources as ToolResult
+  Agent -> ModelManager: continue with ToolResult
+else explicit user skill activation
   AgentSession -> SkillManager: activate(agent id, version, skill id, skill version)
   SkillManager --> AgentSession: instructions and resources
   AgentSession -> Agent: append instructions to messages
