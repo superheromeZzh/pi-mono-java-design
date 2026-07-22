@@ -92,10 +92,11 @@ Entry --> Client: conversation_id
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/provider/anthropic/AnthropicProvider.java buildParams and convertTools
+' Official source evidence: https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
 ' Target-only architecture: Tool Manager and Skill Manager own configuration parsing, manifests, permission, content loading, and execution.
 ' Observed behavior: Context already separates tools from the system prompt, but AgentTool combines model metadata and local execution.
-' Java divergence: RuntimeToolCatalog and ToolCallDispatcher do not exist in the current pi-mono-java baseline.
-' Design reason: send schemas through model tools and forward tool calls without mapping every tool to a Java execution type.
+' Java divergence: RuntimeToolSet and ToolCallDispatcher do not exist in the current pi-mono-java baseline.
+' Design reason: render prompt lists and request tools from one descriptor snapshot, then forward calls without mapping each tool to a Java execution type.
 @startuml external_tool_manager_architecture
 !theme plain
 left to right direction
@@ -124,9 +125,10 @@ package "Independent manager plane" {
 
 package "pi-mono-java runtime" {
   rectangle "ResolvedAgentRuntime\nimmutable and versioned" as Runtime
-  rectangle "RuntimeToolCatalog\nmodel-visible descriptors" as ToolCatalog
+  rectangle "RuntimeToolSet\npinned tool list" as ToolSet
   rectangle "ToolCallDispatcher\ndirect forwarding" as Dispatcher
   rectangle "Managed Skill Adapter" as SkillAdapter
+  rectangle "Managed Prompt Builder\nbase + tool list + skill list" as ManagedPrompt
   rectangle "AgentSession + Agent" as Session
   rectangle "AgentLoop" as Loop
   rectangle "Provider Adapter" as ProviderAdapter
@@ -144,10 +146,12 @@ ToolManifest --> Assembler: model descriptors
 SkillManifest --> Assembler: prompt descriptors
 Prompt --> Assembler: compiled system
 Assembler --> Runtime
-Runtime --> ToolCatalog: bind pinned descriptors
+Runtime --> ToolSet: bind pinned descriptors
 Runtime --> Dispatcher: bind manifest
 Runtime --> SkillAdapter: create per session
-ToolCatalog --> Session: model tools
+Runtime --> ManagedPrompt: compiled system + descriptors
+ManagedPrompt --> Session: system with capability lists
+ToolSet --> Session: model tools
 Dispatcher --> Session: execution entry
 SkillAdapter --> Session
 Session --> Loop
@@ -168,7 +172,7 @@ CompatAdapter ..> ToolManager: invoke opaque binding
 ' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
 ' Target-only architecture: AgentRuntimeRegistry, managed session factory, manager manifests, and SessionSnapshotV2 are new integration components.
 ' Java divergence: the current SessionConfig has only model, cwd, customPrompt, and mode, and AgentLoop executes AgentTool instances.
-' Design reason: create isolated sessions with model tool schemas and a direct manager dispatcher while preserving exact manifests.
+' Design reason: create isolated sessions whose prompt lists and model tool schemas share exact pinned descriptors.
 @startuml pi_session_creation
 !theme plain
 skinparam backgroundColor white
@@ -183,7 +187,7 @@ actor Client
 participant "Managed Session Factory" as Factory
 database "Agent Runtime Registry" as Registry
 participant "Model Manager" as ModelManager
-participant "Runtime Tool Catalog" as ToolCatalog
+participant "Runtime Tool Set" as ToolSet
 participant "ToolCallDispatcher" as Dispatcher
 participant "Managed Prompt Builder" as Prompt
 participant "pi-mono-java AgentSession" as JavaSession
@@ -199,11 +203,11 @@ Factory -> Store: reserve session id
 Store --> Factory: session id
 Factory -> ModelManager: select from pinned manifest
 ModelManager --> Factory: concrete Model
-Factory -> ToolCatalog: create from pinned descriptors
-ToolCatalog --> Factory: model tools
-Factory -> Dispatcher: bind catalog, manager, session context
+Factory -> ToolSet: create from pinned descriptors
+ToolSet --> Factory: model tools
+Factory -> Dispatcher: bind tool set, manager, session context
 Dispatcher --> Factory: direct execution entry
-Factory -> Prompt: render base, skills, session context
+Factory -> Prompt: render base, tool list, skill list, session context
 Prompt --> Factory: final system prompt
 Factory -> History: create or open session JSONL
 History --> Factory: restored messages
