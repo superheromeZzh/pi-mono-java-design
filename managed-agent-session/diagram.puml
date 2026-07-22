@@ -90,9 +90,12 @@ Entry --> Client: conversation_id
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/AgentTool.java
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel and toLlmTools
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java invokeTool
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/provider/anthropic/AnthropicProvider.java buildParams and convertTools
 ' Target-only architecture: Tool Manager and Skill Manager own configuration parsing, manifests, permission, content loading, and execution.
-' Java divergence: Manager-backed descriptors and adapters do not exist in the current pi-mono-java baseline.
-' Design reason: keep the Agent Runtime immutable and free of tool permission and skill storage semantics.
+' Observed behavior: Context already separates tools from the system prompt, but AgentTool combines model metadata and local execution.
+' Java divergence: RuntimeToolCatalog and ToolCallDispatcher do not exist in the current pi-mono-java baseline.
+' Design reason: send schemas through model tools and forward tool calls without mapping every tool to a Java execution type.
 @startuml external_tool_manager_architecture
 !theme plain
 left to right direction
@@ -121,10 +124,13 @@ package "Independent manager plane" {
 
 package "pi-mono-java runtime" {
   rectangle "ResolvedAgentRuntime\nimmutable and versioned" as Runtime
-  rectangle "ManagerBackedAgentTool" as ToolAdapter
-  rectangle "ManagerBackedSkillLoader" as SkillAdapter
+  rectangle "RuntimeToolCatalog\nmodel-visible descriptors" as ToolCatalog
+  rectangle "ToolCallDispatcher\ndirect forwarding" as Dispatcher
+  rectangle "Managed Skill Adapter" as SkillAdapter
   rectangle "AgentSession + Agent" as Session
-  rectangle "AgentLoop + ToolPipeline" as Loop
+  rectangle "AgentLoop" as Loop
+  rectangle "Provider Adapter" as ProviderAdapter
+  rectangle "ManagerBackedAgentTool\ncompatibility only" as CompatAdapter
 }
 
 Config --> Assembler
@@ -138,24 +144,31 @@ ToolManifest --> Assembler: model descriptors
 SkillManifest --> Assembler: prompt descriptors
 Prompt --> Assembler: compiled system
 Assembler --> Runtime
-Runtime --> ToolAdapter: create per session
+Runtime --> ToolCatalog: bind pinned descriptors
+Runtime --> Dispatcher: bind manifest
 Runtime --> SkillAdapter: create per session
-ToolAdapter --> Session
+ToolCatalog --> Session: model tools
+Dispatcher --> Session: execution entry
 SkillAdapter --> Session
 Session --> Loop
-Loop --> ToolAdapter: execute tool call
-ToolAdapter --> ToolManager: invoke opaque binding
+Loop --> ProviderAdapter: system, messages, tools
+ProviderAdapter --> Loop: tool call
+Loop --> Dispatcher: name and arguments
+Dispatcher --> ToolManager: invoke opaque binding
 Loop --> SkillAdapter: activate skill
 SkillAdapter --> SkillManager: activate opaque binding
+Runtime ..> CompatAdapter: optional transition
+CompatAdapter ..> ToolManager: invoke opaque binding
 @enduml
 
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/SessionManager.java loadSession
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java setModel setSystemPrompt setTools replaceMessages
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java invokeModel
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/types/Context.java
 ' Target-only architecture: AgentRuntimeRegistry, managed session factory, manager manifests, and SessionSnapshotV2 are new integration components.
-' Java divergence: the current SessionConfig has only model, cwd, customPrompt, and mode.
-' Design reason: create many isolated sessions from one immutable runtime while preserving exact manager manifests.
+' Java divergence: the current SessionConfig has only model, cwd, customPrompt, and mode, and AgentLoop executes AgentTool instances.
+' Design reason: create isolated sessions with model tool schemas and a direct manager dispatcher while preserving exact manifests.
 @startuml pi_session_creation
 !theme plain
 skinparam backgroundColor white
@@ -170,9 +183,12 @@ actor Client
 participant "Managed Session Factory" as Factory
 database "Agent Runtime Registry" as Registry
 participant "Model Manager" as ModelManager
-participant "Tool Adapter Factory" as ToolFactory
+participant "Runtime Tool Catalog" as ToolCatalog
+participant "ToolCallDispatcher" as Dispatcher
 participant "Managed Prompt Builder" as Prompt
 participant "pi-mono-java AgentSession" as JavaSession
+participant "Provider Adapter" as Provider
+participant "Tool Manager" as ToolManager
 database "Session Manager JSONL" as History
 database "Session Snapshot Store" as Store
 
@@ -183,17 +199,24 @@ Factory -> Store: reserve session id
 Store --> Factory: session id
 Factory -> ModelManager: select from pinned manifest
 ModelManager --> Factory: concrete Model
-Factory -> ToolFactory: bind descriptors to session context
-ToolFactory --> Factory: List<ManagerBackedAgentTool>
-Factory -> Prompt: render base, tool summary, skills, session context
+Factory -> ToolCatalog: create from pinned descriptors
+ToolCatalog --> Factory: model tools
+Factory -> Dispatcher: bind catalog, manager, session context
+Dispatcher --> Factory: direct execution entry
+Factory -> Prompt: render base, skills, session context
 Prompt --> Factory: final system prompt
 Factory -> History: create or open session JSONL
 History --> Factory: restored messages
-Factory -> JavaSession: createManaged(model, prompt, tools, messages)
+Factory -> JavaSession: createManaged(model, prompt, model tools, dispatcher, messages)
 JavaSession --> Factory: idle AgentSession
 Factory -> Store: commit SessionSnapshotV2
 Factory --> Client: session_id + status idle
 
 Client -> JavaSession: prompt(message)
-JavaSession -> JavaSession: run existing AgentLoop
+JavaSession -> Provider: Context(system, messages, tools)
+Provider --> JavaSession: tool call(name, arguments)
+JavaSession -> Dispatcher: dispatch(tool call)
+Dispatcher -> ToolManager: invoke(manifest, binding, context, arguments)
+ToolManager --> Dispatcher: result
+Dispatcher --> JavaSession: ToolResultMessage
 @enduml
