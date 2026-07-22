@@ -1,0 +1,131 @@
+' Source baseline: pi-mono commit 216e672e7c9fc65682553394b74e483c0c9e47f7
+' Official source evidence: https://platform.claude.com/docs/en/managed-agents/agent-setup
+' Official source evidence: https://platform.claude.com/docs/en/managed-agents/sessions
+' Official source evidence: https://platform.claude.com/docs/en/managed-agents/events-and-streaming
+' Observed behavior: a managed Agent is versioned configuration; a Session is created idle and user.message starts or resumes the loop.
+@startuml anthropic_managed_lifecycle
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+actor Client
+control "Managed Agent API" as API
+database "Agent vN\nversioned config" as Agent
+participant Environment
+database "Session\nstate: idle" as Session
+participant "Agent loop" as Loop
+participant "Resolved tools" as Tools
+
+Client -> API: createAgent(config)
+API -> Agent: persist immutable version
+Client -> API: createEnvironment(resources)
+API -> Environment: provision runtime context
+Client -> API: createSession(agent_id, environment_id)
+API -> Session: create durable idle state
+Client -> API: user.message
+API -> Loop: start or resume
+loop until model stops
+  Loop -> Tools: invoke tool
+  Tools --> Loop: result
+  Loop -> Session: append events and checkpoint
+end
+Loop --> Client: stream output events
+Loop -> Session: state = idle
+@enduml
+
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
+' Source evidence: packages/coding-agent/src/core/agent-session.ts AgentSession and tool_call hooks
+' Source evidence: packages/coding-agent/README.md MCP Servers and Permissions section
+' Target-only architecture: both builtin-toolset and mcp-toolset are resolved by managers outside pi-mono.
+' Design reason: pi receives normalized custom tools while schema discovery and invocation remain owned by the external tool plane.
+@startuml external_tool_manager_architecture
+!theme plain
+left to right direction
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam packageBorderColor #B8BCC4
+skinparam packageBackgroundColor white
+skinparam rectangleBorderColor #B8BCC4
+skinparam rectangleBackgroundColor #F2F2F2
+
+package "Agent control plane" {
+  rectangle "Agent Config vN\ntoolsets + policy" as Config
+  rectangle "Tool policy resolver\ndefault + override" as Resolver
+}
+
+package "External tool plane" {
+  rectangle "Tool Registry\nkey: type + name" as Registry
+  rectangle "Builtin Tool Manager" as Builtin
+  rectangle "MCP Tool Manager" as MCP
+  rectangle "Resolved binding\nname + schema + binding_id\nversion + schema_hash" as Binding
+}
+
+package "pi-mono runtime" {
+  rectangle "customTools adapter" as Adapter
+  rectangle "Permission broker\nalways_allow / always_ask" as Permission
+  rectangle "AgentSession" as Runtime
+}
+
+Config -down-> Resolver
+Resolver -right-> Registry: resolve
+Registry -down-> Builtin
+Registry -down-> MCP
+Builtin -down-> Binding
+MCP -down-> Binding
+Binding -right-> Adapter: schema + invoke
+Adapter -down-> Permission: gate call
+Permission -down-> Runtime: allowed path
+Runtime -up-> Adapter: tool call
+Adapter -left-> Registry: invoke by binding_id
+@enduml
+
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
+' Source evidence: packages/coding-agent/src/core/system-prompt.ts buildSystemPrompt
+' Source evidence: packages/coding-agent/src/core/skills.ts loadSkills and formatSkillsForPrompt
+' Source evidence: packages/coding-agent/src/core/session-manager.ts SessionManager.create and deferred persistence
+' Observed behavior: pi exposes createAgentSession with custom tools, resource loading, and SessionManager-backed state.
+' Target-only architecture: version pinning, external tool resolution, approval durability, and snapshot hashes are added by the integration layer.
+' Design reason: a session must restore the exact behavior selected at creation time and fail closed on drift.
+@startuml pi_session_creation
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+
+actor Client
+participant "Session Factory\ntarget adapter" as Factory
+database "Agent Repository" as Repo
+participant "Config Compiler" as Compiler
+participant "Tool Manager" as ToolManager
+participant "Approval Broker" as Approval
+participant "pi createAgentSession" as Pi
+database "Session Store" as Store
+
+Client -> Factory: createSession(agent_id, requested_version)
+Factory -> Repo: get exact Agent Config
+Repo --> Factory: config + version + config_hash
+Factory -> Compiler: compile system, models, skills
+Compiler --> Factory: normalized runtime inputs
+loop each enabled tool name
+  Factory -> ToolManager: resolve(type, name)
+  ToolManager --> Factory: binding + schema + version hashes
+end
+Factory -> Approval: register effective permissions
+Approval --> Factory: approval policy handle
+Factory -> Pi: createAgentSession(customTools, resourceLoader, sessionManager)
+Pi --> Factory: AgentSession
+Factory -> Store: persist immutable SessionSnapshot
+Store --> Factory: session_id
+Factory --> Client: session_id + status idle
+@enduml
