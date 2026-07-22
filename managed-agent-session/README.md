@@ -1,139 +1,247 @@
-# Managed Agent 配置到 pi-mono Session 的创建设计
+# Managed Agent 配置到 pi-mono-java Runtime 与 Session 的构建设计
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 0.1.0 |
+| 文档版本 | 0.2.0 |
 | 状态 | Draft，供架构评审 |
-| 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
+| pi-mono 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
+| pi-mono-java 源码基线 | `b99871a0321b73606a8f074c42050f28f52fdfca` |
 | 基线日期 | 2026-07-22 |
-| 设计范围 | Agent 配置编译、外部工具解析、权限门禁、pi-mono Session 创建与恢复 |
+| 设计范围 | Agent 配置编译、Tool/Skill Manager 解析、pi-mono-java Runtime 装配、多 Session 创建、执行与恢复 |
 
 ## 1. 结论
 
-Agent 配置应被视为版本化的控制面对象，Session 应被视为使用某一具体 Agent 版本创建的运行时对象。
+本设计的首要目标不是直接创建 Session，而是先把一个版本化 Agent 配置装配为不可变、可复用的 `ResolvedAgentRuntime`：
 
-创建 Session 时需要完成以下工作：
+```text
+AgentConfig
+    -> AgentRuntimeAssembler
+        -> PromptCompiler
+        -> ModelManager
+        -> ToolManager
+        -> SkillManager
+    -> ResolvedAgentRuntime
+    -> zero or more AgentSession instances
+```
 
-1. 读取并固定 Agent 的具体版本，而不是持续引用 `latest`。
-2. 将结构化 `system` 配置按稳定顺序编译为 pi-mono 使用的单一 system prompt。
-3. 将模型列表解析为本次 Session 的具体模型。
-4. 将技能引用解析为具体版本和不可变内容。
-5. 根据 `type + name` 向外部工具管理器解析工具 schema 和稳定 binding。
-6. 将所有已解析工具转换为 pi-mono `customTools`。
-7. 在工具执行适配器中实施 `always_allow` 或 `always_ask` 权限策略。
-8. 调用 pi-mono `createAgentSession()` 创建 `AgentSession`。
-9. 在向调用方返回前持久化不可变 `SessionSnapshot`。
+边界如下：
 
-本设计不要求 pi-mono 原生理解 MCP 或工具目录。`builtin-toolset` 和 `mcp-toolset` 均由 pi-mono 外部的工具管理器负责发现、描述和调用；pi-mono 只接收统一后的自定义工具定义。
+1. Agent 配置保持原结构，不删除 `enabled` 或 `permission`。
+2. Agent Runtime 不解析 Tool 的 `enabled`、`permission` 和默认/逐项覆盖规则；完整 `tools` 配置交给 Tool Manager。
+3. Agent Runtime 不解析 Skill 版本或加载 Skill 正文；完整 `skills` 引用交给 Skill Manager。
+4. Tool Manager 返回模型可见的 `name`、`description`、`input_schema` 和不透明 Manifest/Binding，并负责权限判断与实际执行。
+5. Skill Manager 返回模型可见的 `name`、`description`、固定版本和不透明 Manifest/Binding，并负责正文、资源的加载或激活。
+6. system prompt 包含结构化 `system`、Tool 摘要和 Skill 目录；Tool 的完整 `input_schema` 通过模型请求的独立 `tools` 字段发送，不重复写入 system prompt。
+7. 容器启动后可以注册一个长期存活的 `ResolvedAgentRuntime`；每个对话仍创建独立的、有消息状态的 `AgentSession + Agent`。
+8. pi-mono-java 现有 `AgentLoop` 和 `ToolExecutionPipeline` 可以保留；主要改造资源装配层和 Manager-backed 适配器。
 
-## 2. 设计边界
+## 2. 术语和生命周期
 
-本文使用以下标签区分事实和方案：
+| 对象 | 含义 | 生命周期 | 是否共享 |
+|---|---|---|---|
+| `AgentConfig` | 版本化控制面配置 | 持久化 | 共享 |
+| `ResolvedAgentRuntime` | 配置和各 Manager Manifest 的不可变装配结果 | Agent 版本或容器生命周期 | 共享 |
+| `AgentSession` | 一个具体对话的运行时对象 | 对话生命周期 | 不共享 |
+| `Agent` | pi-mono-java 底层有状态模型循环门面 | 与 Session 相同 | 不共享 |
+| `Run` | 一条消息触发的一次模型/工具循环 | 单次执行 | 不共享 |
 
-- **观察到的行为**：由 Anthropic 官方文档或当前 pi-mono 源码直接支持。
-- **目标设计**：为满足当前 Agent 配置和外部工具管理要求而新增的适配层。
-- **产品约束**：为保证行为明确而规定的产品语义。
-- **安全加固**：为避免权限绕过、版本漂移或静默降级而增加的约束。
-- **架构变更**：当前 pi-mono 不具备，需要在集成层新增的组件或持久化结构。
+`ResolvedAgentRuntime` 是“容器启动后存在的 Agent 实例”的领域表达。它不是当前 `com.campusclaw.agent.Agent`，因为后者持有消息、队列、执行状态和取消状态。
 
-本文不设计工具管理器内部如何连接 MCP Server，也不修改 pi-mono 核心工具协议。工具管理器只需满足本文定义的解析与调用契约。
+## 3. 设计边界
 
-## 3. 源码和文档证据
+本文使用以下标签：
 
-### 3.1 Anthropic Managed Agents
+- **观察到的行为**：当前 pi-mono 或 pi-mono-java 源码已经实现。
+- **目标设计**：需要新增的 Managed Agent 装配能力。
+- **产品约束**：为避免歧义而固定的产品语义。
+- **安全加固**：用于防止版本漂移、越权调用或审批重放的约束。
+- **架构变更**：当前实现需要重构或新增模块才能支持。
 
-基线参考：
+Tool Manager 和 Skill Manager 是独立于 Agent Runtime 的模块。本文只定义它们与装配层、Session 执行层之间的契约，不设计 Manager 内部如何连接 MCP Server、执行 builtin tool、存储 Skill Artifact 或展示审批 UI。
+
+## 4. 源码证据
+
+### 4.1 Anthropic Managed Agents 基线
+
+参考：
 
 - [Agent setup](https://platform.claude.com/docs/en/managed-agents/agent-setup)
 - [Sessions](https://platform.claude.com/docs/en/managed-agents/sessions)
-- [Environments](https://platform.claude.com/docs/en/managed-agents/environments)
 - [Events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)
 - [Permission policies](https://platform.claude.com/docs/en/managed-agents/permission-policies)
 - [Skills](https://platform.claude.com/docs/en/managed-agents/skills)
 
-观察到的关键语义：
+本文只采用以下抽象语义：
 
-- Agent 是版本化配置；修改 Agent 会产生新版本。
-- Session 关联 Agent 和 Environment。
-- Session 创建后处于空闲状态。
-- `user.message` 事件启动或恢复 agent loop。
-- agent loop 可以产生多轮模型调用、工具调用和事件。
-- 一轮运行结束后 Session 回到空闲状态，而不是自动销毁。
-
-### 3.2 pi-mono
-
-| 源码 | 关键符号 | 观察到的行为 |
-|---|---|---|
-| [`packages/coding-agent/src/core/sdk.ts`](../../pi-mono/packages/coding-agent/src/core/sdk.ts#L33) | `CreateAgentSessionOptions`、`createAgentSession()` | 接受模型、`customTools`、`ResourceLoader`、`SessionManager` 等运行时输入 |
-| [`packages/coding-agent/src/core/sdk.ts`](../../pi-mono/packages/coding-agent/src/core/sdk.ts#L289) | `new Agent(...)` | 将解析后的 system prompt、模型和工具传入核心 Agent |
-| [`packages/coding-agent/src/core/agent-session.ts`](../../pi-mono/packages/coding-agent/src/core/agent-session.ts#L356) | `AgentSession` constructor | 保存自定义工具并管理 Session 生命周期 |
-| [`packages/coding-agent/src/core/agent-session.ts`](../../pi-mono/packages/coding-agent/src/core/agent-session.ts#L452) | `tool_call` hook | 扩展可以在工具调用前检查或阻止调用 |
-| [`packages/coding-agent/src/core/agent-session.ts`](../../pi-mono/packages/coding-agent/src/core/agent-session.ts#L2441) | custom tool adaptation | 将 `ToolDefinition` 转换为 Agent 可调用工具 |
-| [`packages/coding-agent/src/core/system-prompt.ts`](../../pi-mono/packages/coding-agent/src/core/system-prompt.ts#L28) | `buildSystemPrompt()` | 组装 system prompt、工具说明、上下文和技能信息 |
-| [`packages/coding-agent/src/core/skills.ts`](../../pi-mono/packages/coding-agent/src/core/skills.ts#L387) | `loadSkills()` | 从文件系统和配置位置发现技能 |
-| [`packages/coding-agent/src/core/skills.ts`](../../pi-mono/packages/coding-agent/src/core/skills.ts#L335) | `formatSkillsForPrompt()` | 将可用技能格式化到 system prompt |
-| [`packages/coding-agent/src/core/session-manager.ts`](../../pi-mono/packages/coding-agent/src/core/session-manager.ts#L1441) | `SessionManager.create()` | 创建持久化 Session 管理器 |
-| [`packages/coding-agent/src/core/session-manager.ts`](../../pi-mono/packages/coding-agent/src/core/session-manager.ts#L946) | `_persist()` | 按 JSONL 追加 Session 条目 |
-| [`packages/agent/src/agent-loop.ts`](../../pi-mono/packages/agent/src/agent-loop.ts#L413) | `executeToolCalls()` | 执行模型产生的工具调用；可并行处理多个工具调用 |
-| [`packages/coding-agent/examples/extensions/permission-gate.ts`](../../pi-mono/packages/coding-agent/examples/extensions/permission-gate.ts#L13) | `tool_call` handler | 展示基于扩展 hook 的工具调用门禁 |
-| [`packages/coding-agent/README.md`](../../pi-mono/packages/coding-agent/README.md#L492) | Philosophy | 当前核心不原生提供 MCP 和权限弹窗，建议由扩展或外部环境实现 |
-
-因此，外部 Tool Manager、AgentConfig Compiler、Permission Broker 和 SessionSnapshot Store 都属于目标适配层，不能描述成 pi-mono 当前已有能力。
-
-## 4. Anthropic Managed Agent 的基线流程
-
-以下伪代码描述 `create agent` 之后创建 Session 的概念流程，不代表某一种语言 SDK 的精确方法签名：
-
-```text
-function createManagedAgentSession(agentInput, environmentInput):
-    agent = ManagedAgentAPI.createAgent(agentInput)
-    agentVersion = agent.version
-
-    environment = ManagedAgentAPI.createEnvironment(environmentInput)
-
-    session = ManagedAgentAPI.createSession({
-        agent_id: agent.id,
-        agent_version: agentVersion,
-        environment_id: environment.id
-    })
-
-    assert session.status == "idle"
-    return session
-
-function runManagedAgentSession(sessionId, userMessage):
-    ManagedAgentAPI.appendEvent(sessionId, {
-        type: "user.message",
-        content: userMessage
-    })
-
-    for event in ManagedAgentAPI.streamEvents(sessionId):
-        handle(event)
-
-    // Agent loop stops; the durable Session returns to idle.
-```
+- Agent 是版本化配置。
+- Session 固定关联一个 Agent 版本。
+- 创建 Session 不等于立即执行模型。
+- 用户消息触发或恢复 agent loop。
+- 一轮执行完成后，Session 可以继续接收后续消息。
 
 ![Anthropic Managed Agent 到 Session 的基线生命周期](anthropic_managed_lifecycle.svg)
 
-[PlantUML 源码](diagram.puml#L6)
+[PlantUML 源码](diagram.puml#L8)
 
-### 4.1 与当前自定义 Agent 配置的差异
+### 4.2 pi-mono-java 当前行为
 
-| 维度 | Anthropic 当前公开模型 | 本文目标配置 |
+| 源码 | 关键符号 | 观察到的行为 |
 |---|---|---|
-| `system` | 一个 system 字符串 | `role`、`objective`、`instructions` 等结构化字段 |
-| `model` | 一个具体模型 | 有序模型数组 |
-| 工具 | Anthropic Managed Agents 自己的工具和 MCP 配置 | 只声明工具类型和名称，由外部工具管理器解析 |
-| 权限 | Managed Agents 的 permission policy | Agent 级默认值和逐工具覆盖 |
-| 技能 | Managed Agent skill 引用 | `skill_id` 和可选固定版本 |
-| 运行环境 | 显式 Environment | 由集成服务的请求上下文和运行环境配置提供 |
+| [`AgentSession.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java#L114) | `initialize(SessionConfig)` | 解析模型、刷新 Tool、加载 Skill 和上下文文件、构建 system prompt、创建 `Agent` |
+| [`SystemPromptBuilder.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/prompt/SystemPromptBuilder.java#L50) | `build()` | 拼接基础提示词、Tool 摘要、Skill 目录、上下文文件和环境信息 |
+| [`DefaultToolCatalog.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/tool/catalog/DefaultToolCatalog.java#L20) | `DefaultToolCatalog` | 合并 Spring、Extension 和声明式 Tool Source，输出 `AgentTool` |
+| [`AgentTool.java`](../../pi-mono-java/modules/agent-core/src/main/java/com/campusclaw/agent/tool/AgentTool.java#L15) | `AgentTool` | Tool 同时携带 name、description、parameters schema 和 execute |
+| [`SkillLoader.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillLoader.java#L30) | `SkillLoader` | 扫描本地 `SKILL.md` 并读取 name、description 和文件路径 |
+| [`SkillPromptFormatter.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillPromptFormatter.java#L24) | `format()` | 把 Skill 的 name、description、location 写入 system prompt |
+| [`SkillExpander.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillExpander.java#L76) | `expand()` | 处理 `/skill:name` 并从本地文件读取 Skill 正文 |
+| [`AgentLoop.java`](../../pi-mono-java/modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java#L212) | `new Context(...)` | 每轮向模型传递 system prompt、messages 和独立 tools 列表 |
+| [`AgentLoop.java`](../../pi-mono-java/modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java#L312) | `toLlmTools()` | 将 `AgentTool` 转为 name、description、parameters |
+| [`ToolExecutionPipeline.java`](../../pi-mono-java/modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java#L119) | `invokeTool()` | 校验参数后调用 `AgentTool.execute()` |
+| [`SessionManager.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/SessionManager.java#L160) | `loadSession()` | 从 JSONL 恢复消息 |
+| [`SessionPool.java`](../../pi-mono-java/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java#L186) | `getOrCreate()` | 按 conversation ID 管理多个 `AgentSession` |
 
-这些差异属于目标产品模型，不应通过猜测 Anthropic 内部实现来弥合。
+当前 `com.campusclaw.codingagent.skill.SkillManager` 负责本地 Skill 的安装、链接、更新和删除，不是本文目标中的独立运行时 Skill Manager。Java 实现应使用 `SkillManagerGateway`、`ExternalSkillManagerClient` 等名称避免冲突。
 
-## 5. Agent 配置的运行时解释
+### 4.3 pi-mono 对照基线
 
-### 5.1 输入配置结构
+| 源码 | 关键符号 | 对照意义 |
+|---|---|---|
+| [`packages/coding-agent/src/core/sdk.ts`](../../pi-mono/packages/coding-agent/src/core/sdk.ts#L164) | `createAgentSession()` | 每次 Session 创建独立 `Agent` 与 `AgentSession` |
+| [`packages/coding-agent/src/core/system-prompt.ts`](../../pi-mono/packages/coding-agent/src/core/system-prompt.ts#L28) | `buildSystemPrompt()` | system prompt 是装配结果，不包含消息状态 |
+| [`packages/coding-agent/src/core/skills.ts`](../../pi-mono/packages/coding-agent/src/core/skills.ts#L335) | `formatSkillsForPrompt()` | Skill 目录进入 system prompt，正文按需读取 |
+| [`packages/agent/src/agent.ts`](../../pi-mono/packages/agent/src/agent.ts#L171) | `Agent` | Agent 持有 transcript、queue 和 active run，不能跨 Session 共享 |
 
-本文设计针对以下 Agent 配置结构：
+## 5. pi-mono-java 当前 Session 构建流程
+
+![pi-mono-java 当前 Session 资源加载流程](pi_mono_java_current_loading.svg)
+
+[PlantUML 源码](diagram.puml#L50)
+
+### 5.1 CLI 和 Server 入口
+
+CLI 的 `CampusClawCommand.runAgentMode()` 先解析有效 Tool，再创建 `AgentSession` 和 `SessionConfig`：
+
+```text
+effectiveTools = resolveEffectiveTools(cwd, toolSelection)
+
+session = new AgentSession(
+    aiService,
+    modelRegistry,
+    promptBuilder,
+    skillLoader,
+    skillExpander,
+    effectiveTools
+)
+
+session.initialize(
+    SessionConfig(model, cwd, customPrompt, mode)
+)
+```
+
+Server 模式创建一个 `SessionPool`。每个 conversation ID 首次访问时，`SessionPool.createSessionWithPersistence()` 创建独立 `AgentSession`；驱逐或进程重启后，可通过 JSONL 恢复消息。
+
+### 5.2 当前 initialize 顺序
+
+```text
+function AgentSession.initialize(config):
+    model = resolveModel(config.model)
+    cwd = config.cwd
+
+    refreshTools(cwd)
+    loadSkills(cwd)
+
+    contextFiles = load AGENTS.md / CLAUDE.md
+    systemOverride = load SYSTEM.md
+    appendSystem = load APPEND_SYSTEM.md
+    promptTemplates = load prompt templates
+
+    visibleSkills = SkillRegistry.getVisibleSkills()
+
+    systemPrompt = SystemPromptBuilder.build({
+        tools,
+        visibleSkills,
+        cwd,
+        config.customPrompt,
+        environment,
+        contextFiles,
+        systemOverride,
+        appendSystem
+    })
+
+    agent = new Agent(aiService)
+    agent.setModel(model)
+    agent.setSystemPrompt(systemPrompt)
+    agent.setTools(tools)
+```
+
+### 5.3 当前 system prompt 顺序
+
+`SystemPromptBuilder.build()` 当前按以下顺序拼接：
+
+1. 项目或全局 `SYSTEM.md`；不存在时使用硬编码 `BASE_PROMPT`。
+2. 基于 Tool 名称生成的条件规则。
+3. Tool 的 name 和 description 摘要。
+4. Skill 的 name、description、location。
+5. 全局和目录层级中的 `AGENTS.md` 或 `CLAUDE.md`。
+6. 硬编码园区知识库指引。
+7. 日期、cwd、操作系统、Java、Shell 等环境信息。
+8. `APPEND_SYSTEM.md`。
+9. CLI `customPrompt`。
+
+Tool 的 `input_schema` 不写入 system prompt。它保留在 `AgentTool.parameters()` 中，并由 `AgentLoop.toLlmTools()` 放入模型请求的独立 tools 字段。
+
+### 5.4 当前 Skill 激活方式
+
+当前 Skill 是文件系统对象：
+
+```text
+Skill:
+    name
+    description
+    filePath
+    baseDir
+    source
+    disableModelInvocation
+```
+
+system prompt 只列出 Skill 目录。完整正文通过两条路径进入消息上下文：
+
+- 模型调用 `read` 读取 system prompt 中的 `location`。
+- 用户输入 `/skill:name` 后，`SkillExpander` 读取 `SKILL.md` 正文并扩展用户消息。
+
+### 5.5 每轮执行
+
+```text
+AgentSession.prompt(userInput)
+    -> expand prompt template
+    -> expand /skill:name
+    -> Agent.prompt()
+    -> AgentLoop
+    -> Context(systemPrompt, messages, modelTools)
+    -> Provider
+    -> optional tool calls
+    -> ToolExecutionPipeline
+    -> AgentTool.execute()
+    -> ToolResultMessage
+    -> next model turn
+```
+
+## 6. 当前实现与目标配置的差距
+
+| 维度 | 当前 pi-mono-java | 目标设计 |
+|---|---|---|
+| Agent 配置 | `SessionConfig(model,cwd,prompt,mode)` | 版本化完整 AgentConfig |
+| system | 硬编码 Base 或本地 SYSTEM.md | 结构化 system 字段编译 |
+| Tool 来源 | 进程内 ToolCatalog | 独立 Tool Manager |
+| Tool 权限 | Runtime hook 或 Tool 自己处理 | Tool Manager 解析配置并权威执行 |
+| Skill 来源 | 本地目录扫描 | 独立 Skill Manager |
+| Skill 身份 | name + Path | skill_id + fixed version + binding |
+| Agent Runtime | 每个 Session 临时解析 | 容器级不可变 Runtime |
+| 恢复元数据 | 主要恢复消息 | 固定 Agent、Tool、Skill、Model Manifest |
+
+因此，不能直接把 Agent 配置塞入现有 `SessionConfig.customPrompt`，也不能直接把 Manager Skill 映射为当前依赖本地 Path 的 `Skill`。
+
+## 7. 输入 Agent 配置及字段归属
 
 ```json
 {
@@ -186,40 +294,189 @@ function runManagedAgentSession(sessionId, userMessage):
 }
 ```
 
-`tools[].type` 可取 `builtin-toolset` 或 `mcp-toolset`。两种类型在 Session Factory 中执行同一套配置合并逻辑，只是路由到不同的外部工具管理器。
+字段归属：
 
-### 5.2 控制面字段
+| 配置字段 | 解析组件 | Agent Runtime 是否解析 |
+|---|---|---|
+| `id/version` | Agent Control Plane / Runtime Assembler | 只持有固定值 |
+| `system.*` | Prompt Compiler | 不在 Session 内重复解释 |
+| `model[]` | Model Manager | 只持有 Manifest |
+| `tools[]` 全部字段 | Tool Manager | 否 |
+| `skills[]` 全部字段 | Skill Manager | 否 |
+| `use_cases` | Agent Router | 否 |
+| `metadata` | Control Plane / Session Context Factory | 只持有所需快照 |
 
-以下字段只用于版本控制、路由、授权或审计，默认不直接进入模型上下文：
+`permission` 保留在 Agent 配置中，但属于 Tool Manager 的配置命名空间。Agent Runtime 不计算 effective permission。
 
-- `id`
-- `type`
-- `version`
-- `created_at`
-- `updated_at`
-- `name`
-- `display_name`
-- `description`
-- `use_cases`
-- `metadata`
+## 8. 目标架构
 
-`use_cases` 用于 Agent 选择或意图路由。`metadata.environment` 和 `metadata.owner_id` 用于部署环境选择和授权。除非产品明确要求，否则这些字段不拼接到 system prompt。
+![独立 Tool/Skill Manager 与 pi-mono-java Runtime 的目标架构](external_tool_manager_architecture.svg)
 
-### 5.3 system prompt 编译顺序
+[PlantUML 源码](diagram.puml#L96)
 
-结构化 `system` 按以下固定顺序编译：
-
-1. `role`
-2. `objective`
-3. `instructions`
-4. `tool_policy`
-5. `safety`
-6. `completion`
-7. `response_style`
-8. `example`
+### 8.1 Runtime 装配结果
 
 ```text
-function compileSystem(system):
+record ResolvedAgentRuntime:
+    agent_id: string
+    agent_version: integer
+    config_hash: string
+
+    compiled_system: string
+
+    model_manifest_id: string
+    model_candidates: list<ModelDescriptor>
+
+    tool_manifest_id: string
+    model_tools: list<ModelToolDescriptor>
+
+    skill_manifest_id: string
+    model_skills: list<ModelSkillDescriptor>
+
+    use_cases: list<string>
+    metadata_snapshot: map
+```
+
+`ResolvedAgentRuntime` 不保存 Tool 或 Skill 的业务实现，也不保存 Manager 内部 permission 结构。
+
+### 8.2 Tool Manager 契约
+
+```text
+record AgentKey:
+    agent_id: string
+    agent_version: integer
+
+record ToolManifest:
+    manifest_id: string
+    agent_key: AgentKey
+    tools: list<ModelToolDescriptor>
+
+record ModelToolDescriptor:
+    binding_id: string
+    model_name: string
+    label: string
+    description: string
+    input_schema: JsonSchema
+    descriptor_version: string
+    schema_hash: string
+
+interface ToolManager:
+    bindAgentTools(agent_key, raw_toolsets) -> ToolManifest
+    invoke(invocation_request) -> ToolInvocationResult
+```
+
+`bindAgentTools()` 内部负责：
+
+1. 根据 `type` 路由 builtin 或 MCP Tool。
+2. 合并 `default_config` 与逐 Tool 配置。
+3. 过滤 disabled Tool。
+4. 解析并固定 Tool descriptor、schema 和 binding。
+5. 保存 `always_ask`、`always_allow` 等权限策略。
+6. 检查模型可见名称冲突。
+7. 返回不包含 Manager 内部权限结构的 Manifest。
+
+`invoke()` 内部负责：
+
+- 校验 Manifest 和 Binding。
+- 根据 Agent、用户、租户、参数和环境评估权限。
+- 在需要时创建并等待或返回用户审批。
+- 执行实际 builtin 或 MCP Tool。
+- 返回 Completed、ApprovalRequired、Denied 或 Failed。
+
+### 8.3 Skill Manager 契约
+
+```text
+record SkillManifest:
+    manifest_id: string
+    agent_key: AgentKey
+    skills: list<ModelSkillDescriptor>
+
+record ModelSkillDescriptor:
+    binding_id: string
+    skill_id: string
+    version: string
+    name: string
+    description: string
+    descriptor_version: string
+    content_hash: string
+
+interface SkillManager:
+    bindAgentSkills(agent_key, raw_skill_refs) -> SkillManifest
+    activate(activation_request) -> ActivatedSkill
+```
+
+`bindAgentSkills()` 在省略版本时解析最新版本，但返回结果必须固定为具体版本。`activate()` 返回 Skill instructions、resources 和相对资源引用。Agent Runtime 不直接读取 Skill Manager 的存储。
+
+如果某种“Skill”本身执行有副作用的业务动作，应把该动作暴露成 Tool；Skill 仍表示指令和资源，避免一个概念同时承担提示词和远程动作两种语义。
+
+## 9. Agent Runtime 装配
+
+```text
+function assembleAgentRuntime(agentConfig):
+    validateAgentEnvelope(agentConfig)
+
+    agentKey = AgentKey(
+        agentConfig.id,
+        agentConfig.version
+    )
+
+    modelManifest = ModelManager.resolveAgentModels(
+        agentKey,
+        agentConfig.model
+    )
+
+    // Runtime Assembler does not parse enabled or permission.
+    toolManifest = ToolManager.bindAgentTools(
+        agentKey,
+        agentConfig.tools
+    )
+
+    // Runtime Assembler does not resolve versions or load content.
+    skillManifest = SkillManager.bindAgentSkills(
+        agentKey,
+        agentConfig.skills
+    )
+
+    compiledSystem = compileStructuredSystem(
+        agentConfig.system
+    )
+
+    validateModelToolDescriptors(
+        toolManifest.tools
+    )
+    validateSkillPromptDescriptors(
+        skillManifest.skills
+    )
+
+    return ResolvedAgentRuntime({
+        agent_id: agentConfig.id,
+        agent_version: agentConfig.version,
+        config_hash: canonicalHash(agentConfig),
+
+        compiled_system: compiledSystem,
+
+        model_manifest_id: modelManifest.manifest_id,
+        model_candidates: modelManifest.models,
+
+        tool_manifest_id: toolManifest.manifest_id,
+        model_tools: toolManifest.tools,
+
+        skill_manifest_id: skillManifest.manifest_id,
+        model_skills: skillManifest.skills,
+
+        use_cases: immutable(agentConfig.use_cases),
+        metadata_snapshot: immutable(agentConfig.metadata)
+    })
+```
+
+装配成功后，由 `AgentRuntimeRegistry` 按 `agent_id + version` 注册不可变 Runtime。配置升级创建新 Runtime，不原地修改旧版本。
+
+## 10. system prompt 编译
+
+### 10.1 结构化 system
+
+```text
+function compileStructuredSystem(system):
     sections = [
         ("Role", system.role),
         ("Objective", system.objective),
@@ -228,480 +485,440 @@ function compileSystem(system):
         ("Safety", system.safety),
         ("Completion", system.completion),
         ("Response Style", system.response_style),
-        ("Example", system.example)
+        ("Examples", system.example)
     ]
 
-    return joinWithStableHeadings(removeEmpty(sections))
+    return joinWithStableHeadings(
+        removeEmpty(sections)
+    )
 ```
 
-编译结果作为自定义 `ResourceLoader` 的 system prompt override。技能列表、上下文文件和工具说明继续由 pi-mono 已有 `buildSystemPrompt()` 流程拼接。
+这是语言无关伪代码，不是 TypeScript 或 Java 的精确语法。
 
-### 5.4 模型数组
+### 10.2 Tool 在模型上下文中的位置
 
-**产品约束：** `model` 是按优先级排序的候选列表。
-
-创建 Session 时：
-
-1. 按配置顺序解析模型。
-2. 选择第一个存在且具备有效认证的模型。
-3. 在快照中同时记录候选列表和 `selected_model`。
-4. Session 恢复时必须重新取得原 `selected_model`；不得静默切换到下一个候选模型。
-
-模型迁移必须是显式操作，并产生新的 Session 快照或新 Session。
-
-### 5.5 技能引用
-
-pi-mono 当前按文件路径发现技能，并不原生理解 `skill_id + version`。因此需要外部 Skill Manager：
+Tool Manager 返回的 name 和 description 可以作为简短目录进入 system prompt：
 
 ```text
-function resolveSkills(skillRefs):
-    result = []
+# Available Tools
 
-    for ref in skillRefs:
-        version = ref.version ?? SkillManager.latestVersion(ref.skill_id)
-        artifact = SkillManager.get(ref.skill_id, version)
+- search_documents: Search indexed documents.
+- delete_record: Delete a record; execution may require user approval.
+```
 
-        result.append({
-            pi_skill: toPiSkill(artifact),
-            snapshot: {
-                skill_id: ref.skill_id,
-                version: artifact.version,
-                content_hash: sha256(artifact.content)
-            }
+完整 schema 只进入模型请求的 tools 字段：
+
+```text
+ModelRequest:
+    system = final_system_prompt
+    messages = session_messages
+    tools = runtime.model_tools.map(tool -> {
+        name: tool.model_name,
+        description: tool.description,
+        input_schema: tool.input_schema
+    })
+```
+
+Tool Manager 的 permission 不作为 Runtime 权威判断。可以返回非权威的提示文本供 system prompt 展示，但是否审批和是否执行以 `ToolManager.invoke()` 为准。
+
+### 10.3 Skill 在模型上下文中的位置
+
+system prompt 只写 Skill 目录：
+
+```text
+# Available Skills
+
+Use a skill when the task matches its description.
+Load the skill before following its instructions.
+
+<available_skills>
+  <skill>
+    <id>incident-analysis</id>
+    <version>3</version>
+    <name>incident-analysis</name>
+    <description>Analyze production incidents.</description>
+  </skill>
+</available_skills>
+```
+
+默认不把所有 Skill 正文写入 system prompt，以避免无关指令、上下文膨胀和版本混淆。完整正文通过 Manager-backed `load_skill` 或 `/skill:name` 激活后进入消息上下文。
+
+### 10.4 静态和动态提示词
+
+Runtime 装配阶段生成静态部分：
+
+- role、objective、instructions。
+- tool policy、safety、completion。
+- response style、examples。
+- Tool 摘要。
+- Skill 目录。
+
+Session 创建阶段补充动态部分：
+
+- 当前时间和 cwd。
+- tenant、user 和环境。
+- 被允许的项目上下文文件。
+
+Managed 模式默认不允许本地 `SYSTEM.md` 覆盖 AgentConfig.system。`AGENTS.md/CLAUDE.md` 是否加载、`APPEND_SYSTEM.md` 是否允许，应成为显式产品策略。
+
+## 11. 映射到 pi-mono-java 现有执行类型
+
+### 11.1 Tool Descriptor 到 AgentTool
+
+新增通用适配器：
+
+```text
+class ManagerBackedAgentTool implements AgentTool:
+    descriptor
+    tool_manifest_id
+    tool_manager
+    session_context
+
+    name():
+        return descriptor.model_name
+
+    label():
+        return descriptor.label
+
+    description():
+        return descriptor.description
+
+    parameters():
+        return descriptor.input_schema
+
+    execute(toolCallId, arguments, signal, onUpdate):
+        result = tool_manager.invoke({
+            manifest_id: tool_manifest_id,
+            binding_id: descriptor.binding_id,
+
+            agent_id: session_context.agent_id,
+            agent_version: session_context.agent_version,
+            session_id: session_context.session_id,
+            run_id: session_context.run_id,
+            tool_call_id: toolCallId,
+
+            tenant_id: session_context.tenant_id,
+            user_id: session_context.user_id,
+            arguments: arguments,
+            arguments_hash: canonicalHash(arguments),
+            execution_context:
+                session_context.tool_execution_context
         })
 
-    return result
+        return convertToAgentToolResult(result)
 ```
 
-省略版本只表示“在 Session 创建时解析最新版本”。解析完成后必须固定具体版本，后续恢复不能再次解释为最新版本。
+适配器只做协议转换和委托。它不解析 permission，也不执行具体 Tool。
 
-## 6. 外部工具管理器
+当前 `AgentTool.execute()` 是同步接口。若 Tool Manager 的审批可能长期挂起，目标实现应选择以下之一：
 
-### 6.1 架构
+- Tool Manager 持久化审批并让同步调用等待；适合作为短期兼容方案。
+- 将执行接口演进为 `CompletionStage<AgentToolResult>` 或 `Mono<AgentToolResult>`；推荐用于可恢复审批。
+- Tool Manager 返回 `ApprovalRequired`，上层 Session 状态机收到批准后显式恢复调用。
 
-![外部工具管理器与 pi-mono 的目标集成架构](external_tool_manager_architecture.svg)
+### 11.2 Skill Descriptor 到当前 Skill 流程
 
-[PlantUML 源码](diagram.puml#L46)
+当前 `Skill` 强依赖本地 `filePath/baseDir`，不能直接承载 Manager Skill。推荐引入与存储无关的 `RuntimeSkillDescriptor`，并让 `SkillPromptFormatter` 接收该描述。
 
-该架构包含三个平面：
-
-- **Agent control plane**：保存版本化 Agent 配置和权限策略。
-- **External tool plane**：根据工具类型和名称提供 schema、binding 和实际调用能力。
-- **pi-mono runtime**：只接收统一 `customTools`，执行模型循环和 Session 消息持久化。
-
-### 6.2 工具管理器契约
+激活路径：
 
 ```text
-type ToolsetType = "builtin-toolset" | "mcp-toolset"
+function loadManagedSkill(skillId, runtime, sessionContext):
+    allowed = runtime.model_skills.findById(skillId)
 
-record ToolKey:
-    type: ToolsetType
-    name: string
+    if allowed is null:
+        fail("SKILL_NOT_AVAILABLE_TO_AGENT")
 
-record ResolvedToolBinding:
-    key: ToolKey
-    model_tool_name: string
-    description: string
-    input_schema: JsonSchema
-    binding_id: string
-    descriptor_version: string
-    schema_hash: string
-
-interface ToolManager:
-    resolve(type, name) -> ResolvedToolBinding
-    invoke(binding_id, arguments, execution_context) -> ToolResult
-```
-
-`list(type)` 可以作为管理面能力存在，但 Session 创建的必要契约只有 `resolve` 和 `invoke`。
-
-### 6.3 名称约束
-
-- 工具目录的稳定主键是 `(type, name)`。
-- 传给模型的 `model_tool_name` 在一个 Session 内必须全局唯一。
-- 如果 `builtin-toolset` 和 `mcp-toolset` 解析出相同 `model_tool_name`，Session 创建失败。
-- 本版本不自动增加前缀或重命名工具，因为静默改名会改变模型可见协议。
-
-未来如果需要别名，必须在 Agent 配置中显式增加 `alias` 字段。
-
-### 6.4 默认配置与逐工具覆盖
-
-```text
-function effectiveTools(toolsets):
-    result = []
-    seenModelNames = set()
-
-    for toolset in toolsets:
-        for item in toolset.configs:
-            enabled = item.enabled ?? toolset.default_config.enabled
-            permission = item.permission ?? toolset.default_config.permission
-
-            if not enabled:
-                continue
-
-            binding = ToolManager.resolve(toolset.type, item.name)
-            validateSchema(binding.input_schema)
-
-            if binding.model_tool_name in seenModelNames:
-                fail("DUPLICATE_MODEL_TOOL_NAME")
-
-            seenModelNames.add(binding.model_tool_name)
-            result.append({ binding, permission })
-
-    return result
-```
-
-尽管当前配置中逐工具字段是必填的，解析器仍应实现明确的覆盖语义，便于未来允许省略字段。安全默认值是 `always_ask`；如果默认配置和逐工具配置都没有权限值，则配置校验失败。
-
-### 6.5 转换为 pi customTools
-
-```text
-function toPiTool(binding, permission, sessionContext):
-    return defineTool({
-        name: binding.model_tool_name,
-        description: binding.description,
-        parameters: convertJsonSchemaToPiSchema(binding.input_schema),
-
-        execute: async (toolCallId, arguments, signal) =>:
-            validateAgainstSnapshotSchema(arguments)
-
-            decision = await PermissionBroker.authorize({
-                session_id: sessionContext.session_id,
-                run_id: sessionContext.run_id,
-                tool_call_id: toolCallId,
-                binding_id: binding.binding_id,
-                args_hash: canonicalHash(arguments),
-                permission: permission,
-                signal: signal
-            })
-
-            if decision != "allow":
-                return structuredDeniedToolResult(decision)
-
-            return ToolManager.invoke(
-                binding.binding_id,
-                arguments,
-                sessionContext.execution_context
-            )
-    })
-```
-
-工具适配器的 `execute` 是权限实施的权威边界。pi-mono `tool_call` 扩展 hook 可以用于 UI 展示或二次保护，但不能成为唯一的服务端授权点。
-
-## 7. 权限门禁
-
-### 7.1 `always_allow`
-
-1. 校验调用参数和快照 binding。
-2. 写入调用审计记录。
-3. 调用 `ToolManager.invoke()`。
-4. 将结果转换为 pi `ToolResult`。
-
-### 7.2 `always_ask`
-
-1. 创建持久化 `pending approval`。
-2. 记录 `session_id`、`run_id`、`tool_call_id`、`binding_id` 和 `args_hash`。
-3. 暂停当前工具调用，等待审批结果。
-4. 批准后重新校验调用参数哈希和 Session 快照。
-5. 拒绝、超时、取消或审批存储不可用时返回结构化错误，不调用工具。
-
-### 7.3 并行工具调用
-
-pi agent loop 可以并行执行多个工具调用，因此 Permission Broker 必须：
-
-- 以 `tool_call_id` 区分多个并发审批。
-- 不使用 Session 级单一布尔锁表示审批状态。
-- 支持某个调用被批准、另一个调用被拒绝。
-- 在 Session abort 时取消所有仍未决的审批等待。
-
-### 7.4 安全要求
-
-- UI 返回的审批决定只是输入，服务端适配器负责最终校验。
-- 审批记录必须绑定参数哈希，防止批准后替换参数。
-- 恢复 Session 时未决审批必须重新验证，不能自动继承旧进程内存状态。
-- 工具 binding 不可用时不能按名称重新解析最新 binding 后继续调用。
-- 审批和审计存储失败时采用 fail-closed。
-
-## 8. 基于 Agent 配置创建 pi-mono Session
-
-### 8.1 时序
-
-![基于修改后 Agent 配置创建 pi-mono Session](pi_session_creation.svg)
-
-[PlantUML 源码](diagram.puml#L96)
-
-### 8.2 主流程伪代码
-
-```text
-function createPiSession(agentId, requestedVersion, requestContext):
-    // 1. Read and pin the control-plane object.
-    config = AgentRepository.getExact(agentId, requestedVersion)
-    validateAgentConfig(config)
-
-    configHash = canonicalHash(config)
-
-    // 2. Resolve all dynamic dependencies before creating AgentSession.
-    modelResolution = resolveModels(config.model)
-    compiledSystem = compileSystem(config.system)
-    skillResolution = resolveSkills(config.skills)
-    toolResolution = effectiveTools(config.tools)
-
-    // 3. Create the external durable identity first.
-    sessionId = SessionStore.reserveId()
-    approvalScope = PermissionBroker.createScope(sessionId)
-
-    customTools = []
-    for resolvedTool in toolResolution:
-        customTools.append(
-            toPiTool(
-                resolvedTool.binding,
-                resolvedTool.permission,
-                {
-                    session_id: sessionId,
-                    approval_scope: approvalScope,
-                    execution_context: requestContext.tool_execution_context
-                }
-            )
-        )
-
-    // 4. Supply exact prompt and skills through ResourceLoader.
-    resourceLoader = buildResourceLoader({
-        system_prompt: compiledSystem,
-        skills: skillResolution.pi_skills,
-        cwd: requestContext.cwd
+    activated = SkillManager.activate({
+        manifest_id: runtime.skill_manifest_id,
+        binding_id: allowed.binding_id,
+        skill_id: allowed.skill_id,
+        version: allowed.version,
+        session_id: sessionContext.session_id,
+        user_id: sessionContext.user_id
     })
 
-    piSessionManager = SessionManager.create(
-        requestContext.cwd,
-        requestContext.pi_session_dir
+    require activated.version == allowed.version
+    require hash(activated.instructions)
+        == allowed.content_hash
+
+    return activated
+```
+
+两种接入方式：
+
+1. 推荐：注册一个 Manager-backed `load_skill` AgentTool，模型和 `/skill:name` 都通过它激活 Skill。
+2. 过渡：Skill Manager 将固定版本 Artifact 物化到只读缓存，再映射为现有 `Skill(Path)`。
+
+### 11.3 Model 映射
+
+当前 `AgentSession.resolveModel(String)` 支持一个字符串和模糊匹配。目标 `model[]` 应由 Model Manager 在 Runtime 或 Session 创建阶段选择具体 `Model`，然后直接调用 `agent.setModel(model)`，避免恢复时重新模糊匹配。
+
+### 11.4 SystemPromptBuilder 映射
+
+不应把 `compileStructuredSystem()` 的结果塞入当前 `customPrompt`。推荐增加：
+
+```text
+SystemPromptBuilder.buildManaged({
+    base_prompt: runtime.compiled_system,
+    tools: runtime.model_tools,
+    skills: runtime.model_skills,
+    session_context: sessionContext,
+    project_context_policy: ...
+})
+```
+
+该方法取代硬编码 `BASE_PROMPT`，但继续复用当前 Tool 摘要、Skill 格式、项目上下文和环境信息的装配能力。
+
+## 12. 基于 Runtime 创建 pi-mono-java Session
+
+![基于 ResolvedAgentRuntime 创建 pi-mono-java Session](pi_session_creation.svg)
+
+[PlantUML 源码](diagram.puml#L159)
+
+```text
+function createManagedSession(
+    agentId,
+    requestedVersion,
+    sessionContext
+):
+    runtime = AgentRuntimeRegistry.getExactOrLatest(
+        agentId,
+        requestedVersion
     )
 
-    // 5. Call the existing pi SDK entry point.
-    result = createAgentSession({
-        cwd: requestContext.cwd,
-        model: modelResolution.selected_model,
-        scopedModels: modelResolution.scoped_models,
-        customTools: customTools,
-        resourceLoader: resourceLoader,
-        sessionManager: piSessionManager,
-        modelRuntime: requestContext.model_runtime,
-        settingsManager: requestContext.settings_manager
-    })
-
-    snapshot = buildSessionSnapshot({
+    sessionId = SessionStore.reserveId()
+    boundContext = sessionContext.with({
         session_id: sessionId,
-        pi_session_id: result.session.sessionId,
-        agent_config: config,
-        config_hash: configHash,
-        compiled_system: compiledSystem,
-        model_resolution: modelResolution,
-        skill_resolution: skillResolution,
-        tool_resolution: toolResolution,
-        request_context: requestContext
+        agent_id: runtime.agent_id,
+        agent_version: runtime.agent_version
     })
 
-    // 6. Do not expose the Session until the snapshot is durable.
+    selectedModel = ModelManager.selectForSession(
+        runtime.model_manifest_id,
+        boundContext
+    )
+
+    sessionTools = []
+    for descriptor in runtime.model_tools:
+        sessionTools.append(
+            ManagerBackedAgentTool({
+                descriptor: descriptor,
+                tool_manifest_id:
+                    runtime.tool_manifest_id,
+                tool_manager: ToolManager,
+                session_context: boundContext
+            })
+        )
+
+    finalSystemPrompt = SystemPromptBuilder.buildManaged({
+        base_prompt: runtime.compiled_system,
+        tools: runtime.model_tools,
+        skills: runtime.model_skills,
+        session_context: boundContext
+    })
+
+    sessionManager = SessionManager.createOrOpen(
+        sessionId,
+        boundContext.cwd
+    )
+
+    // Target-only overload or factory.
+    session = AgentSessionFactory.createManaged({
+        model: selectedModel,
+        system_prompt: finalSystemPrompt,
+        tools: sessionTools,
+        skill_manifest_id:
+            runtime.skill_manifest_id,
+        session_manager: sessionManager
+    })
+
+    restoredMessages = sessionManager.loadSession()
+    session.getAgent().replaceMessages(
+        restoredMessages
+    )
+
+    snapshot = buildSessionSnapshot(
+        runtime,
+        selectedModel,
+        sessionId,
+        boundContext
+    )
+
     SessionStore.commit(snapshot)
 
     return {
         session_id: sessionId,
-        agent_id: config.id,
-        agent_version: config.version,
-        selected_model: modelResolution.selected_model.id,
+        agent_id: runtime.agent_id,
+        agent_version: runtime.agent_version,
         status: "idle",
-        pi_session: result.session
+        session: session
     }
 ```
 
-`createAgentSession()` 本身不会触发模型运行。调用方后续执行 `session.prompt(...)` 才开始 pi agent loop，这与 Anthropic “Session 先创建为空闲状态，消息再启动执行”的语义保持一致。
+`createManagedSession()` 不调用模型。后续 `session.prompt()` 才进入现有 `AgentLoop`。
 
-### 8.3 ResourceLoader 构建
+## 13. Tool 调用时序
 
 ```text
-function buildResourceLoader(input):
-    loader = DefaultResourceLoader({
-        cwd: input.cwd,
-
-        systemPromptOverride: () => input.system_prompt,
-
-        skillsOverride: (current) => ({
-            skills: input.skills,
-            diagnostics: current.diagnostics
-        })
-    })
-
-    loader.reload()
-    return loader
+Model emits tool call
+    -> AgentLoop resolves AgentTool by model name
+    -> ToolExecutionPipeline validates input_schema
+    -> ManagerBackedAgentTool.execute()
+    -> ToolManager.invoke(manifest_id, binding_id, context, args)
+    -> Tool Manager evaluates permission
+        -> allow: execute actual Tool
+        -> approval: wait or return ApprovalRequired
+        -> deny: return Denied
+    -> adapter converts result to AgentToolResult
+    -> ToolExecutionPipeline creates ToolResultMessage
+    -> AgentLoop continues
 ```
 
-生产实现需要避免重新发现未固定的项目技能。可以关闭默认技能发现，或在 override 中完全替换技能列表，而不是追加到 `current.skills`。
+Agent Runtime 仍检查模型调用的名称是否存在于当前 Runtime 的 model tools 中；Tool Manager 再检查 Manifest、Binding 和权限。两层检查分别回答：
 
-## 9. SessionSnapshot
+- 该 Agent 是否拥有这个 Tool。
+- 这次调用是否允许实际执行。
 
-pi `SessionManager` 负责消息树、模型切换、压缩和自定义条目。它不负责 Agent 配置版本、外部 tool binding 或审批状态。因此目标设计增加独立 `SessionStore`。
+## 14. SessionSnapshot 与恢复
 
 ```text
-record SessionSnapshotV1:
-    snapshot_version: 1
+record SessionSnapshotV2:
+    snapshot_version: 2
     session_id: string
-    pi_session_id: string
     created_at: timestamp
 
     agent_id: string
     agent_version: integer
     config_hash: string
+
     compiled_system_hash: string
 
-    model_candidates: list<string>
+    model_manifest_id: string
     selected_model: string
 
-    skills: list<{
-        skill_id: string,
-        version: string,
-        content_hash: string
-    }>
-
-    tools: list<{
-        type: ToolsetType,
-        configured_name: string,
-        model_tool_name: string,
-        binding_id: string,
-        descriptor_version: string,
-        schema_hash: string,
-        permission: "always_allow" | "always_ask"
-    }>
+    tool_manifest_id: string
+    skill_manifest_id: string
 
     environment: string
     owner_id: string
 ```
 
-### 9.1 持久化要求
-
-- `SessionSnapshot` 必须在 Session 返回给调用方之前持久化。
-- 快照提交失败时，创建流程失败并释放未暴露的 `AgentSession`。
-- pi Session JSONL 可以写入一个镜像 custom entry 便于排查，但外部 `SessionStore` 是恢复时的权威来源。
-- 快照内容使用稳定 canonical serialization 计算哈希。
-- 快照版本独立于 pi Session JSONL 的格式版本。
-
-## 10. Session 恢复
+恢复时：
 
 ```text
-function restorePiSession(sessionId, requestContext):
+function restoreManagedSession(sessionId, context):
     snapshot = SessionStore.get(sessionId)
 
-    config = AgentRepository.getExact(
+    runtime = AgentRuntimeRegistry.getExact(
         snapshot.agent_id,
         snapshot.agent_version
     )
-    require canonicalHash(config) == snapshot.config_hash
 
-    model = ModelResolver.getExact(snapshot.selected_model)
+    require runtime.config_hash
+        == snapshot.config_hash
+    require runtime.tool_manifest_id
+        == snapshot.tool_manifest_id
+    require runtime.skill_manifest_id
+        == snapshot.skill_manifest_id
+    require runtime.model_manifest_id
+        == snapshot.model_manifest_id
 
-    skills = []
-    for pinnedSkill in snapshot.skills:
-        skill = SkillManager.get(pinnedSkill.skill_id, pinnedSkill.version)
-        require sha256(skill.content) == pinnedSkill.content_hash
-        skills.append(skill)
-
-    tools = []
-    for pinnedTool in snapshot.tools:
-        binding = ToolManager.resolve(
-            pinnedTool.type,
-            pinnedTool.configured_name
-        )
-        require binding.binding_id == pinnedTool.binding_id
-        require binding.descriptor_version == pinnedTool.descriptor_version
-        require binding.schema_hash == pinnedTool.schema_hash
-        tools.append(binding)
-
-    piSessionManager = SessionManager.open(
-        lookupPiSessionFile(snapshot.pi_session_id)
+    return createOrRestoreFromPinnedRuntime(
+        runtime,
+        snapshot,
+        context
     )
-
-    return createAgentSession({
-        model: model,
-        customTools: adaptPinnedTools(tools, snapshot.tools),
-        resourceLoader: buildPinnedResourceLoader(config, skills),
-        sessionManager: piSessionManager,
-        modelRuntime: requestContext.model_runtime,
-        settingsManager: requestContext.settings_manager
-    })
 ```
 
-恢复流程必须在调用 pi `createAgentSession()` 之前完成依赖验证，从而避免 pi 自身的模型 fallback 或默认资源发现改变 Session 行为。
+Runtime 和 Manager 必须能够按固定 Manifest 恢复；不能按名称静默绑定到最新 Tool 或 Skill。
 
-## 11. 失败处理
+## 15. 失败处理
 
-| 场景 | 创建或恢复结果 | 原因 |
+| 场景 | 结果 | 原因 |
 |---|---|---|
-| Agent 版本不存在 | 失败 | 不能使用最新版本替代 |
-| Agent config hash 不匹配 | 失败 | 相同版本内容被非法修改 |
-| 没有可用模型 | 创建失败 | 无法建立可执行运行时 |
-| 固定模型在恢复时不可用 | 恢复失败 | 禁止静默模型迁移 |
-| 技能版本不存在或 hash 不匹配 | 失败 | 技能会改变模型行为 |
-| 工具 schema 无法转换为 pi schema | 创建失败 | 模型工具协议不完整 |
-| 工具模型名称冲突 | 创建失败 | 模型无法稳定寻址工具 |
-| binding 或 schema 在恢复时漂移 | 恢复失败 | 禁止按名称静默升级 |
-| `always_ask` 审批存储不可用 | 工具调用失败 | fail-closed |
-| SessionSnapshot 提交失败 | 创建失败 | 不暴露不可恢复 Session |
-| 工具运行时临时失败 | 返回结构化 ToolResult error | 保留同一 binding，不自动重解析 |
+| Agent 版本不存在 | Runtime 创建或恢复失败 | 禁止替换为 latest |
+| Tool Manager 不可用 | Runtime 装配失败 | 无法形成模型工具协议 |
+| Tool 配置没有 permission 且 Manager 无安全默认值 | Runtime 装配失败 | 避免未定义授权 |
+| Tool 模型名称冲突 | Runtime 装配失败 | AgentLoop 按名称查找 |
+| input schema 非法 | Runtime 装配失败 | 模型协议和本地校验不完整 |
+| Skill 版本不存在 | Runtime 装配失败 | 不能静默使用其他版本 |
+| Skill 无法激活 | 当前 Skill 调用失败 | 不自动加载 latest |
+| Manifest 不存在或不匹配 | Session 恢复失败 | 防止供应链漂移 |
+| Tool Manager 要求审批 | Session 等待或返回 ApprovalRequired | 权限由 Manager 权威决定 |
+| Tool Manager 拒绝调用 | 结构化 ToolResult error | 不执行 Tool |
+| SessionSnapshot 提交失败 | Session 创建失败 | 不暴露不可恢复 Session |
 
-## 12. 有意差异分类
+## 16. 有意差异分类
 
 | 设计项 | 分类 | 说明 |
 |---|---|---|
-| 结构化 `system` 编译 | 架构变更 | pi 最终仍接收一个 system prompt 字符串 |
-| 有序模型数组选取一个模型 | 产品约束 | 保持配置简洁并产生明确运行时选择 |
-| Session 恢复禁止模型 fallback | 安全加固 | 防止行为和权限边界静默改变 |
-| 外部 Tool Manager | 架构变更 | pi 核心当前不原生管理 MCP |
-| `(type, name)` 作为工具目录主键 | 产品约束 | 允许 builtin 和 MCP 使用各自名称空间 |
-| 模型可见工具名必须全局唯一 | 产品约束 | pi agent loop 按工具名查找工具 |
-| binding、descriptor 和 schema hash 固定 | 安全加固 | 防止恢复时供应链漂移 |
-| 权限在 custom tool adapter 中实施 | 安全加固 | 避免仅依赖 UI 或扩展 hook |
-| 独立 SessionStore | 架构变更 | pi Session JSONL 不包含目标控制面快照 |
-| 未指定技能版本时在创建时解析 latest | 产品约束 | 兼顾配置便利性和 Session 可恢复性 |
+| `ResolvedAgentRuntime` | 架构变更 | 当前 Java 在 Session.initialize 中临时解析 |
+| 结构化 system 编译 | 架构变更 | 替代硬编码 Base 或本地 SYSTEM.md |
+| Tool Manager 解析完整 tools 配置 | 架构变更 | Runtime 不解释 permission |
+| Tool Manager 权威审批与执行 | 安全加固 | 防止 Runtime 或 UI 绕过权限 |
+| Manager-backed AgentTool | 架构变更 | 复用现有 AgentLoop 和 ToolExecutionPipeline |
+| Skill Manager Manifest | 架构变更 | 替代本地 Path 作为 Skill 身份 |
+| Skill 正文按需激活 | 产品约束 | 控制基础上下文大小 |
+| Tool schema 不写入 system prompt | 产品约束 | 避免重复和协议漂移 |
+| 本地 SYSTEM.md 不覆盖 Managed system | 安全加固 | 防止 Agent 身份被工作目录替换 |
+| Session 固定 Manager Manifest | 安全加固 | 防止恢复时静默升级 |
 
-## 13. 建议实施顺序
+## 17. 建议实施顺序
 
-### 阶段 1：稳定外部契约
+### 阶段 1：稳定 Manager 契约
 
-- 定义 Tool Manager `resolve()` 和 `invoke()`。
-- 定义 `ResolvedToolBinding` 和 schema hash 算法。
-- 定义 Skill Manager 具体版本解析。
-- 定义模型数组选择规则。
-- 定义 canonical config hash。
+- 定义 `ToolManager.bindAgentTools()`、`invoke()`。
+- 定义 Tool Manifest、Descriptor、InvocationResult。
+- 定义 `SkillManager.bindAgentSkills()`、`activate()`。
+- 定义 Skill Manifest、Descriptor、ActivatedSkill。
+- 定义 Manifest 的版本和保留策略。
 
-### 阶段 2：实现 pi 适配层
+### 阶段 2：实现 Runtime 装配
 
-- 实现 system prompt compiler。
-- 实现 JSON Schema 到 pi tool schema 的转换。
-- 实现 `customTools` adapter。
-- 实现 Permission Broker 和审批持久化。
-- 实现精确技能 `ResourceLoader`。
-- 实现 SessionSnapshot Store。
-- 实现 `createPiSession()` 和 `restorePiSession()`。
+- 实现 `compileStructuredSystem()`。
+- 实现 `ResolvedAgentRuntime`。
+- 实现 `AgentRuntimeAssembler` 和 Registry。
+- 实现 Model Manager 映射。
+- 实现 Runtime 和 Config 的 canonical hash。
 
-### 阶段 3：验证
+### 阶段 3：适配 pi-mono-java
 
-- Agent 版本固定和 config hash 漂移测试。
-- 工具名称冲突测试。
-- binding、descriptor 和 schema 漂移测试。
-- 多个并行 `always_ask` 调用测试。
-- 审批拒绝、超时、取消和恢复测试。
-- 固定模型不可用测试。
-- 技能版本和内容 hash 漂移测试。
-- pi Session JSONL 恢复与外部快照一致性测试。
+- 实现 `ManagerBackedAgentTool`。
+- 为 `SystemPromptBuilder` 增加 managed 模式。
+- 将 Skill prompt 类型从本地 `Skill(Path)` 解耦。
+- 实现 `load_skill` 或 Manager-backed SkillExpander。
+- 增加 `AgentSessionFactory.createManaged()`。
+- 将 `SessionPool` 从单一 baseConfig 扩展为按 Agent Runtime 创建 Session。
+- 增加 SessionSnapshotV2。
 
-## 14. 待确认事项
+### 阶段 4：验证
 
-1. `model` 数组是否只表示创建时的优先级，还是允许运行中的自动 fallback。本文建议只用于创建时选择。
-2. 工具管理器能否保证 `binding_id` 和 `descriptor_version` 在 Session 生命周期内可重新取得。
-3. 工具 schema 的标准格式是否严格限定为 pi 可转换的 JSON Schema 子集。
-4. SessionSnapshot 使用独立数据库，还是与现有平台 Session 表合并。
-5. `always_ask` 的审批 UI 由 pi 扩展、平台 Web UI，还是独立审批服务提供。
-6. 是否允许显式工具别名，以处理不同 toolset 的模型工具名冲突。
+- Agent 配置到 Manager 请求的映射测试。
+- Tool default/override 规则由 Tool Manager 解析的契约测试。
+- permission 不进入 Runtime 的边界测试。
+- Tool name/description/schema 到 `AgentTool` 的映射测试。
+- ToolManager.invoke 代理和结果转换测试。
+- Skill name/description 到 system prompt 的映射测试。
+- Skill 激活版本和 hash 测试。
+- 多 Session 状态隔离测试。
+- Session 驱逐、重启和固定 Manifest 恢复测试。
+- 审批批准、拒绝、超时、取消和重放测试。
 
-## 15. 版本历史
+## 18. 待确认事项
+
+1. Tool Manager 在审批时同步等待，还是返回 `ApprovalRequired` 并由 Session 状态机恢复。
+2. 当前同步 `AgentTool.execute()` 是否演进为异步接口。
+3. Skill 激活采用 `load_skill` Tool，还是改造现有 `/skill:name`，或两者同时支持。
+4. Managed 模式是否允许加载工作目录中的 `AGENTS.md/CLAUDE.md`。
+5. Managed 模式是否完全禁用 `SYSTEM.md/APPEND_SYSTEM.md`。
+6. Model Manager 是在 Runtime 装配时选定模型，还是在 Session 创建时根据凭据选择。
+7. Tool/Skill Manifest 的保留期限是否至少覆盖所有关联 Session。
+8. 现有本地 ToolCatalog 和 SkillLoader 是否作为 Manager 的一种本地后端继续保留。
+
+## 19. 版本历史
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 0.2.0 | 2026-07-22 | 重构为 Agent Runtime 优先；补充 pi-mono-java 当前加载链；定义独立 Tool/Skill Manager Manifest、Java 适配器、多 Session 创建和恢复 |
 | 0.1.0 | 2026-07-22 | 首版；定义 Anthropic 基线、Agent 配置编译、外部工具管理、权限门禁、pi Session 创建与恢复 |
