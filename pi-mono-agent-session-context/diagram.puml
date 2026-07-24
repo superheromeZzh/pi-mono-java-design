@@ -1,0 +1,105 @@
+@startuml agent_session_context
+' Source evidence:
+' - packages/coding-agent/src/main.ts: main, createSessionManager, buildSessionOptions
+' - packages/coding-agent/src/core/agent-session-services.ts: createAgentSessionServices
+' - packages/coding-agent/src/core/resource-loader.ts: DefaultResourceLoader.reload
+' - packages/coding-agent/src/core/package-manager.ts: DefaultPackageManager.resolve
+' - packages/coding-agent/src/core/session-manager.ts: buildSessionContext
+' - packages/coding-agent/src/core/sdk.ts: createAgentSession
+' - packages/coding-agent/src/core/agent-session.ts: constructor, _buildRuntime, _rebuildSystemPrompt
+' - packages/coding-agent/src/core/system-prompt.ts: buildSystemPrompt
+' - packages/agent/src/agent.ts: createContextSnapshot
+' - packages/agent/src/agent-loop.ts: streamAssistantResponse
+' Source baseline: badlogic/pi-mono commit fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' Observed behavior: file loading is split across model, settings, package, resource,
+' and session services before AgentSession assembles tools and the base system prompt.
+' Design reason: the diagram separates files that configure runtime behavior from
+' content that is ultimately sent to the model.
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultTextAlignment center
+skinparam ArrowColor #475569
+skinparam rectangle {
+  BackgroundColor #F8FAFC
+  BorderColor #64748B
+  FontColor #0F172A
+}
+
+title pi-mono AgentSession Creation and Context Assembly
+
+rectangle "CLI main\nresolve cwd and agentDir" as Main
+
+rectangle "Runtime configuration files" as ConfigFiles {
+  rectangle "settings.json\ntrust.json" as SettingsFiles
+  rectangle "auth.json\nmodels.json\nmodels-store.json" as ModelFiles
+}
+
+rectangle "Prompt and resource files" as ResourceFiles {
+  rectangle "AGENTS.md or CLAUDE.md\nSYSTEM.md\nAPPEND_SYSTEM.md" as PromptFiles
+  rectangle "extensions\nskills\nprompts\nthemes\npackages" as ExtFiles
+}
+
+rectangle "Session JSONL" as SessionFiles
+
+rectangle "SettingsManager\nand trust resolution" as Settings
+rectangle "ModelRuntime" as Models
+rectangle "PackageManager.resolve" as Packages
+rectangle "ResourceLoader.reload" as Loader
+rectangle "SessionManager\nbuildSessionContext" as Sessions
+rectangle "SDK createAgentSession" as SDK
+rectangle "Agent\nblank prompt and tools\nrestored messages" as Agent
+rectangle "AgentSession\nbuild tools and base prompt" as AgentSession
+rectangle "Mode binding\nsession_start and resources_discover" as Binding
+rectangle "Per-turn hooks\ninput and before_agent_start" as Hooks
+rectangle "Agent context snapshot" as Snapshot
+rectangle "Extension context transform\nand convertToLlm" as Transform
+rectangle "Provider Context\nsystemPrompt + messages + tools" as Provider
+
+Main --> Settings
+SettingsFiles --> Settings
+ModelFiles --> Models
+Settings --> Packages
+ExtFiles --> Packages
+Packages --> Loader
+PromptFiles --> Loader
+SessionFiles --> Sessions
+
+Main --> SDK
+Settings --> SDK
+Models --> SDK
+Loader --> SDK
+Sessions --> SDK
+
+SDK --> Agent
+SDK --> AgentSession
+Agent --> AgentSession
+Loader --> AgentSession
+AgentSession --> Binding
+Binding --> AgentSession : may extend resources
+AgentSession --> Hooks
+Hooks --> Snapshot
+Snapshot --> Transform
+Transform --> Provider
+
+note right of Loader
+  Produces parsed extensions, skills,
+  templates, themes, context files,
+  and custom prompt fragments.
+end note
+
+note right of Sessions
+  Produces the selected branch only,
+  with compaction-aware messages,
+  restored model, and thinking level.
+end note
+
+note bottom of Provider
+  settings, auth, themes, packages, and
+  prompt templates are not copied here
+  verbatim. They influence one or more
+  fields through the assembly pipeline.
+end note
+
+@enduml
