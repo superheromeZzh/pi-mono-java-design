@@ -1,51 +1,50 @@
 {
-    "id": "智能体标识",
+    "id": "agent标识",
     "type": "agent",
-    "version": 1,
-    "created_at": "创建时间,2026-07-18T00:00:00Z",
-    "updated_at": "更新时间,2026-07-18T00:00:00Z",
-    "archived_at": "归档时间,2026-07-18T00:00:00Z",
-
-    "name":"智能体名称",
-    "description":"智能体描述",
-    "model":{
-        "id":"模型标识",
-        "speed":"推理速度, standard | fast | null"
+    "version": "agent当前版本。从1开始,每当agent被修改时版本号递增",
+    "created_at": "创建时间",
+    "updated_at": "更新时间",
+    "name":"agent名称",
+    "display_name":"agent展示名称",
+    "description":"agent描述",
+    "model":["model标识"],
+    "system":{
+        "role":"定义agent的身份、专业能力和责任范围",
+        "objective":"定义长期稳定的目标以及什么属于成功结构",
+        "instructions":"定义通用工作原则、优先顺序和行为要求",
+        "tool_policy":"定义什么情况下使用工具、如何验证工具结果，以及何时直接回答",
+        "safety":"定义不可信内容处理、权限边界、以及需要用户确认的高风险操作",
+        "completion":"定义完成条件、自检要求和无法完成时的报告方式",
+        "response_style":"定义默认语言、篇幅、格式和结果汇报方式",
+        "example":"可选。提供高度一致的输出或行为示例"
     },
-    "system":"智能体系统提示词",
+    "use_cases":[
+        "使用场景，用于意图识别"
+    ],
     "tools":[
         {
-            "type":"工具类型, AgentTool | MCPTool",
+            "type":"工具类型， Agent级别的工具，builtin-toolset | mcp-toolset",
             "default_config": {
                 "enabled": "所有工具是否默认启用, true | false",
-                "permission": "工具权限, 自动执行或执行前询问"
+                "permission": "工具权限, always_ask | always_allow"
             },
             "configs": [
                 {
                     "name":"工具名称",
                     "enabled":"工具是否启用, true | false",
-                    "permission":"工具权限, 自动执行或执行前询问"
+                    "permission":"工具权限, always_ask | always_allow"
                 }
             ]
-        }
-    ],
-    "mcp_servers":[
-        {
-            "name":"服务名称, 长度为1-255个字符",
-            "type":"url",
-            "url":"MCP 服务的端点地址"
         }
     ],
     "skills":[
         {
             "skill_id":"技能标识",
-            "type":"技能类型(目前只支持campusmate内置), campusmate | custom",
             "version":"固定的版本。如果省略, 则默认为最新版本"
         }
     ],
-    "metadata":[
-        {
-            "example":"最多16个键值对, key最多64个字符, value最多512个字符, 标记环境development、production, 记录所属团队、业务类型或配置来源"
-        }
-    ]
+    "metadata":{
+        "environment":"prod",
+        "owner_id":"admin"
+    }
 }

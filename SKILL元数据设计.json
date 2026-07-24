@@ -1,18 +1,45 @@
 {
-  "id": "技能标识",
+  "id": "skill标识",
   "type": "skill",
-  "version": 1,
-  "latest_version": "最新版本标识",
-  "created_at": "创建时间,2026-07-18T00:00:00Z",
-  "updated_at": "更新时间,2026-07-18T00:00:00Z",
-  "archived_at": "归档时间,2026-07-18T00:00:00Z",
-
-  "name": "技能名称",
-  "display_title": "技能显示名称",
-  "description": "技能描述",
-  "source": "技能来源, campusmate | custom",
-  "content": "正文",
-  "metadata": {
-    "example": "业务分类、所属团队、适用场景、配置来源等"
-  }
+  "version": "skill当前版本。从1开始,每当skill被修改时版本号递增",
+  "created_at": "创建时间",
+  "updated_at": "更新时间",
+  "name": "skill名称",
+  "display_name": "skill展示名称",
+  "description": "skill描述",
+  "content": {
+      "objective":"定义长期稳定的目标以及什么属于成功结构",
+      "inputs":"定义必要输入，可选输入及默认值，文件格式等",
+      "workflow":"定义核心执行流程",
+      "tool_policy":"定义什么情况下使用工具、如何验证工具结果，以及何时直接回答",
+      "safety":"定义不可信内容处理、权限边界、以及需要用户确认的高风险操作",
+      "completion":"定义完成条件、自检要求和无法完成时的报告方式",
+      "response_style":"定义默认语言、篇幅、格式和结果汇报方式",
+      "example":"可选。提供高度一致的输出或行为示例"
+  },
+  "use_cases":[
+        "使用场景，用于意图识别"
+  ],
+  "tools":[
+    {
+        "type":"工具类型，builtin-toolset | mcp-toolset",
+        "default_config": {
+            "enabled": "所有工具是否默认启用, true | false",
+            "permission": "工具权限, always_ask | always_allow"
+        },
+        "configs": [
+            {
+                "name":"工具名称",
+                "enabled":"工具是否启用, true | false",
+                "permission":"工具权限, always_ask | always_allow"
+            }
+        ]
+    }
+  ],
+  "skills":[
+    {
+        "skill_id":"技能标识",
+        "version":"固定的版本。如果省略, 则默认为最新版本"
+    }
+  ]
 }
