@@ -1,0 +1,386 @@
+' Generated for SR-AGENT-DB-001 on 2026-07-28.
+' Run from this directory: plantuml -tsvg diagram.puml
+' Repository baseline: a3cbc53e32194c03b6a9ddbadae7be37b7822226.
+' Target-only design: there is no corresponding Java implementation in this repository.
+
+@startuml agent_metadata_storage_model
+!pragma layout elk
+title Agent Metadata Storage Model
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam nodesep 35
+skinparam ranksep 45
+skinparam ArrowColor #53657D
+skinparam ClassBorderColor #53657D
+skinparam ClassBackgroundColor #F7F9FC
+skinparam classAttributeIconSize 0
+
+' Source evidence:
+' - Repository-relative path, Git-escaped:
+'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-46.
+' - AGENT metadata fields: id, version, name, display_name, models, system_prompt,
+'   use_cases, binding_tools, binding_skills, and permission.
+' - https://platform.claude.com/docs/en/api/beta/agents
+' - https://platform.claude.com/docs/en/api/beta/agents/versions/list
+' Observed behavior: the local input declares a stable agent identity and a version
+' that increments on modification; Anthropic exposes an agent head and immutable history.
+' Design reason: developer presets and administrator overrides have different owners
+' and must be preserved independently before producing an immutable effective version.
+' Architecture change: normalized child tables make editable and filterable collections
+' queryable while retaining the effective version as the runtime snapshot boundary.
+
+class agent_definition <<root and head>> {
+  tenant_id: String
+  agent_id: String
+  name: String
+  lifecycle_status: ACTIVE | RETIRED
+  current_preset_revision: Long
+  current_override_revision: Long?
+  current_version: Long
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+class agent_preset_revision <<immutable developer input>> {
+  tenant_id: String
+  agent_id: String
+  preset_revision: Long
+  source_kind: String
+  source_revision: String
+  manifest_json: JSONB
+  manifest_sha256: String
+  created_by: String
+  created_at: Timestamp
+}
+
+class agent_override_revision <<immutable admin state>> {
+  tenant_id: String
+  agent_id: String
+  override_revision: Long
+  display_name_override: String?
+  models_override_enabled: Boolean
+  created_by: String
+  reason: String?
+  created_at: Timestamp
+}
+
+class agent_override_model {
+  tenant_id: String
+  agent_id: String
+  override_revision: Long
+  model_id: String
+}
+
+class agent_version <<immutable effective snapshot>> {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  preset_revision: Long
+  override_revision: Long?
+  display_name: String
+  description: String
+  system_prompt: JSONB
+  content_sha256: String
+  runtime_sha256: String
+  change_origin: PRESET | ADMIN | RESTORE
+  created_by: String
+  created_at: Timestamp
+}
+
+class agent_version_model {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  model_id: String
+}
+
+class agent_version_use_case {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  position: Integer
+  use_case: String
+}
+
+class agent_version_tool_binding {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  position: Integer
+  tool_id: String
+  resolution_mode: PINNED | LATEST
+  requested_version: Long?
+}
+
+class agent_version_skill_binding {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  position: Integer
+  skill_id: String
+  resolution_mode: PINNED | LATEST
+  requested_version: Long?
+}
+
+class agent_version_permission {
+  tenant_id: String
+  agent_id: String
+  version: Long
+  tool_id: String
+  effect: DENY | ASK | ALLOW
+}
+
+class agent_write_operation <<idempotency>> {
+  tenant_id: String
+  actor_id: String
+  idempotency_key: String
+  agent_id: String
+  request_sha256: String
+  status: STARTED | SUCCEEDED | FAILED
+  http_status: Integer?
+  response_json: JSONB?
+  lease_expires_at: Timestamp
+  expires_at: Timestamp
+}
+
+class agent_audit_event <<append only>> {
+  tenant_id: String
+  event_id: UUID
+  agent_id: String
+  agent_version: Long
+  action: String
+  actor_id: String
+  request_id: String
+  before_sha256: String?
+  after_sha256: String
+  changed_fields: JSONB
+  created_at: Timestamp
+}
+
+class agent_outbox_event <<transactional outbox>> {
+  tenant_id: String
+  event_id: UUID
+  aggregate_id: String
+  aggregate_version: Long
+  event_type: String
+  payload_json: JSONB
+  created_at: Timestamp
+  published_at: Timestamp?
+}
+
+agent_definition *-- "1..*" agent_preset_revision : owns
+agent_definition *-- "0..*" agent_override_revision : owns
+agent_override_revision *-- "0..*" agent_override_model : replaces model set
+agent_definition *-- "1..*" agent_version : publishes
+agent_preset_revision --> "1..*" agent_version : base
+agent_override_revision --> "0..*" agent_version : overlay
+agent_version *-- "1..*" agent_version_model : allows
+agent_version *-- "0..*" agent_version_use_case : contains
+agent_version *-- "0..*" agent_version_tool_binding : binds
+agent_version *-- "0..*" agent_version_skill_binding : binds
+agent_version *-- "0..*" agent_version_permission : governs
+agent_definition --> agent_write_operation : scopes writes
+agent_version --> agent_audit_event : audited by
+agent_version --> agent_outbox_event : emits
+agent_definition --> agent_outbox_event : emits lifecycle events
+
+note right of agent_definition
+The head row is the lock and compare-and-swap boundary.
+All keys and foreign keys include tenant_id.
+end note
+
+note right of agent_version_model
+models is a non-empty allowlist.
+List order does not imply fallback order.
+end note
+
+note bottom of agent_version
+Sessions and compiled plans pin this concrete version.
+Later preset or admin changes never mutate old snapshots.
+end note
+
+@enduml
+
+@startuml agent_admin_update_sequence
+title Administrator Update with Optimistic Concurrency
+
+autonumber
+hide footbox
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceArrowThickness 1
+skinparam sequenceParticipantBorderColor #53657D
+skinparam sequenceParticipantBackgroundColor #F7F9FC
+skinparam ArrowColor #53657D
+skinparam LifeLineBorderColor #90A0B5
+skinparam responseMessageBelowArrow true
+
+' Source evidence:
+' - Repository-relative path, Git-escaped:
+'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":4,8,10
+'   defines version, display_name, and models.
+' - https://platform.claude.com/docs/en/api/beta/agents/update
+' Observed behavior: Anthropic accepts an optional current version and returns a
+' concurrency error when the supplied version does not match.
+' Design reason: this management API requires If-Match and idempotency because
+' administrator writes must never silently use last-write-wins behavior.
+' Security hardening: tenant scope comes from authenticated context, editable fields
+' are allowlisted, and the model gateway validates every requested model identifier.
+
+actor Administrator
+boundary "Management UI" as UI
+boundary "Agent Admin API" as API
+control "Authorization Service" as Auth
+control "Model Gateway" as ModelGateway
+database "Agent Database\nincluding idempotency" as DB
+control "Agent Version Builder" as Builder
+queue "Outbox Relay" as Relay
+collections "Runtime Cache" as Cache
+
+Administrator -> UI: edit display name or model allowlist
+UI -> API: PATCH /management/v1/agents/{id}\nIf-Match and Idempotency-Key
+activate API
+
+API -> Auth: authorize tenant and field permissions
+Auth --> API: scoped actor
+API -> API: reject unknown or immutable fields
+API -> DB: begin or replay idempotency operation
+
+alt same key with different request digest
+  DB --> API: conflict
+  API --> UI: 409 IDEMPOTENCY_KEY_REUSED
+else completed operation exists
+  DB --> API: stored response
+  API --> UI: replay stored response
+else new operation
+  DB --> API: STARTED lease
+
+  opt models is present
+    API -> ModelGateway: validate unique model IDs and capability
+    ModelGateway --> API: canonical valid model set
+  end
+
+  API -> DB: begin transaction and lock agent_definition
+  DB --> API: current head and version
+
+  alt If-Match is absent
+    API -> DB: rollback
+    API --> UI: 428 PRECONDITION_REQUIRED
+  else If-Match does not equal current version
+    API -> DB: rollback
+    API --> UI: 412 VERSION_MISMATCH
+  else precondition matches
+    API -> Builder: merge current override with PATCH
+    Builder -> Builder: null removes an override
+    Builder -> Builder: merge preset plus complete override
+    Builder -> Builder: canonicalize and hash effective state
+    Builder --> API: candidate snapshot and changed fields
+
+    alt effective content is unchanged
+      API -> DB: complete operation with current response
+      API -> DB: commit without new version
+      API --> UI: 200 current Agent and ETag
+    else effective content changed
+      API -> DB: insert override revision
+      API -> DB: insert effective version and child rows
+      API -> DB: compare-and-swap current head
+      API -> DB: insert audit and outbox events
+      API -> DB: complete operation with new response
+      API -> DB: commit
+      API --> UI: 200 new Agent and ETag
+      Relay -> DB: poll committed outbox event
+      DB --> Relay: AgentVersionChanged
+      Relay -> Cache: invalidate previous agent version
+    end
+  end
+end
+
+deactivate API
+
+@enduml
+
+@startuml agent_preset_reconcile_sequence
+title Developer Preset Reconciliation
+
+autonumber
+hide footbox
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceArrowThickness 1
+skinparam sequenceParticipantBorderColor #53657D
+skinparam sequenceParticipantBackgroundColor #F7F9FC
+skinparam ArrowColor #53657D
+skinparam LifeLineBorderColor #90A0B5
+
+' Source evidence:
+' - Repository-relative path, Git-escaped:
+'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":7-46
+'   contains developer-owned and administrator-editable fields in one resource shape.
+' - Repository commit a3cbc53e32194c03b6a9ddbadae7be37b7822226 has no
+'   corresponding Java provisioning implementation.
+' Target-only design: the provisioner, merge service, and database tables below
+' are proposed components, not observed implementation behavior.
+' Design reason: preserve sparse administrator ownership across developer releases
+' while publishing one immutable effective version for runtime consumers.
+
+actor "Release Pipeline" as Pipeline
+boundary "Preset Provisioning API" as API
+control "Manifest Validator" as Validator
+database "Agent Database" as DB
+control "Agent Version Builder" as Builder
+queue "Outbox Relay" as Relay
+
+Pipeline -> API: PUT /internal/v1/agent-presets/{name}\nsource_revision and canonical manifest
+activate API
+API -> Validator: validate schema and immutable identity
+Validator -> Validator: validate tool and skill references
+Validator -> Validator: validate model IDs and permission precedence
+Validator --> API: canonical manifest and SHA-256
+
+API -> DB: lock agent_definition by tenant and name
+
+alt source revision and hash already exist
+  DB --> API: current result
+  API -> DB: commit read transaction
+  API --> Pipeline: 200 idempotent result
+else new agent
+  API -> DB: insert agent_definition with head pointers = 1
+  API -> DB: insert preset revision 1
+  API -> Builder: build effective version without overrides
+  Builder --> API: effective version 1
+  API -> DB: insert version and child rows
+  API -> DB: insert audit and outbox events
+  API -> DB: commit
+  API --> Pipeline: 201 provisioned agent
+  Relay -> DB: poll committed outbox event
+  DB --> Relay: AgentVersionChanged
+else existing agent with a changed preset
+  DB --> API: current preset, override, and effective version
+  API -> DB: insert next preset revision
+  API -> Builder: merge new preset with current sparse override
+  Builder --> API: candidate effective snapshot
+
+  alt effective content is unchanged
+    API -> DB: update current preset pointer only
+    API -> DB: insert audit and preset outbox event
+    API -> DB: commit
+    API --> Pipeline: 200 preset accepted; agent version unchanged
+    Relay -> DB: poll committed outbox event
+    DB --> Relay: AgentPresetReconciled
+  else effective content changed
+    API -> DB: insert next effective version and child rows
+    API -> DB: update preset and agent head pointers
+    API -> DB: insert audit and outbox events
+    API -> DB: commit
+    API --> Pipeline: 200 new effective agent version
+    Relay -> DB: poll committed outbox event
+    DB --> Relay: AgentVersionChanged
+  end
+end
+
+deactivate API
+
+@enduml
