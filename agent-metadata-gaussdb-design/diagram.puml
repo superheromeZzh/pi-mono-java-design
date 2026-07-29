@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.2.0 on 2026-07-29.
+' Generated for SR-AGENT-DB-001 v0.3.0 on 2026-07-29.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: 0f1a1a384a35bd70d60bdfba81b7f584b5aa2e69.
+' Repository baseline: c75db250c51f7159789a7638d6cf955c18608890.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
@@ -11,8 +11,8 @@ top to bottom direction
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
 skinparam roundcorner 8
-skinparam nodesep 35
-skinparam ranksep 45
+skinparam nodesep 45
+skinparam ranksep 50
 skinparam ArrowColor #53657D
 skinparam ClassBorderColor #53657D
 skinparam ClassBackgroundColor #F7F9FC
@@ -21,32 +21,34 @@ skinparam classAttributeIconSize 0
 ' Source evidence:
 ' - Repository-relative path, Git-escaped:
 '   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-46.
-' - Fields at lines 2-20 map to agent_metadata.
-' - Arrays at lines 10 and 21-35 map to ordered child tables.
-' - Permission arrays at lines 36-46 map to one effect row per tool.
+' - Fields at lines 2-23 map to agent_metadata; use_cases is JSONB.
+' - models at line 10 maps to the only ordered child table.
+' - Tool binding and permission fields at lines 24-29 and 36-46 are merged.
+' - Skill bindings at lines 30-35 have no order column.
 ' Observed behavior: the current JSON is a current-state Agent resource with a
 ' monotonically increasing version and no separate history resource.
-' Design reason: fixed scalar and system prompt fields use typed columns, while
-' repeated arrays use child tables for uniqueness, filtering, and stable order.
-' Product constraint: only the fields present in the current JSON are persisted.
+' Design reason: fixed scalar and system prompt fields use typed columns,
+' use_cases remains one JSON array, and independently queried references use tables.
+' Product constraint: only model order is persisted; Tool and Skill order is not.
 ' GaussDB divergence: physical foreign keys are optional because GaussDB
 ' Distributed does not support them; the base DDL uses logical relationships.
 
 class agent_metadata <<current Agent>> {
-  agent_id: VARCHAR PK
+  id: VARCHAR PK
   resource_type: VARCHAR
   version: BIGINT
   name: VARCHAR UK
   display_name: VARCHAR
   description: TEXT
-  system_role: TEXT
-  system_objective: TEXT
-  system_instructions: TEXT
-  system_tool_policy: TEXT
-  system_safety: TEXT
-  system_completion: TEXT
-  system_response_style: TEXT
-  system_example: TEXT?
+  role: TEXT
+  objective: TEXT
+  instructions: TEXT
+  tool_policy: TEXT
+  safety: TEXT
+  completion: TEXT
+  response_style: TEXT
+  example: TEXT?
+  use_cases: JSONB
   created_at: TIMESTAMPTZ
   updated_at: TIMESTAMPTZ
 }
@@ -57,52 +59,44 @@ class agent_model <<models>> {
   sort_order: INTEGER UK
 }
 
-class agent_use_case <<use_cases>> {
-  agent_id: VARCHAR PK
-  sort_order: INTEGER PK
-  use_case: TEXT
-}
-
-class agent_tool_binding <<binding_tools>> {
+class agent_tool_binding <<binding_tools and permission>> {
   agent_id: VARCHAR PK
   tool_id: VARCHAR PK
   tool_version: BIGINT?
-  sort_order: INTEGER UK
+  permission: deny | ask | allow | NULL
 }
 
 class agent_skill_binding <<binding_skills>> {
   agent_id: VARCHAR PK
   skill_id: VARCHAR PK
   skill_version: BIGINT?
-  sort_order: INTEGER UK
-}
-
-class agent_tool_permission <<permission>> {
-  agent_id: VARCHAR PK
-  tool_id: VARCHAR PK
-  permission_effect: deny | ask | allow
 }
 
 agent_metadata *-- "1..*" agent_model : has
-agent_metadata *-- "0..*" agent_use_case : describes
-agent_metadata *-- "0..*" agent_tool_binding : binds
+agent_metadata *-- "0..*" agent_tool_binding : binds and governs
 agent_metadata *-- "0..*" agent_skill_binding : binds
-agent_metadata *-- "0..*" agent_tool_permission : governs
 
 note right of agent_metadata
+name and display_name are VARCHAR(128).
+use_cases is a JSON array.
 version is the optimistic-lock value.
-Every successful metadata update increments it once.
 end note
 
-note right of agent_tool_binding
+note right of agent_model
+Only models preserves JSON array order.
+model_id is VARCHAR(64).
+end note
+
+note bottom of agent_tool_binding
+tool_id is VARCHAR(64).
 NULL tool_version means latest.
-The same rule applies to skill_version.
+NULL permission means inherit Tool permission.
+Every permission Tool must also be bound.
 end note
 
-note bottom of agent_tool_permission
-One row replaces the three JSON arrays.
-The primary key prevents conflicting effects
-for the same Agent and Tool.
+note bottom of agent_skill_binding
+skill_id is VARCHAR(64).
+NULL skill_version means latest.
 end note
 
 note bottom of agent_metadata
