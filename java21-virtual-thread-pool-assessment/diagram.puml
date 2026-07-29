@@ -1,0 +1,68 @@
+' Oracle source:
+' https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html
+' Section: Represent Every Concurrent Task as a Virtual Thread; Never Pool Virtual Threads
+' pi-mono-java source baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java:60-61,245-253
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java:178-207
+' Observed behavior: Agent runs and parallel tool calls already use one new virtual thread per task.
+' Target-only design: admission gates and optional reusable business-resource pools are proposed additions.
+' Design reason: concurrency limits protect scarce downstream resources; virtual threads are not scarce resources.
+' Architecture change: replace the requested reusable virtual-thread pool with runtime capacity governance.
+
+@startuml recommended_virtual_thread_capacity_model
+title Recommended Agent Runtime Capacity Model on Java 21
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+
+actor "Agent Request" as request
+
+rectangle "Agent Runtime Capacity Manager" {
+  component "Admission Gate\nSemaphore / bounded wait" as gate
+  component "Virtual-Thread-Per-Task\nExecutorService" as executor
+  component "New Virtual Thread\nfor this task only" as vthread
+  component "Agent Loop" as loop
+}
+
+rectangle "Scarce Downstream Capacity" {
+  component "Model Provider" as model
+  component "Tool / Sandbox" as tool
+  database "Database / MCP" as data
+}
+
+rectangle "Optional Reusable Business Resources" {
+  component "Resource Pool\nwarm-up / grow / idle reclaim" as resourcePool
+  component "Maintenance Scheduler\nplatform thread" as maintenance
+}
+
+cloud "JDK Virtual Thread Scheduler" as scheduler
+component "Carrier Platform Threads\nmanaged by the JDK" as carriers
+
+request --> gate : acquire capacity
+gate --> executor : accepted task
+executor --> vthread : create once
+vthread --> loop : run to completion
+loop --> model : bounded call
+loop --> tool : bounded call
+loop --> data : bounded call
+loop ..> resourcePool : borrow only if reuse is proven safe
+maintenance --> resourcePool : optional lifecycle maintenance
+vthread ..> scheduler : scheduled by JDK
+scheduler --> carriers : mount / unmount
+
+note right of executor
+  Do not preload, retain,
+  or reuse virtual threads.
+end note
+
+note bottom of gate
+  Limit concurrency where
+  the scarce resource exists.
+end note
+
+note bottom of resourcePool
+  Pool resources, not threads.
+  This component is conditional.
+end note
+@enduml
