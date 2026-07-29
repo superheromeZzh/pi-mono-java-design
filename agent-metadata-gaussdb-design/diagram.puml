@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.3.0 on 2026-07-29.
+' Generated for SR-AGENT-DB-001 v0.4.0 on 2026-07-29.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: c75db250c51f7159789a7638d6cf955c18608890.
+' Repository baseline: 027ca1ed43343cc68af5984f17e7d362b7a31a87.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
@@ -20,11 +20,11 @@ skinparam classAttributeIconSize 0
 
 ' Source evidence:
 ' - Repository-relative path, Git-escaped:
-'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-46.
-' - Fields at lines 2-23 map to agent_metadata; use_cases is JSONB.
-' - models at line 10 maps to the only ordered child table.
-' - Tool binding and permission fields at lines 24-29 and 36-46 are merged.
-' - Skill bindings at lines 30-35 have no order column.
+'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-47.
+' - Fields at lines 2-24 map to agent_metadata; enabled is Boolean.
+' - models at line 11 maps to the only ordered child table.
+' - Tool binding and permission fields at lines 25-30 and 37-47 are merged.
+' - Skill bindings at lines 31-36 have no order column.
 ' Observed behavior: the current JSON is a current-state Agent resource with a
 ' monotonically increasing version and no separate history resource.
 ' Design reason: fixed scalar and system prompt fields use typed columns,
@@ -37,6 +37,7 @@ class agent_metadata <<current Agent>> {
   id: VARCHAR PK
   resource_type: VARCHAR
   version: BIGINT
+  enabled: BOOLEAN
   name: VARCHAR UK
   display_name: VARCHAR
   description: TEXT
@@ -80,6 +81,7 @@ note right of agent_metadata
 name and display_name are VARCHAR(128).
 use_cases is a JSON array.
 version is the optimistic-lock value.
+enabled gates new runtime invocations.
 end note
 
 note right of agent_model

@@ -1,10 +1,10 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.3.0`<br>
+> 版本：`v0.4.0`<br>
 > 日期：`2026-07-29`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`c75db250c51f7159789a7638d6cf955c18608890`<br>
+> 仓库基线：`027ca1ed43343cc68af5984f17e7d362b7a31a87`<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
@@ -19,6 +19,7 @@
 本版采用以下字段规则：
 
 - 主表主键使用 `id`，与元数据顶层 `id` 对齐。
+- `enabled` 使用 `BOOLEAN NOT NULL DEFAULT TRUE`。
 - `name`、`display_name` 都使用 `VARCHAR(128)`。
 - System Prompt 展开列去掉 `system_` 前缀，使用 `role`、`objective`、`instructions` 等名称。
 - `model_id`、`tool_id`、`skill_id` 统一使用 `VARCHAR(64)`。
@@ -33,15 +34,16 @@
 当前工作区 JSON 的 SHA-256：
 
 ```text
-7c7ef5ada3bd5ef4e33c411b323392ee7032ba2f54de8cece401e9c47501b05a
+c2b7c9f5046cf94c3cf7e042642609c181b41b50f6ff8ebf70bce4f457977fff
 ```
 
 字段来源：
 
 - `id`、`type`、`version`、时间字段：[第 2–6 行](../AGENT元数据设计.json#L2)。
-- `name`、`display_name`、`description`、`models`：[第 7–10 行](../AGENT元数据设计.json#L7)。
-- `system_prompt`：[第 11–20 行](../AGENT元数据设计.json#L11)。
-- `use_cases`、Tool/Skill 绑定与权限：[第 21–46 行](../AGENT元数据设计.json#L21)。
+- `enabled`：[第 7 行](../AGENT元数据设计.json#L7)。
+- `name`、`display_name`、`description`、`models`：[第 8–11 行](../AGENT元数据设计.json#L8)。
+- `system_prompt`：[第 12–21 行](../AGENT元数据设计.json#L12)。
+- `use_cases`、Tool/Skill 绑定与权限：[第 22–47 行](../AGENT元数据设计.json#L22)。
 
 本文只保存当前 JSON 中的字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。
 
@@ -62,6 +64,7 @@ PlantUML：[查看源码](./diagram.puml#L6)
 | `id` | `id` | `VARCHAR(64)` | 否 | 主键；与元数据对齐 |
 | `type` | `resource_type` | `VARCHAR(16)` | 否 | 固定为 `agent` |
 | `version` | `version` | `BIGINT` | 否 | 从 1 开始的乐观锁版本 |
+| `enabled` | `enabled` | `BOOLEAN` | 否 | 是否允许新的运行时调用；默认启用 |
 | `name` | `name` | `VARCHAR(128)` | 否 | 内部稳定名称；唯一 |
 | `display_name` | `display_name` | `VARCHAR(128)` | 否 | 与 `name` 类型一致 |
 | `description` | `description` | `TEXT` | 否 | Agent 描述 |
@@ -77,7 +80,27 @@ PlantUML：[查看源码](./diagram.puml#L6)
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
 
-### 4.2 `use_cases` JSONB
+### 4.2 `enabled` 语义
+
+`enabled` 是 Agent 的可用状态，不是权限字段：
+
+- `TRUE`：Agent 可被新的运行时请求选择和调用。
+- `FALSE`：管理面仍可查询和更新，但运行时不得接受新的调用。
+- 禁用不删除 Agent、模型、Tool、Skill 或权限配置。
+- 已经开始的任务是否中止不由该字段隐式决定；V1 只在新调用入口校验。
+
+数据库使用 `NOT NULL DEFAULT TRUE`。`DEFAULT TRUE` 用于兼容存量 Agent，API 创建和更新时仍应传递明确的布尔值。启停更新必须与其他可编辑字段一样更新 `version` 和 `updated_at`。
+
+如果已经按 `v0.3.0` 建表，兼容迁移为：
+
+```sql
+ALTER TABLE agent_metadata
+    ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE;
+```
+
+`enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_agent_metadata_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
+
+### 4.3 `use_cases` JSONB
 
 保存形式与元数据一致：
 
@@ -241,6 +264,7 @@ COMMIT
 
 - `version = 1`。
 - `resource_type = 'agent'`。
+- `enabled` 必须为布尔值；存量数据迁移时默认设为 `TRUE`。
 - `name` 唯一。
 - 至少一个模型。
 - Tool/Skill 版本为空或大于等于 1。
@@ -259,7 +283,20 @@ WHERE id = :id
 
 受影响一行表示成功；零行表示 Agent 不存在或版本冲突。
 
-### 9.3 更新 `models`
+### 9.3 更新 `enabled`
+
+```sql
+UPDATE agent_metadata
+SET enabled = :enabled,
+    version = version + 1,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :id
+  AND version = :expected_version;
+```
+
+禁用接口不执行物理删除。管理查询返回禁用 Agent；运行时读取必须增加 `enabled = TRUE` 条件。受影响行为和版本冲突处理与更新 `display_name` 相同。
+
+### 9.4 更新 `models`
 
 ```text
 BEGIN
@@ -281,13 +318,13 @@ BEGIN
 COMMIT
 ```
 
-一次请求同时修改展示名和模型时，`version` 只增加一次。
+一次请求同时修改启停状态、展示名和模型时，`version` 只增加一次。
 
 ## 10. 查询完整 Agent
 
 查询步骤：
 
-1. 按 `agent_metadata.id` 查询主表。
+1. 管理面按 `agent_metadata.id` 查询主表，不过滤 `enabled`；运行时增加 `enabled = TRUE`。
 2. 查询 `agent_model`，按 `sort_order` 还原 `models[]`。
 3. 查询 `agent_tool_binding`，按 `tool_id` 排序并生成 `binding_tools[]`。
 4. 按非空 `permission` 分组，生成 `deny`、`ask`、`allow`。
@@ -301,7 +338,7 @@ COMMIT
 
 | 对象 | 用途 |
 |---|---|
-| `agent_metadata` | Agent 当前标量字段、System Prompt 和 Use Cases |
+| `agent_metadata` | Agent 当前标量字段、启停状态、System Prompt 和 Use Cases |
 | `uk_agent_metadata_name` | 保证 `name` 唯一 |
 | `idx_agent_metadata_display_name` | 展示名查询 |
 | `idx_agent_metadata_updated_at` | 管理列表排序 |
@@ -328,6 +365,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.4.0` | 2026-07-29 | 增加 `enabled BOOLEAN NOT NULL DEFAULT TRUE`；定义管理面、运行时、乐观锁和存量迁移语义 |
 | `v0.3.0` | 2026-07-29 | 主表 ID 对齐元数据；`display_name` 改为 `VARCHAR(128)`；System Prompt 列去掉 `system_` 前缀；Model/Tool/Skill ID 统一为 `VARCHAR(64)`；`use_cases` 改为主表 JSONB；仅 Model 保留顺序；合并 Tool 绑定与权限 |
 | `v0.2.0` | 2026-07-29 | 按当前 Agent JSON 收敛为 1 张主表和 5 张数组子表；增加 GaussDB DDL |
 | `v0.1.0` | 2026-07-28 | 初版包含研发 Preset、管理 Override、有效版本、管理 API、审计与 Outbox 等扩展设计 |

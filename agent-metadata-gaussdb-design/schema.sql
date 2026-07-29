@@ -1,4 +1,4 @@
--- SR-AGENT-DB-001 v0.3.0
+-- SR-AGENT-DB-001 v0.4.0
 -- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
 -- The base DDL intentionally omits physical foreign keys so it can be used
 -- with GaussDB Distributed. The service maintains logical relationships in
@@ -8,6 +8,7 @@ CREATE TABLE agent_metadata (
     id              VARCHAR(64)  NOT NULL,
     resource_type   VARCHAR(16)  NOT NULL DEFAULT 'agent',
     version         BIGINT       NOT NULL DEFAULT 1,
+    enabled         BOOLEAN      NOT NULL DEFAULT TRUE,
     name            VARCHAR(128) NOT NULL,
     display_name    VARCHAR(128) NOT NULL,
     description     TEXT         NOT NULL,
@@ -33,10 +34,11 @@ CREATE TABLE agent_metadata (
     )
 );
 
-COMMENT ON TABLE agent_metadata IS 'Agent current metadata, system prompt fields, and use cases';
+COMMENT ON TABLE agent_metadata IS 'Agent current metadata, availability, system prompt fields, and use cases';
 COMMENT ON COLUMN agent_metadata.id IS 'Stable Agent identifier mapped directly from JSON id';
 COMMENT ON COLUMN agent_metadata.resource_type IS 'Resource type mapped from JSON type; fixed to agent';
 COMMENT ON COLUMN agent_metadata.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
+COMMENT ON COLUMN agent_metadata.enabled IS 'Whether the Agent accepts new runtime invocations; disabled Agents remain manageable';
 COMMENT ON COLUMN agent_metadata.name IS 'Stable internal Agent name; unique and not editable in the management UI';
 COMMENT ON COLUMN agent_metadata.display_name IS 'Human-readable Agent name; editable in the management UI';
 COMMENT ON COLUMN agent_metadata.description IS 'Agent description';
