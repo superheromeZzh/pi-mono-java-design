@@ -1,0 +1,295 @@
+@startuml metadata_runtime_directory_mapping
+title Metadata to Managed Agent Runtime Directory
+
+' Source evidence:
+' pi-mono packages/coding-agent/src/core/skills.ts: Skill, loadSkillFromFile, formatSkillsForPrompt
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/context/ContextFileLoader.java: loadSystemPrompt
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java: loadSkills
+' Observed behavior: pi and pi-mono-java discover Skill metadata from SKILL.md frontmatter.
+' Java divergence: the target compiler materializes only one controlled Agent directory.
+' Design reason: keep Agent-specific disclosure local while Managers remain runtime authorities.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam rectangle {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam database {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+  FontColor #0F172A
+}
+skinparam file {
+  BackgroundColor #F0FDF4
+  BorderColor #16A34A
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+
+rectangle "Resolved metadata input" as Input {
+  rectangle "AGENT\nid, system_prompt\nmodels, bindings, policy" as AgentMetadata
+  rectangle "SKILL\nname, description, content\nskill and tool bindings" as SkillMetadata
+  rectangle "TOOL\nid, name, description\nschema, source, permission" as ToolMetadata
+}
+
+rectangle "Runtime bundle compiler" as Compiler {
+  rectangle "Validate versions,\ndependency closure,\nnames and permissions" as Validate
+  rectangle "Render prompt and\nSkill resources" as Render
+  rectangle "Publish Agent directory\natomically" as Publish
+}
+
+rectangle "Controlled Agent directory\n<agent-runtime-root>/<agent-id>/" as AgentDirectory {
+  file ".campusclaw/SYSTEM.md\nAgent instructions\nDirect Agent tool summaries" as SystemFile
+  file ".campusclaw/skills/<skill-name>/SKILL.md\nFrontmatter and Skill content" as SkillFile
+  file ".campusclaw/skills/<skill-name>/references/tools.json\nDirect Skill tool summaries" as SkillToolsFile
+}
+
+database "Agent metadata authority\nAgent model and binding policy" as AgentAuthority
+database "Tool Manager authority\nTool schema, status,\npermission and execution" as ToolManager
+database "Model Manager authority\nModel descriptor,\nallowlist and invocation" as ModelManager
+file "<user-agent-dir>/sessions/<agent-id>/\n<conversation-id>.jsonl" as SessionFile
+
+AgentMetadata --> Validate
+SkillMetadata --> Validate
+ToolMetadata --> Validate
+Validate --> Render
+Render --> Publish
+Publish --> SystemFile : system_prompt and direct tools
+Publish --> SkillFile : name, description and content
+Publish --> SkillToolsFile : direct Skill tools
+
+AgentMetadata ..> AgentAuthority : publish metadata
+ToolMetadata ..> ToolManager : publish executable definition
+AgentMetadata ..> ModelManager : authorize model ids
+AgentDirectory ..> SessionFile : cwd and Agent isolation
+
+note right of SkillToolsFile
+Only tool_id, name and description.
+Schemas stay in Tool Manager.
+Child Skill tools are not merged.
+end note
+@enduml
+
+@startuml managed_session_context_assembly
+title Managed Multi-Agent Session and Context Assembly
+
+' Source evidence:
+' pi-mono packages/ai/src/types.ts: Context
+' pi-mono packages/coding-agent/src/core/system-prompt.ts: buildSystemPrompt
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java: initialize
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java: getOrCreate
+' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java: invokeModel, toLlmTools
+' Observed behavior: Java currently uses one base cwd and keys the in-memory pool by conversation id.
+' Java divergence: the target derives cwd from agent_id and keys sessions by Agent and conversation.
+' Design reason: prevent prompt, model, tool and persistence leakage across Agents in one JVM.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam participant {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+skinparam sequence {
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor Client
+participant "WebSocket route" as WS
+participant "AgentDirectoryResolver" as Resolver
+participant "ManagedSessionPool" as Pool
+participant "ManagedAgentSessionFactory" as Factory
+participant "Model Manager" as ModelManager
+participant "AgentSession" as Session
+participant "AgentLoop" as Loop
+database "User session store" as Store
+
+Client -> WS : connect(agent_id, model_id?, conversation_id?)
+WS -> Resolver : resolve(agent_id)
+Resolver -> Resolver : normalize and verify controlled root
+Resolver --> WS : agentCwd
+WS -> Pool : getOrCreate(agent_id, conversation_id)
+
+alt new conversation
+  Pool -> ModelManager : resolveModel(agent_id, model_id)
+  ModelManager --> Pool : ModelDescriptor
+else resume conversation
+  Pool -> Store : load(agent_id, conversation_id)
+  Store --> Pool : messages and saved model_id
+  Pool -> ModelManager : resolveModel(agent_id, effective model_id)
+  ModelManager --> Pool : current ModelDescriptor
+end
+
+Pool -> Factory : create(agent_id, conversation_id,\nagentCwd, descriptor, restored messages)
+Factory -> Factory : load controlled SYSTEM.md and Skills
+Factory -> Factory : register read, get_tool_info, call_tool
+Factory -> Session : initialize isolated Session
+Session -> Loop : systemPrompt, messages, AgentTools
+Loop -> Loop : map AgentTools to Context.tools
+Loop --> Pool : ready
+Pool --> WS : conversation_id
+WS --> Client : connected
+
+note over Factory,Loop
+Managed prompt inputs:
+Agent SYSTEM, three generic tools,
+native Skill summaries, and cwd only.
+end note
+
+note over Pool,Store
+Isolation key:
+(agent_id, conversation_id)
+end note
+@enduml
+
+@startuml progressive_tool_discovery_execution
+title Progressive Tool Discovery and Execution
+
+' Source evidence:
+' pi-mono packages/coding-agent/src/core/skills.ts: formatSkillsForPrompt
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/skill/SkillPromptFormatter.java: format
+' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/tool/AgentTool.java: AgentTool
+' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java: toLlmTools
+' Observed behavior: Java sends every registered AgentTool name, description and schema to the model.
+' Architecture change: business tools are disclosed as logical ids and executed by two generic tools.
+' Design reason: Tool Manager owns live schema, authorization and execution without dynamic registration.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam participant {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+skinparam sequence {
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor User
+participant Model
+participant "read" as Read
+participant "get_tool_info" as GetInfo
+participant "call_tool" as CallTool
+database "Agent SYSTEM.md" as AgentSystem
+database "Skill files" as SkillFiles
+participant "Tool Manager" as ToolManager
+database "Agent metadata authority" as AgentAuthority
+
+Model -> AgentSystem : receive direct Agent tool summaries\nin system prompt
+
+alt task matches a Skill
+  Model -> Read : read(SKILL.md)
+  Read -> SkillFiles : load Skill content
+  SkillFiles --> Read : instructions
+  Read --> Model : Skill instructions
+  opt Skill needs an external operation
+    Model -> Read : read(references/tools.json)
+    Read -> SkillFiles : load direct Skill tool summaries
+    SkillFiles --> Read : tool_id, name, description
+    Read --> Model : logical Skill tools
+  end
+end
+
+Model -> GetInfo : get_tool_info(tool_id)
+GetInfo -> ToolManager : getToolInfo(agent_id, tool_id)
+ToolManager -> AgentAuthority : validate Agent binding and policy
+AgentAuthority --> ToolManager : authorized binding
+ToolManager --> GetInfo : live description and schemas
+GetInfo --> Model : tool metadata
+
+Model -> CallTool : call_tool(tool_id, parameters)
+CallTool -> ToolManager : callTool(agent_id, conversation_id,\ntool_id, parameters)
+ToolManager -> AgentAuthority : revalidate binding and permission
+AgentAuthority --> ToolManager : current policy
+ToolManager -> ToolManager : validate status and input schema
+ToolManager -> ToolManager : execute and validate output
+ToolManager --> CallTool : result or structured error
+CallTool --> Model : Tool result
+Model --> User : final response
+
+note over GetInfo,CallTool
+Their descriptions define the protocol:
+discover the live schema before execution.
+Prompt disclosure never grants permission.
+end note
+@enduml
+
+@startuml model_manager_streaming_flow
+title Model Manager Provider Streaming Flow
+
+' Source evidence:
+' pi-mono packages/ai/src/types.ts: Model, Context, AssistantMessageEvent
+' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/provider/ApiProvider.java: ApiProvider
+' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/provider/ApiProviderRegistry.java: ApiProviderRegistry
+' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/types/SimpleStreamOptions.java: metadata
+' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java: event records
+' Observed behavior: Java dispatches by Model.api to a Spring-discovered ApiProvider.
+' Architecture change: one MODEL_MANAGER Api routes every managed model through Model Manager.
+' Design reason: model_id selects the model while agent_id authorizes it for the current Agent.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam participant {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+skinparam sequence {
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor Client
+participant "AgentLoop" as Loop
+participant "CampusClawAiService" as AiService
+participant "ApiProviderRegistry" as Registry
+participant "ModelManagerApiProvider" as Provider
+participant "Model Manager" as ModelManager
+
+Client -> Loop : prompt
+Loop -> AiService : stream(model, Context, options)
+AiService -> Registry : getProvider(MODEL_MANAGER)
+Registry --> AiService : ModelManagerApiProvider
+AiService -> Provider : streamSimple(model, Context, metadata)
+Provider -> Provider : require immutable agent_id\nand conversation_id
+Provider -> ModelManager : invoke(agent_id, model.id,\nContext, mapped options)
+ModelManager -> ModelManager : revalidate Agent model binding
+
+loop stream events
+  ModelManager --> Provider : start, content delta,\ntool call, done or error
+  Provider --> Loop : AssistantMessageEvent
+end
+
+alt client cancels
+  Client -> Loop : abort
+  Loop -> Provider : cancel subscription
+  Provider -> ModelManager : close stream
+end
+
+note over Provider,ModelManager
+The Provider maps events only.
+Tool execution remains in AgentLoop.
+No fallback to built-in providers.
+end note
+@enduml
