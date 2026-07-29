@@ -10,7 +10,7 @@
 - [主流 Agent 平台 Agent、Tool 与 Skill 创建官方文档](./主流Agent平台Agent-Tool-Skill创建官方文档.md)
 - [Anthropic Managed Agents 公开模型](./anthropic-managed-agents-public-model/README.md)
 - [主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界](./agent-database-patterns/README.md)
-- [研发预置 Agent 元数据数据库与管理面 API 设计](./agent-metadata-admin-design/README.md)
+- [Agent 元数据 GaussDB 表设计](./agent-metadata-gaussdb-design/README.md)
 - [pi-mono Java ToB 记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
 
 ## 约定

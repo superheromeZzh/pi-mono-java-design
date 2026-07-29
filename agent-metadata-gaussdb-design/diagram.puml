@@ -1,0 +1,115 @@
+' Generated for SR-AGENT-DB-001 v0.2.0 on 2026-07-29.
+' Run from this directory: plantuml -tsvg diagram.puml
+' Repository baseline: 0f1a1a384a35bd70d60bdfba81b7f584b5aa2e69.
+' Target-only design: no corresponding database implementation exists in this repository.
+
+@startuml agent_metadata_gaussdb_model
+!pragma layout elk
+title Agent Metadata GaussDB Tables
+top to bottom direction
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam nodesep 35
+skinparam ranksep 45
+skinparam ArrowColor #53657D
+skinparam ClassBorderColor #53657D
+skinparam ClassBackgroundColor #F7F9FC
+skinparam classAttributeIconSize 0
+
+' Source evidence:
+' - Repository-relative path, Git-escaped:
+'   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-46.
+' - Fields at lines 2-20 map to agent_metadata.
+' - Arrays at lines 10 and 21-35 map to ordered child tables.
+' - Permission arrays at lines 36-46 map to one effect row per tool.
+' Observed behavior: the current JSON is a current-state Agent resource with a
+' monotonically increasing version and no separate history resource.
+' Design reason: fixed scalar and system prompt fields use typed columns, while
+' repeated arrays use child tables for uniqueness, filtering, and stable order.
+' Product constraint: only the fields present in the current JSON are persisted.
+' GaussDB divergence: physical foreign keys are optional because GaussDB
+' Distributed does not support them; the base DDL uses logical relationships.
+
+class agent_metadata <<current Agent>> {
+  agent_id: VARCHAR PK
+  resource_type: VARCHAR
+  version: BIGINT
+  name: VARCHAR UK
+  display_name: VARCHAR
+  description: TEXT
+  system_role: TEXT
+  system_objective: TEXT
+  system_instructions: TEXT
+  system_tool_policy: TEXT
+  system_safety: TEXT
+  system_completion: TEXT
+  system_response_style: TEXT
+  system_example: TEXT?
+  created_at: TIMESTAMPTZ
+  updated_at: TIMESTAMPTZ
+}
+
+class agent_model <<models>> {
+  agent_id: VARCHAR PK
+  model_id: VARCHAR PK
+  sort_order: INTEGER UK
+}
+
+class agent_use_case <<use_cases>> {
+  agent_id: VARCHAR PK
+  sort_order: INTEGER PK
+  use_case: TEXT
+}
+
+class agent_tool_binding <<binding_tools>> {
+  agent_id: VARCHAR PK
+  tool_id: VARCHAR PK
+  tool_version: BIGINT?
+  sort_order: INTEGER UK
+}
+
+class agent_skill_binding <<binding_skills>> {
+  agent_id: VARCHAR PK
+  skill_id: VARCHAR PK
+  skill_version: BIGINT?
+  sort_order: INTEGER UK
+}
+
+class agent_tool_permission <<permission>> {
+  agent_id: VARCHAR PK
+  tool_id: VARCHAR PK
+  permission_effect: deny | ask | allow
+}
+
+agent_metadata *-- "1..*" agent_model : has
+agent_metadata *-- "0..*" agent_use_case : describes
+agent_metadata *-- "0..*" agent_tool_binding : binds
+agent_metadata *-- "0..*" agent_skill_binding : binds
+agent_metadata *-- "0..*" agent_tool_permission : governs
+
+note right of agent_metadata
+version is the optimistic-lock value.
+Every successful metadata update increments it once.
+end note
+
+note right of agent_tool_binding
+NULL tool_version means latest.
+The same rule applies to skill_version.
+end note
+
+note bottom of agent_tool_permission
+One row replaces the three JSON arrays.
+The primary key prevents conflicting effects
+for the same Agent and Tool.
+end note
+
+note bottom of agent_metadata
+Base DDL omits physical foreign keys for
+GaussDB Distributed compatibility.
+The service writes the root and child rows
+in one transaction.
+end note
+
+@enduml
