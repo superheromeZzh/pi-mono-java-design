@@ -82,10 +82,13 @@ title Managed Multi-Agent Session and Context Assembly
 ' pi-mono packages/coding-agent/src/core/system-prompt.ts: buildSystemPrompt
 ' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java: initialize
 ' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java: getOrCreate
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java: websocket route
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java: handle
 ' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java: invokeModel, toLlmTools
-' Observed behavior: Java currently uses one base cwd and keys the in-memory pool by conversation id.
-' Java divergence: the target derives cwd from agent_id and keys sessions by Agent and conversation.
-' Design reason: prevent prompt, model, tool and persistence leakage across Agents in one JVM.
+' Observed behavior: Java currently reads conversation_id during Upgrade and uses one base cwd.
+' Java divergence: v2 authenticates Upgrade, binds Agent and conversation in the connect frame,
+' and atomically subscribes to an independently owned run after Session assembly.
+' Design reason: isolate prompt, model, tool, persistence, and run recovery across Agents.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -105,16 +108,21 @@ skinparam sequence {
 }
 
 actor Client
-participant "WebSocket route" as WS
+participant "Upgrade auth" as Auth
+participant "WebSocket v2" as WS
 participant "AgentDirectoryResolver" as Resolver
 participant "ManagedSessionPool" as Pool
 participant "ManagedAgentSessionFactory" as Factory
 participant "Model Manager" as ModelManager
 participant "AgentSession" as Session
 participant "AgentLoop" as Loop
+participant "ManagedRunHub" as Hub
 database "User session store" as Store
 
-Client -> WS : connect(agent_id, model_id?, conversation_id?)
+Client -> Auth : Upgrade /api/ws/chat\nCookie or Authorization Bearer
+Auth -> Auth : validate identity and browser Origin
+Auth --> WS : immutable connection auth context
+Client -> WS : req connect\nagent_id, conversation_id?, model_id?
 WS -> Resolver : resolve(agent_id)
 Resolver -> Resolver : normalize and verify controlled root
 Resolver --> WS : agentCwd
@@ -137,8 +145,12 @@ Factory -> Session : initialize isolated Session
 Session -> Loop : systemPrompt, messages, AgentTools
 Loop -> Loop : map AgentTools to Context.tools
 Loop --> Pool : ready
-Pool --> WS : conversation_id
-WS --> Client : connected
+Pool -> Hub : get active run for SessionKey
+Hub -> Hub : atomically subscribe and capture snapshot
+Hub --> WS : cursor and active_run snapshot
+WS --> Client : res connect with conversation_id,\nmodel, limits, and active_run
+Hub --> WS : events after snapshot cursor
+WS --> Client : ordered structured deltas
 
 note over Factory,Loop
 Managed prompt inputs:
@@ -149,6 +161,8 @@ end note
 note over Pool,Store
 Isolation key:
 (agent_id, conversation_id)
+The run is owned by Pool and Hub,
+not by the WebSocket connection.
 end note
 @enduml
 
@@ -230,6 +244,117 @@ Prompt disclosure never grants permission.
 end note
 @enduml
 
+@startuml managed_websocket_session_protocol
+title Managed WebSocket Session Protocol
+
+' Source evidence:
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java: websocket route
+' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java: handle, onAgentEvent
+' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/event/MessageUpdateEvent.java: message, assistantMessageEvent
+' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java: typed deltas
+' openclaw docs/gateway/protocol.md: connect and req/res/event frames
+' openclaw packages/gateway-protocol/src/schema/logs-chat.ts: ChatEvent
+' openclaw src/gateway/server-broadcast.ts: per-client sequence and backpressure
+' Observed behavior: Java v1 captures one Session per connection, emits cumulative Message updates,
+' and aborts AgentSession when the WebSocket closes.
+' Java divergence: v2 emits structured deltas and keeps the active run in ManagedSessionPool.
+' Architecture change: one connection is scoped to one Agent and conversation, unlike OpenClaw Gateway multiplexing.
+' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam participant {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+skinparam sequence {
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor Client
+participant "Upgrade auth" as Auth
+participant "WebSocket v2" as WS
+participant "ManagedSessionPool" as Pool
+participant "ManagedRunHub" as Hub
+participant "AgentSession" as Session
+participant "Thinking projection" as Projection
+database "Session JSONL" as Store
+
+Client -> Auth : Upgrade /api/ws/chat\nCookie or Authorization Bearer
+Auth -> Auth : reject URL token and business query\nvalidate identity and browser Origin
+Auth --> Client : 101 Switching Protocols
+Client -> WS : req connect within 5 seconds
+WS -> Pool : resolve or create SessionKey\nand validate effective model
+Pool -> Hub : atomic subscribe and snapshot
+Hub --> WS : cursor and active_run snapshot
+WS --> Client : res connect with model,\nsession, limits, active_run
+Hub --> WS : events after cursor
+
+alt idle conversation
+  Client -> WS : req chat.send with idempotency_key
+  WS -> Pool : atomically create primary run
+  Pool -> Session : prompt(message, attachments)
+  Pool --> WS : run_id and accepted
+  WS --> Client : res ok
+  Session -> Hub : AssistantMessageEvent delta
+  Hub -> Projection : project for fixed run policy
+  Projection --> Hub : safe structured delta
+  Hub -> Hub : increment run_seq and update snapshot
+  Hub --> WS : run.started, message.started,\nmessage.updated, tool events
+  WS -> WS : increment connection seq
+  WS --> Client : event frames
+else active conversation
+  Client -> WS : req chat.send
+  WS --> Client : res RUN_ACTIVE
+end
+
+alt transport disconnects while run is active
+  Client -x WS : connection closed
+  WS -> Hub : unsubscribe only
+  note over Pool,Session
+  The run continues.
+  No AgentSession abort is called.
+  end note
+  Session -> Hub : further deltas or terminal event
+  Hub -> Store : persist final Message and run outcome
+  Client -> Auth : reconnect and authenticate
+  Auth --> Client : 101 Switching Protocols
+  Client -> WS : req connect for same SessionKey
+  WS -> Pool : resolve existing Session
+  Pool -> Hub : atomic subscribe and snapshot
+  Hub --> WS : cursor, partial Message, active tools
+  WS --> Client : res connect snapshot first
+  Hub --> WS : deltas with run_seq after snapshot
+  WS --> Client : ordered event frames
+end
+
+alt explicit abort
+  Client -> WS : req chat.abort(run_id)
+  WS -> Pool : abort active run idempotently
+  Pool -> Session : abort()
+  Session -> Hub : run.completed(aborted)
+else slow consumer
+  WS --> Client : close 1013
+  note over Client,Hub
+  No delta is silently dropped.
+  Reconnect obtains a new snapshot.
+  end note
+end
+
+note over WS,Hub
+Event seq is connection-local.
+run_seq is continuous across reconnects.
+Snapshot response is sent before post-cursor deltas.
+end note
+@enduml
+
 @startuml model_manager_streaming_flow
 title Model Manager Provider Streaming Flow
 
@@ -281,9 +406,9 @@ loop stream events
   Provider --> Loop : AssistantMessageEvent
 end
 
-alt client cancels
-  Client -> Loop : abort
-  Loop -> Provider : cancel subscription
+alt explicit run abort
+  Client -> Loop : chat.abort(run_id)
+  Loop -> Provider : cancel model subscription
   Provider -> ModelManager : close stream
 end
 

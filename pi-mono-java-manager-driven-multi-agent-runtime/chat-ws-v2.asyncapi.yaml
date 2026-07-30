@@ -1,0 +1,1670 @@
+asyncapi: 3.1.0
+id: urn:campusclaw:chat-websocket:v2
+info:
+  title: CampusClaw Session WebSocket API
+  version: 2.0.0
+  description: |
+    Normative contract for the Manager-driven CampusClaw chat protocol.
+
+    One WebSocket connection binds exactly one authenticated
+    `(agent_id, conversation_id)` after the mandatory `connect` first frame.
+    The connection is an event subscription; the ManagedSessionPool owns the
+    active run, so transport disconnect does not abort model or tool work.
+
+    Version 2 replaces the version 1 wire format at `/api/ws/chat`. It uses
+    request/response/event envelopes and structured message deltas. It does
+    not accept business query parameters or URL tokens and does not provide a
+    connection-local new-session command.
+  contact:
+    name: CampusClaw
+    url: https://github.com/superheromeZzh/pi-mono-java
+  license:
+    name: MIT
+defaultContentType: application/json
+servers:
+  production:
+    host: api.example.com
+    pathname: /api/ws/chat
+    protocol: wss
+    description: |
+      Production WebSocket endpoint. Browser clients authenticate with a
+      secure HttpOnly SameSite cookie and an allowed Origin. CLI, SDK, and
+      service clients authenticate with an Authorization Bearer header.
+      Business query parameters and URL tokens are rejected.
+    security:
+      - $ref: '#/components/securitySchemes/sessionCookie'
+      - $ref: '#/components/securitySchemes/bearerAuth'
+  local:
+    host: localhost:3000
+    pathname: /api/ws/chat
+    protocol: ws
+    description: |
+      Local endpoint. Authentication may be disabled only by an explicit
+      development profile; the first-frame protocol remains unchanged.
+channels:
+  sessionChat:
+    address: /api/ws/chat
+    title: Session-scoped chat channel
+    description: |
+      Bidirectional JSON channel. The first client frame must be `connect`
+      within five seconds. After connect succeeds, the Agent and Conversation
+      are immutable for the life of the connection.
+    messages:
+      ClientRequest:
+        $ref: '#/components/messages/ClientRequest'
+      ServerResponse:
+        $ref: '#/components/messages/ServerResponse'
+      ServerEvent:
+        $ref: '#/components/messages/ServerEvent'
+operations:
+  sendRequest:
+    action: send
+    channel:
+      $ref: '#/channels/sessionChat'
+    summary: Client sends a connect or session command request.
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ClientRequest'
+  receiveResponseOrEvent:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    summary: Client receives a correlated response or an ordered event.
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ServerResponse'
+      - $ref: '#/channels/sessionChat/messages/ServerEvent'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: httpApiKey
+      in: cookie
+      name: campusclaw_session
+      description: |
+        Browser session cookie. Deployments must set HttpOnly, Secure, and an
+        appropriate SameSite value and must validate Origin before Upgrade.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Authorization header for CLI, SDK, and service clients. When both
+        cookie and Bearer credentials are present they must resolve to the
+        same tenant and user. The credential is never copied to prompts,
+        JSONL, protocol events, or application logs.
+  messages:
+    ClientRequest:
+      name: ClientRequest
+      title: Client request envelope
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/AnyRequestFrame'
+      examples:
+        - name: Create a session
+          payload:
+            type: req
+            id: connect-1
+            method: connect
+            params:
+              min_protocol: 2
+              max_protocol: 2
+              agent_id: agent-a
+              model_id: model-a
+              client:
+                id: campusclaw-web
+                version: 1.0.0
+                platform: web
+              capabilities:
+                - structured_message_delta
+        - name: Resume a session
+          payload:
+            type: req
+            id: connect-2
+            method: connect
+            params:
+              min_protocol: 2
+              max_protocol: 2
+              agent_id: agent-a
+              conversation_id: conversation-1
+              client:
+                id: campusclaw-sdk
+                version: 1.0.0
+                platform: sdk
+              capabilities:
+                - structured_message_delta
+        - name: Send a user message
+          payload:
+            type: req
+            id: send-1
+            method: chat.send
+            params:
+              message: Check order 20260730001
+              attachment_ids:
+                - attachment-01
+              idempotency_key: 6f46bc26-8a14-4d63-b7b1-8f1f933a0d50
+              thinking: hidden
+    ServerResponse:
+      name: ServerResponse
+      title: Correlated command response
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/AnyResponseFrame'
+      examples:
+        - name: Connected with active run snapshot
+          payload:
+            type: res
+            id: connect-2
+            ok: true
+            result:
+              protocol: 2
+              connection_id: conn-01
+              agent_id: agent-a
+              conversation_id: conversation-1
+              model:
+                id: model-a
+                name: Model A
+                reasoning: true
+              session:
+                state: running
+                thinking: hidden
+              limits:
+                max_frame_bytes: 1048576
+                max_connection_buffer_bytes: 4194304
+                heartbeat_seconds: 20
+                connect_timeout_seconds: 5
+              active_run:
+                run_id: run-01
+                run_seq: 14
+                message_snapshot:
+                  id: message-01
+                  role: assistant
+                  status: streaming
+                  content:
+                    - type: text
+                      text: The order is
+                  created_at: '2026-07-30T08:00:00Z'
+                active_tools: []
+        - name: Active run conflict
+          payload:
+            type: res
+            id: send-2
+            ok: false
+            error:
+              code: RUN_ACTIVE
+              message: The conversation already has an active run.
+              retryable: true
+    ServerEvent:
+      name: ServerEvent
+      title: Ordered session event
+      payload:
+        $ref: '#/components/schemas/AnyEventFrame'
+      examples:
+        - name: Text delta
+          payload:
+            type: event
+            event: message.updated
+            seq: 7
+            payload:
+              agent_id: agent-a
+              conversation_id: conversation-1
+              run_id: run-01
+              message_id: message-01
+              run_seq: 7
+              content_index: 0
+              timestamp: '2026-07-30T08:00:01Z'
+              update:
+                type: text_delta
+                delta: shipped
+        - name: Run completed
+          payload:
+            type: event
+            event: run.completed
+            seq: 24
+            payload:
+              agent_id: agent-a
+              conversation_id: conversation-1
+              run_id: run-01
+              run_seq: 24
+              timestamp: '2026-07-30T08:00:03Z'
+              outcome: done
+              stop_reason: stop
+              usage:
+                input_tokens: 230
+                output_tokens: 48
+                total_tokens: 278
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    RequestId:
+      type: string
+      minLength: 1
+      maxLength: 128
+    IdempotencyKey:
+      type: string
+      minLength: 8
+      maxLength: 128
+    Timestamp:
+      type: string
+      format: date-time
+    ThinkingLevel:
+      type: string
+      enum:
+        - hidden
+        - summary
+        - full
+    ClientInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - version
+        - platform
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        platform:
+          type: string
+          enum:
+            - web
+            - cli
+            - sdk
+            - service
+            - other
+    ClientCapabilities:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      contains:
+        const: structured_message_delta
+      items:
+        type: string
+        enum:
+          - structured_message_delta
+          - full_thinking
+    NewSessionConnectParams:
+      type: object
+      additionalProperties: false
+      required:
+        - min_protocol
+        - max_protocol
+        - agent_id
+        - model_id
+        - client
+        - capabilities
+      properties:
+        min_protocol:
+          type: integer
+          minimum: 1
+        max_protocol:
+          type: integer
+          minimum: 1
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        model_id:
+          $ref: '#/components/schemas/Identifier'
+        client:
+          $ref: '#/components/schemas/ClientInfo'
+        capabilities:
+          $ref: '#/components/schemas/ClientCapabilities'
+    ResumeSessionConnectParams:
+      type: object
+      additionalProperties: false
+      required:
+        - min_protocol
+        - max_protocol
+        - agent_id
+        - conversation_id
+        - client
+        - capabilities
+      properties:
+        min_protocol:
+          type: integer
+          minimum: 1
+        max_protocol:
+          type: integer
+          minimum: 1
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        model_id:
+          $ref: '#/components/schemas/Identifier'
+        client:
+          $ref: '#/components/schemas/ClientInfo'
+        capabilities:
+          $ref: '#/components/schemas/ClientCapabilities'
+    ConnectParams:
+      oneOf:
+        - $ref: '#/components/schemas/NewSessionConnectParams'
+        - $ref: '#/components/schemas/ResumeSessionConnectParams'
+    ConnectRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: connect
+        params:
+          $ref: '#/components/schemas/ConnectParams'
+    ChatSendParams:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+        - idempotency_key
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1048576
+        attachment_ids:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+    ChatSendRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: chat.send
+        params:
+          $ref: '#/components/schemas/ChatSendParams'
+    ChatSteerParams:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - message
+        - idempotency_key
+      properties:
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1048576
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+    ChatSteerRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: chat.steer
+        params:
+          $ref: '#/components/schemas/ChatSteerParams'
+    ChatAbortParams:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - idempotency_key
+      properties:
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+    ChatAbortRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: chat.abort
+        params:
+          $ref: '#/components/schemas/ChatAbortParams'
+    CursorPageParams:
+      type: object
+      additionalProperties: false
+      properties:
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+    ChatHistoryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: chat.history
+        params:
+          $ref: '#/components/schemas/CursorPageParams'
+    SessionGetRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: session.get
+    ModelsListRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: models.list
+    ModelSetParams:
+      type: object
+      additionalProperties: false
+      required:
+        - model_id
+      properties:
+        model_id:
+          $ref: '#/components/schemas/Identifier'
+    ModelSetRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: model.set
+        params:
+          $ref: '#/components/schemas/ModelSetParams'
+    ThinkingSetParams:
+      type: object
+      additionalProperties: false
+      required:
+        - level
+      properties:
+        level:
+          $ref: '#/components/schemas/ThinkingLevel'
+    ThinkingSetRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+        - params
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: thinking.set
+        params:
+          $ref: '#/components/schemas/ThinkingSetParams'
+    PromptTemplatesListRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: prompt_templates.list
+        params:
+          $ref: '#/components/schemas/CursorPageParams'
+    SkillsListRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - method
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        method:
+          const: skills.list
+    AnyRequestFrame:
+      oneOf:
+        - $ref: '#/components/schemas/ConnectRequest'
+        - $ref: '#/components/schemas/ChatSendRequest'
+        - $ref: '#/components/schemas/ChatSteerRequest'
+        - $ref: '#/components/schemas/ChatAbortRequest'
+        - $ref: '#/components/schemas/ChatHistoryRequest'
+        - $ref: '#/components/schemas/SessionGetRequest'
+        - $ref: '#/components/schemas/ModelsListRequest'
+        - $ref: '#/components/schemas/ModelSetRequest'
+        - $ref: '#/components/schemas/ThinkingSetRequest'
+        - $ref: '#/components/schemas/PromptTemplatesListRequest'
+        - $ref: '#/components/schemas/SkillsListRequest'
+    ModelSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+      properties:
+        id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        reasoning:
+          type: boolean
+        context_window:
+          type: integer
+          minimum: 1
+        max_output_tokens:
+          type: integer
+          minimum: 1
+    SessionSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - thinking
+      properties:
+        state:
+          type: string
+          enum:
+            - idle
+            - running
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+    ConnectionLimits:
+      type: object
+      additionalProperties: false
+      required:
+        - max_frame_bytes
+        - max_connection_buffer_bytes
+        - heartbeat_seconds
+        - connect_timeout_seconds
+      properties:
+        max_frame_bytes:
+          type: integer
+          minimum: 1024
+          default: 1048576
+        max_connection_buffer_bytes:
+          type: integer
+          minimum: 1024
+          default: 4194304
+        heartbeat_seconds:
+          type: integer
+          minimum: 1
+          default: 20
+        connect_timeout_seconds:
+          type: integer
+          minimum: 1
+          default: 5
+    TextContent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - text
+      properties:
+        type:
+          const: text
+        text:
+          type: string
+    ThinkingContent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - text
+        - disclosure
+      properties:
+        type:
+          const: thinking
+        text:
+          type: string
+        disclosure:
+          type: string
+          enum:
+            - summary
+            - full
+    ToolCallContent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - tool_id
+        - arguments
+      properties:
+        type:
+          const: tool_call
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        arguments:
+          type: object
+          additionalProperties: true
+    ToolResultContent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - status
+      properties:
+        type:
+          const: tool_result
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        status:
+          type: string
+          enum:
+            - done
+            - error
+        result: {}
+        error:
+          $ref: '#/components/schemas/Error'
+    ProjectedMessage:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - role
+        - status
+        - content
+        - created_at
+      properties:
+        id:
+          $ref: '#/components/schemas/Identifier'
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - tool
+        status:
+          type: string
+          enum:
+            - streaming
+            - completed
+            - aborted
+            - error
+        content:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/TextContent'
+              - $ref: '#/components/schemas/ThinkingContent'
+              - $ref: '#/components/schemas/ToolCallContent'
+              - $ref: '#/components/schemas/ToolResultContent'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        completed_at:
+          $ref: '#/components/schemas/Timestamp'
+    ActiveTool:
+      type: object
+      additionalProperties: false
+      required:
+        - tool_call_id
+        - tool_id
+        - status
+      properties:
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+            - starting
+            - running
+        input:
+          type: object
+          additionalProperties: true
+    ActiveRunSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - run_seq
+        - message_snapshot
+        - active_tools
+      properties:
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 0
+        message_snapshot:
+          $ref: '#/components/schemas/ProjectedMessage'
+        active_tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveTool'
+    ConnectResult:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - connection_id
+        - agent_id
+        - conversation_id
+        - model
+        - session
+        - limits
+        - active_run
+      properties:
+        protocol:
+          const: 2
+        connection_id:
+          $ref: '#/components/schemas/Identifier'
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        model:
+          $ref: '#/components/schemas/ModelSummary'
+        session:
+          $ref: '#/components/schemas/SessionSummary'
+        limits:
+          $ref: '#/components/schemas/ConnectionLimits'
+        active_run:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+    ChatSendResult:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - accepted
+      properties:
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        accepted:
+          type: boolean
+          const: true
+    RunCommandResult:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - accepted
+        - idempotent
+      properties:
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        accepted:
+          type: boolean
+        idempotent:
+          type: boolean
+    HistoryResult:
+      type: object
+      additionalProperties: false
+      required:
+        - messages
+        - has_more
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectedMessage'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        has_more:
+          type: boolean
+    SessionGetResult:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - model
+        - session
+        - active_run
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        model:
+          $ref: '#/components/schemas/ModelSummary'
+        session:
+          $ref: '#/components/schemas/SessionSummary'
+        active_run:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+    ModelsListResult:
+      type: object
+      additionalProperties: false
+      required:
+        - models
+        - effective_model_id
+      properties:
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelSummary'
+        effective_model_id:
+          $ref: '#/components/schemas/Identifier'
+    ModelSetResult:
+      type: object
+      additionalProperties: false
+      required:
+        - model
+      properties:
+        model:
+          $ref: '#/components/schemas/ModelSummary'
+    ThinkingSetResult:
+      type: object
+      additionalProperties: false
+      required:
+        - thinking
+      properties:
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+    PromptTemplateSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - description
+      properties:
+        id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        description:
+          type: string
+          maxLength: 2048
+    PromptTemplatesListResult:
+      type: object
+      additionalProperties: false
+      required:
+        - templates
+        - has_more
+      properties:
+        templates:
+          type: array
+          items:
+            $ref: '#/components/schemas/PromptTemplateSummary'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        has_more:
+          type: boolean
+    SkillSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - description
+        - location
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 2048
+        location:
+          type: string
+          minLength: 1
+          maxLength: 2048
+    SkillsListResult:
+      type: object
+      additionalProperties: false
+      required:
+        - skills
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkillSummary'
+    SuccessResult:
+      oneOf:
+        - $ref: '#/components/schemas/ConnectResult'
+        - $ref: '#/components/schemas/ChatSendResult'
+        - $ref: '#/components/schemas/RunCommandResult'
+        - $ref: '#/components/schemas/HistoryResult'
+        - $ref: '#/components/schemas/SessionGetResult'
+        - $ref: '#/components/schemas/ModelsListResult'
+        - $ref: '#/components/schemas/ModelSetResult'
+        - $ref: '#/components/schemas/ThinkingSetResult'
+        - $ref: '#/components/schemas/PromptTemplatesListResult'
+        - $ref: '#/components/schemas/SkillsListResult'
+    ErrorCode:
+      type: string
+      enum:
+        - INVALID_REQUEST
+        - UNAUTHENTICATED
+        - FORBIDDEN
+        - UNSUPPORTED_PROTOCOL
+        - AGENT_NOT_FOUND
+        - CONVERSATION_NOT_FOUND
+        - MODEL_REQUIRED
+        - MODEL_NOT_ALLOWED
+        - RUN_ACTIVE
+        - RUN_NOT_FOUND
+        - INVALID_ATTACHMENT
+        - MANAGER_AUTH_FAILED
+        - MANAGER_UNAVAILABLE
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        details:
+          type: object
+          additionalProperties: true
+        retryable:
+          type: boolean
+        retry_after_ms:
+          type: integer
+          minimum: 0
+    SuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - result
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        result:
+          $ref: '#/components/schemas/SuccessResult'
+    ErrorResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - error
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: false
+        error:
+          $ref: '#/components/schemas/Error'
+    AnyResponseFrame:
+      oneOf:
+        - $ref: '#/components/schemas/SuccessResponseFrame'
+        - $ref: '#/components/schemas/ErrorResponseFrame'
+    RunStartedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - run_seq
+        - timestamp
+        - model_id
+        - thinking
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        model_id:
+          $ref: '#/components/schemas/Identifier'
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+    MessageStartedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - message_id
+        - run_seq
+        - timestamp
+        - role
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        message_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        role:
+          type: string
+          enum:
+            - assistant
+    TextStartUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          const: text_start
+    TextDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - delta
+      properties:
+        type:
+          const: text_delta
+        delta:
+          type: string
+          minLength: 1
+    TextEndUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          const: text_end
+    ThinkingStartUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          const: thinking_start
+    ThinkingDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - delta
+      properties:
+        type:
+          const: thinking_delta
+        delta:
+          type: string
+          minLength: 1
+    ThinkingSummaryUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - summary
+      properties:
+        type:
+          const: thinking_summary
+        summary:
+          type: string
+          minLength: 1
+    ThinkingEndUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          const: thinking_end
+    ToolCallStartUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - tool_id
+      properties:
+        type:
+          const: toolcall_start
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+    ToolCallDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - delta
+      properties:
+        type:
+          const: toolcall_delta
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        delta:
+          type: string
+          minLength: 1
+    ToolCallEndUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - arguments
+      properties:
+        type:
+          const: toolcall_end
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        arguments:
+          type: object
+          additionalProperties: true
+    AssistantMessageUpdate:
+      oneOf:
+        - $ref: '#/components/schemas/TextStartUpdate'
+        - $ref: '#/components/schemas/TextDeltaUpdate'
+        - $ref: '#/components/schemas/TextEndUpdate'
+        - $ref: '#/components/schemas/ThinkingStartUpdate'
+        - $ref: '#/components/schemas/ThinkingDeltaUpdate'
+        - $ref: '#/components/schemas/ThinkingSummaryUpdate'
+        - $ref: '#/components/schemas/ThinkingEndUpdate'
+        - $ref: '#/components/schemas/ToolCallStartUpdate'
+        - $ref: '#/components/schemas/ToolCallDeltaUpdate'
+        - $ref: '#/components/schemas/ToolCallEndUpdate'
+    MessageUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - message_id
+        - run_seq
+        - content_index
+        - timestamp
+        - update
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        message_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        content_index:
+          type: integer
+          minimum: 0
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        update:
+          $ref: '#/components/schemas/AssistantMessageUpdate'
+    ToolStartedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - run_seq
+        - timestamp
+        - tool_call_id
+        - tool_id
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+    ToolUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - run_seq
+        - timestamp
+        - tool_call_id
+        - tool_id
+        - update
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        update:
+          $ref: '#/components/schemas/ToolProgressUpdate'
+    ToolProgressUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        message:
+          type: string
+          maxLength: 4096
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        data: {}
+    ToolCompletedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - run_seq
+        - timestamp
+        - tool_call_id
+        - tool_id
+        - status
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        tool_call_id:
+          $ref: '#/components/schemas/Identifier'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        status:
+          type: string
+          enum:
+            - done
+            - error
+            - aborted
+        result: {}
+        error:
+          $ref: '#/components/schemas/Error'
+    MessageCompletedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - message_id
+        - run_seq
+        - timestamp
+        - message
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        message_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        message:
+          $ref: '#/components/schemas/ProjectedMessage'
+    Usage:
+      type: object
+      additionalProperties: false
+      properties:
+        input_tokens:
+          type: integer
+          minimum: 0
+        output_tokens:
+          type: integer
+          minimum: 0
+        cached_input_tokens:
+          type: integer
+          minimum: 0
+        total_tokens:
+          type: integer
+          minimum: 0
+    RunCompletedPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - conversation_id
+        - run_id
+        - run_seq
+        - timestamp
+        - outcome
+      properties:
+        agent_id:
+          $ref: '#/components/schemas/Identifier'
+        conversation_id:
+          $ref: '#/components/schemas/Identifier'
+        run_id:
+          $ref: '#/components/schemas/Identifier'
+        run_seq:
+          type: integer
+          minimum: 1
+        timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        outcome:
+          type: string
+          enum:
+            - done
+            - aborted
+            - error
+        usage:
+          $ref: '#/components/schemas/Usage'
+        stop_reason:
+          type: string
+          maxLength: 256
+        error:
+          $ref: '#/components/schemas/Error'
+    RunStartedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: run.started
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/RunStartedPayload'
+    MessageStartedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: message.started
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/MessageStartedPayload'
+    MessageUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: message.updated
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/MessageUpdatedPayload'
+    ToolStartedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: tool.started
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/ToolStartedPayload'
+    ToolUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: tool.updated
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/ToolUpdatedPayload'
+    ToolCompletedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: tool.completed
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/ToolCompletedPayload'
+    MessageCompletedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: message.completed
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/MessageCompletedPayload'
+    RunCompletedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - event
+        - seq
+        - payload
+      properties:
+        type:
+          const: event
+        event:
+          const: run.completed
+        seq:
+          type: integer
+          minimum: 1
+        payload:
+          $ref: '#/components/schemas/RunCompletedPayload'
+    AnyEventFrame:
+      oneOf:
+        - $ref: '#/components/schemas/RunStartedEvent'
+        - $ref: '#/components/schemas/MessageStartedEvent'
+        - $ref: '#/components/schemas/MessageUpdatedEvent'
+        - $ref: '#/components/schemas/ToolStartedEvent'
+        - $ref: '#/components/schemas/ToolUpdatedEvent'
+        - $ref: '#/components/schemas/ToolCompletedEvent'
+        - $ref: '#/components/schemas/MessageCompletedEvent'
+        - $ref: '#/components/schemas/RunCompletedEvent'
+x-websocket:
+  firstFrameTimeoutSeconds: 5
+  pingPongIntervalSeconds: 20
+  defaultMaxFrameBytes: 1048576
+  defaultMaxConnectionBufferBytes: 4194304
+  closeCodes:
+    '1000': Normal closure
+    '1002': Unsupported protocol version
+    '1008': Connect timeout or connection policy violation
+    '1009': Frame exceeds the negotiated maximum
+    '1013': Slow consumer; reconnect to recover from a snapshot
