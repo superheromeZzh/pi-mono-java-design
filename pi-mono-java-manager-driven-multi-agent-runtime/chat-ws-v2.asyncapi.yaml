@@ -1,20 +1,19 @@
 asyncapi: 3.1.0
 id: urn:campusclaw:chat-websocket:v2
+x-locale: zh-CN
 info:
-  title: CampusClaw Session WebSocket API
+  title: CampusClaw 会话 WebSocket API
   version: 2.0.0
   description: |
-    Normative contract for the Manager-driven CampusClaw chat protocol.
+    Manager 驱动的 CampusClaw 对话协议规范。
 
-    One WebSocket connection binds exactly one authenticated
-    `(agent_id, conversation_id)` after the mandatory `connect` first frame.
-    The connection is an event subscription; the ManagedSessionPool owns the
-    active run, so transport disconnect does not abort model or tool work.
+    每条 WebSocket 连接在强制的首帧 `connect` 成功后，只绑定一个经过认证的
+    `(agent_id, conversation_id)`。连接只承担事件订阅；active run 由
+    ManagedSessionPool 持有，因此传输连接断开不会终止模型调用或工具执行。
 
-    Version 2 replaces the version 1 wire format at `/api/ws/chat`. It uses
-    request/response/event envelopes and structured message deltas. It does
-    not accept business query parameters or URL tokens and does not provide a
-    connection-local new-session command.
+    版本 2 直接替换 `/api/ws/chat` 上的 v1 传输格式，使用
+    request/response/event Envelope 和结构化消息增量。协议不接受业务查询
+    参数或 URL token，也不提供连接内新建会话命令。
   contact:
     name: CampusClaw
     url: https://github.com/superheromeZzh/pi-mono-java
@@ -27,10 +26,9 @@ servers:
     pathname: /api/ws/chat
     protocol: wss
     description: |
-      Production WebSocket endpoint. Browser clients authenticate with a
-      secure HttpOnly SameSite cookie and an allowed Origin. CLI, SDK, and
-      service clients authenticate with an Authorization Bearer header.
-      Business query parameters and URL tokens are rejected.
+      生产 WebSocket 端点。浏览器客户端使用安全的 HttpOnly、SameSite
+      Cookie 认证，并且必须提供允许的 Origin。CLI、SDK 和服务客户端使用
+      Authorization Bearer 请求头认证。服务端拒绝业务查询参数和 URL token。
     security:
       - $ref: '#/components/securitySchemes/sessionCookie'
       - $ref: '#/components/securitySchemes/bearerAuth'
@@ -39,16 +37,14 @@ servers:
     pathname: /api/ws/chat
     protocol: ws
     description: |
-      Local endpoint. Authentication may be disabled only by an explicit
-      development profile; the first-frame protocol remains unchanged.
+      本地开发端点。只有显式启用开发配置时才可以关闭认证；首帧协议保持不变。
 channels:
   sessionChat:
     address: /api/ws/chat
-    title: Session-scoped chat channel
+    title: 会话范围的对话通道
     description: |
-      Bidirectional JSON channel. The first client frame must be `connect`
-      within five seconds. After connect succeeds, the Agent and Conversation
-      are immutable for the life of the connection.
+      双向 JSON 通道。客户端必须在五秒内发送 `connect` 首帧。connect 成功后，
+      Agent 和 Conversation 在该连接的整个生命周期内不可更换。
     messages:
       ClientRequest:
         $ref: '#/components/messages/ClientRequest'
@@ -61,14 +57,14 @@ operations:
     action: send
     channel:
       $ref: '#/channels/sessionChat'
-    summary: Client sends a connect or session command request.
+    summary: 客户端发送 connect 或 Session 命令请求。
     messages:
       - $ref: '#/channels/sessionChat/messages/ClientRequest'
   receiveResponseOrEvent:
     action: receive
     channel:
       $ref: '#/channels/sessionChat'
-    summary: Client receives a correlated response or an ordered event.
+    summary: 客户端接收关联响应或有序事件。
     messages:
       - $ref: '#/channels/sessionChat/messages/ServerResponse'
       - $ref: '#/channels/sessionChat/messages/ServerEvent'
@@ -79,27 +75,26 @@ components:
       in: cookie
       name: campusclaw_session
       description: |
-        Browser session cookie. Deployments must set HttpOnly, Secure, and an
-        appropriate SameSite value and must validate Origin before Upgrade.
+        浏览器 Session Cookie。部署时必须设置 HttpOnly、Secure 和合适的
+        SameSite 值，并在 Upgrade 前校验 Origin。
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
       description: |
-        Authorization header for CLI, SDK, and service clients. When both
-        cookie and Bearer credentials are present they must resolve to the
-        same tenant and user. The credential is never copied to prompts,
-        JSONL, protocol events, or application logs.
+        CLI、SDK 和服务客户端使用的 Authorization 请求头。Cookie 和 Bearer
+        凭据同时存在时，二者必须解析为相同的租户和用户。凭据不得复制到
+        Prompt、JSONL、协议事件或应用日志。
   messages:
     ClientRequest:
       name: ClientRequest
-      title: Client request envelope
+      title: 客户端请求 Envelope
       correlationId:
         location: $message.payload#/id
       payload:
         $ref: '#/components/schemas/AnyRequestFrame'
       examples:
-        - name: Create a session
+        - name: 新建会话
           payload:
             type: req
             id: connect-1
@@ -115,7 +110,7 @@ components:
                 platform: web
               capabilities:
                 - structured_message_delta
-        - name: Resume a session
+        - name: 恢复会话
           payload:
             type: req
             id: connect-2
@@ -131,26 +126,26 @@ components:
                 platform: sdk
               capabilities:
                 - structured_message_delta
-        - name: Send a user message
+        - name: 发送用户消息
           payload:
             type: req
             id: send-1
             method: chat.send
             params:
-              message: Check order 20260730001
+              message: 查询订单 20260730001
               attachment_ids:
                 - attachment-01
               idempotency_key: 6f46bc26-8a14-4d63-b7b1-8f1f933a0d50
               thinking: hidden
     ServerResponse:
       name: ServerResponse
-      title: Correlated command response
+      title: 关联命令响应
       correlationId:
         location: $message.payload#/id
       payload:
         $ref: '#/components/schemas/AnyResponseFrame'
       examples:
-        - name: Connected with active run snapshot
+        - name: 连接成功并返回 active run 快照
           payload:
             type: res
             id: connect-2
@@ -162,7 +157,7 @@ components:
               conversation_id: conversation-1
               model:
                 id: model-a
-                name: Model A
+                name: 模型 A
                 reasoning: true
               session:
                 state: running
@@ -181,25 +176,25 @@ components:
                   status: streaming
                   content:
                     - type: text
-                      text: The order is
+                      text: 订单当前状态为
                   created_at: '2026-07-30T08:00:00Z'
                 active_tools: []
-        - name: Active run conflict
+        - name: active run 冲突
           payload:
             type: res
             id: send-2
             ok: false
             error:
               code: RUN_ACTIVE
-              message: The conversation already has an active run.
+              message: 当前 Conversation 已存在 active run。
               retryable: true
     ServerEvent:
       name: ServerEvent
-      title: Ordered session event
+      title: 有序 Session 事件
       payload:
         $ref: '#/components/schemas/AnyEventFrame'
       examples:
-        - name: Text delta
+        - name: 文本增量
           payload:
             type: event
             event: message.updated
@@ -214,8 +209,8 @@ components:
               timestamp: '2026-07-30T08:00:01Z'
               update:
                 type: text_delta
-                delta: shipped
-        - name: Run completed
+                delta: 已发货
+        - name: run 已完成
           payload:
             type: event
             event: run.completed
@@ -1663,8 +1658,8 @@ x-websocket:
   defaultMaxFrameBytes: 1048576
   defaultMaxConnectionBufferBytes: 4194304
   closeCodes:
-    '1000': Normal closure
-    '1002': Unsupported protocol version
-    '1008': Connect timeout or connection policy violation
-    '1009': Frame exceeds the negotiated maximum
-    '1013': Slow consumer; reconnect to recover from a snapshot
+    '1000': 正常关闭
+    '1002': 不支持的协议版本
+    '1008': connect 超时或违反连接策略
+    '1009': 帧大小超过协商上限
+    '1013': 消费端过慢；需要重连并通过快照恢复
