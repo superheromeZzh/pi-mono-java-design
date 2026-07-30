@@ -1,0 +1,223 @@
+@startuml websocket_connection_scope_comparison
+title WebSocket Connection Scope Comparison
+
+' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
+' Source: docs/gateway/protocol.md (Gateway protocol, broadcast scope)
+' Source: packages/gateway-protocol/src/schema/logs-chat.ts (ChatSendParamsSchema, ChatEventSchema)
+' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster)
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (handle)
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java (getOrCreate)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (WebSocket v2 target)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
+' Observed behavior: OpenClaw uses one Gateway connection for requests and events across sessions.
+' Current Java behavior: one connection captures one AgentSession selected by a query parameter.
+' Target design: one CampusClaw connection is bound to one agent and conversation after connect.
+' Design reason: Session scope fixes authorization, model, disclosure, and audit boundaries.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam defaultFontName Arial
+left to right direction
+
+package "OpenClaw - implemented" as openclaw {
+  actor "Gateway client" as oc_client
+  component "Gateway connection" as oc_conn
+  component "Gateway control plane" as oc_gateway
+  database "Session A" as oc_session_a
+  database "Session B" as oc_session_b
+  component "Node and control APIs" as oc_control
+
+  oc_client --> oc_conn
+  oc_conn --> oc_gateway : req/res/event
+  oc_gateway --> oc_session_a : sessionKey=A
+  oc_gateway --> oc_session_b : sessionKey=B
+  oc_gateway --> oc_control : methods and events
+}
+
+package "pi-mono-java v1 - current" as java_v1 {
+  actor "Chat client" as java_client
+  component "WebSocket connection" as java_conn
+  component "ChatWebSocketHandler" as java_handler
+  database "AgentSession" as java_session
+  database "SessionPool\nkey: conversation_id" as java_pool
+
+  java_client --> java_conn : query conversation_id
+  java_conn --> java_handler
+  java_handler --> java_pool
+  java_pool --> java_session
+}
+
+package "CampusClaw v2 - target only" as campus_v2 {
+  actor "Chat client" as cc_client
+  component "Session-scoped connection" as cc_conn
+  component "ManagedSessionPool" as cc_pool
+  component "ManagedRunHub" as cc_hub
+  database "Agent A / Conversation 1" as cc_session
+  actor "Observer client" as cc_observer
+
+  cc_client --> cc_conn : connect once
+  cc_observer --> cc_conn : another subscription
+  cc_conn --> cc_pool : agent_id + conversation_id
+  cc_pool --> cc_session
+  cc_session --> cc_hub : zero or one active run
+}
+
+note bottom of openclaw
+  One connection may address many sessions.
+  Subscription and scope filters still apply.
+end note
+
+note bottom of java_v1
+  Session identity is not agent-qualified.
+  new_session changes the captured session.
+end note
+
+note bottom of campus_v2
+  The binding cannot change after connect.
+  A new conversation uses a new connection.
+end note
+@enduml
+
+@startuml websocket_handshake_comparison
+title WebSocket Handshake and Authentication Comparison
+
+' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
+' Source: docs/gateway/protocol.md (Handshake, authentication, protocol versioning)
+' Source: docs/gateway/clients.md (scopes, pairing, capabilities)
+' Source: packages/gateway-protocol/src/schema/frames.ts (ConnectParamsSchema, HelloOkSchema)
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
+' Source: docs/asyncapi/chat-ws.yaml (query parameters and v1 messages)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
+' Observed behavior: OpenClaw emits a challenge before the first client connect frame.
+' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
+' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
+' Design reason: enterprise credentials stay in transport authentication and never enter chat payloads.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam defaultFontName Arial
+autonumber
+
+actor "OpenClaw client" as OC
+participant "OpenClaw Gateway" as OG
+actor "Java v1 client" as JV1C
+participant "ServerMode" as SM
+participant "ChatWebSocketHandler" as CWH
+actor "CampusClaw client" as CC
+participant "HTTP auth edge" as EDGE
+participant "Chat v2 endpoint" as V2
+participant "Agent and Model Managers" as MGR
+
+== OpenClaw implemented ==
+OC -> OG : WebSocket Upgrade
+OG --> OC : event connect.challenge {nonce, ts}
+OC -> OG : req connect {minProtocol, maxProtocol,\nauth, device, role, scopes, caps}
+OG --> OC : res hello-ok {protocol, policy, snapshot}
+note over OC,OG
+The challenge is a server event.
+The first client frame is connect.
+Device identity and pairing support broad Gateway access.
+end note
+
+== pi-mono-java v1 current ==
+JV1C -> SM : Upgrade /api/ws/chat?conversation_id=...
+SM -> CWH : handle(exchange, conversationId)
+CWH --> JV1C : WebSocket accepted; no protocol hello
+note over JV1C,CWH
+The v1 AsyncAPI documents a token query parameter.
+The baseline route shown here extracts only conversation_id.
+There is no connect protocol negotiation.
+end note
+
+== CampusClaw v2 target only ==
+CC -> EDGE : Upgrade /api/ws/chat\nCookie or Authorization Bearer
+EDGE -> EDGE : validate Origin and identity consistency
+EDGE -> V2 : immutable authenticated connection context
+CC -> V2 : req connect within 5 seconds\n{min_protocol, max_protocol,\nagent_id, conversation_id?, model_id?}
+V2 -> MGR : authorize agent and resolve model
+MGR --> V2 : effective identity and model
+V2 --> CC : res connect {protocol, connection_id,\nsession, limits, active_run?}
+note over CC,V2
+No business query parameter and no URL token.
+The connection cannot switch agent or conversation.
+end note
+@enduml
+
+@startuml websocket_stream_recovery_comparison
+title Stream and Recovery Comparison
+
+' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
+' Source: src/gateway/server-chat.ts (resolveBroadcastDelta, emitChatDelta, sequence gap handling)
+' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster, per-client seq, slow consumers)
+' Source: ui/src/pages/chat/chat-gateway.ts (resolveAssistantTextFromChatEvent)
+' Source: ui/src/app/gateway-store.ts (sequence gap reconnect)
+' Source: docs/gateway/clients.md (recovery, chat.history, inFlightRun)
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (mapEventToJson, close handling)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (ManagedRunHub)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
+' Observed behavior: OpenClaw clients recover from sequence gaps by reconnecting and reloading authoritative state.
+' Current Java behavior: message_update sends the accumulated message and disconnect aborts streaming.
+' Target design: ManagedRunHub owns the run and atomically returns a snapshot plus a post-cursor stream.
+' Design reason: network connection lifetime must not define model run lifetime.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam defaultFontName Arial
+autonumber
+
+actor "OpenClaw client" as OC
+participant "Gateway broadcaster" as OGB
+participant "Chat history" as OCH
+actor "Java v1 client" as JVC
+participant "ChatWebSocketHandler" as JWH
+participant "AgentSession" as JAS
+actor "CampusClaw client" as CCC
+participant "Chat v2 connection" as CCW
+participant "ManagedRunHub" as MRH
+participant "Session history" as CCH
+
+== OpenClaw implemented ==
+OGB --> OC : chat event {seq, runId, sessionKey,\ndeltaText, message?, replace?}
+OGB --> OC : later event with sequence gap
+OC -> OC : detect connection or run sequence gap
+OC -> OCH : chat.history(sessionKey)
+OCH --> OC : authoritative messages and in-flight state
+note over OC,OGB
+Some chat deltas may be marked dropIfSlow.
+A gap is observable because sequence numbers advance.
+end note
+
+== pi-mono-java v1 current ==
+JAS --> JWH : MessageUpdateEvent(fullMessage, fineGrainedEvent)
+JWH --> JVC : message_update {message: fullMessage}
+JVC -x JWH : connection closes
+JWH -> JAS : abort()
+note over JVC,JAS
+The wire format does not expose the fine-grained event.
+There is no active-run snapshot protocol.
+end note
+
+== CampusClaw v2 target only ==
+MRH --> CCW : message.updated {run_seq, typed delta}
+CCW --> CCC : current delta only
+CCC -x CCW : connection closes
+note over MRH
+The run continues without a WebSocket subscriber.
+end note
+CCC -> CCW : reconnect and req connect
+CCW -> MRH : atomically subscribe and capture cursor
+MRH --> CCW : active_run snapshot at run_seq=N
+CCW --> CCC : connect response with full partial message and tools
+MRH --> CCW : deltas after N
+CCW --> CCC : ordered message.updated events
+CCC -> CCH : chat.history if the run ended while offline
+CCH --> CCC : authoritative completed messages
+@enduml
