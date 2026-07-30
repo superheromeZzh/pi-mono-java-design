@@ -1,662 +1,871 @@
-# pi-mono Java ToB 记忆系统 SR 设计
+# pi-mono Java 集中式 GaussDB 会话记忆系统 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.4
-> 日期：2026-07-20
+> 版本：v0.5
+> 日期：2026-07-30
 > 状态：设计评审稿
-> pi 源码基线：[`216e672e7c9fc65682553394b74e483c0c9e47f7`](https://github.com/badlogic/pi-mono/tree/216e672e7c9fc65682553394b74e483c0c9e47f7)
+> pi 源码基线：[`fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`](https://github.com/badlogic/pi-mono/tree/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc)
 > Java 源码基线：无；本文 Java 内容均为 target-only design
+> 数据库约束：集中式 GaussDB，单分片高可用部署
+> JDBC 约束：openGauss JDBC `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`
 
 ## 1. 结论
 
-Java ToB 版本将会话事件面的持久化事实源从本地 JSONL 文件改为 GaussDB（PostgreSQL-compatible relational database）。核心上下文语义保持 pi 对齐：
+Java 版本使用集中式 GaussDB 取代 pi 当前 coding-agent 的本地 JSONL 会话文件，数据库成为会话记忆的唯一持久化事实源。设计保留以下 pi 语义：
 
-- 会话 entry 仍然通过 `id` / `parentId` 组成树。
-- 普通消息、压缩摘要、分支摘要和扩展状态仍然保留为可重放的 entry。
-- 上下文恢复仍然由“当前 leaf 路径 + 最新 compaction + firstKeptEntryId”决定。
-- LLM 摘要仍然在上下文接近窗口限制时生成，数据库只负责持久化和一致读取，不负责替代摘要模型。
+- entry 通过 `id` 和 `parentId` 组成不可变会话树。
+- 当前 leaf 决定活动分支，context 只使用 root-to-leaf 路径。
+- `compaction` 和 `branch_summary` 是会话 entry，不是跨会话长期记忆。
+- 新格式 compaction 使用自包含的 `retainedTail`；旧格式继续读取 `firstKeptEntryId`。
+- `message`、`custom_message`、摘要 entry 和扩展 projector 决定进入模型的消息。
+- 模型、思考级别和启用工具从完整活动路径推导。
 
-Java 目标新增以下 ToB 能力：
+Java 目标新增数据库事务、幂等操作、乐观版本和查询投影。这些是架构改造及可靠性强化，不是 pi JSONL 的既有行为。
 
-- 每一行数据必须带 `tenant_id`，租户边界由认证上下文进入 Repository，不能由请求体决定。
-- entry 使用数据库事务追加；当前 leaf、append sequence 和写入结果保持原子一致。
-- 显式分支移动持久化为可审计状态，不依赖进程内存中的 leaf 指针。
-- LLM 长耗时生成与数据库短事务分离，通过 revision 和幂等键防止过期摘要覆盖新分支。
-- payload 保留原始扩展字段，同时提供文件操作和会话查询所需的规范化投影。
+本 SR 只设计会话内记忆，不设计多租户、跨会话事实抽取、向量召回、Runtime Checkpoint、Agent 控制面或 Artifact 内容存储。pi 基线中也没有内建的跨会话记忆抽取和注入流程。
 
-数据库持久化、租户隔离、幂等写入和可审计 leaf 是 Java 的架构改造或安全强化，不是 pi 原生行为。
-
-本 SR 不等同于完整的 Agent 数据库设计。Agent 控制面、Runtime Checkpoint、跨会话长期记忆和 Artifact 分别具有不同的生命周期与查询模式，必须独立建模。外部系统拆解、源码基线和本 SR 的采纳边界见[《主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界》](./agent-database-patterns/README.md)。
-
-![Java ToB memory persistence architecture](./diagrams/memory/memory-architecture.svg)
+![Java centralized GaussDB memory architecture](./diagrams/memory/memory-architecture.svg)
 
 [查看 PlantUML 源码](./diagrams/memory/diagram.puml#L1)
 
-## 2. 范围与产品假设
+## 2. 范围与约束
 
 ### 2.1 本期范围
 
-- 会话创建、恢复、追加消息、模型/思考级别变更。
-- compaction、branch summary 和 context rebuild。
-- JSONL 历史导入与必要的只读导出能力。
-- 多租户隔离、并发控制、幂等、审计和基础运维查询。
-- Java Agent Runtime、Memory Application Service、Repository 和数据库表边界。
-- 仅覆盖 Session Event Plane，以及直接保障其一致性的 Write Operation 治理记录。
+- 会话创建、打开、列出、删除和 fork。
+- entry 追加、显式 leaf 移动、标签和会话名称。
+- compaction、branch summary 和确定性 context rebuild。
+- JSONL v1-v3 与当前 pi SQLite 会话库导入。
+- 数据库事务、幂等重试、并发冲突、投影重建和受控 JSONL 导出。
+- Java Application Service、Repository、JDBC Adapter 和 GaussDB 表边界。
 
 ### 2.2 本期不包括
 
-- 用向量检索替代 session context。
-- 自动从所有历史会话抽取跨会话长期记忆。
-- Agent Definition、Agent Version、Environment、Tool Binding 和 Credential Reference 控制面。
-- Run、Step、Pending Tool Call、Checkpoint、Checkpoint Blob 和 Pending Write 执行恢复面。
-- Memory Store、Memory Item、Memory Version 和 Embedding 跨会话长期记忆面。
-- 文件/对象内容本身及其对象存储生命周期；本期只保留 entry 派生的文件操作投影。
-- 让数据库执行摘要生成、prompt 编排或 LLM provider 调用。
-- 为不同租户保存 API key、OAuth token 或其他 provider secret。
-- 对 pi 的所有 CLI/TUI 行为做 Java 端复刻。
+- `tenant_id`、`TenantContext`、RLS、租户配额或跨租户授权。
+- 跨会话长期 Memory Store、Memory Item、Embedding、抽取和召回。
+- Run、Step、Pending Tool Call、Checkpoint、Checkpoint Blob 和执行恢复。
+- Agent Definition、Agent Version、Environment、Tool Binding 和 Credential。
+- 文件内容及对象存储生命周期；仅保存摘要 entry 派生的文件操作投影。
+- 让数据库执行摘要生成、prompt 编排、工具调用或 LLM provider 调用。
+- 用向量检索替代活动会话路径。
 
-### 2.3 已采用的 ToB 假设
+### 2.3 已确认产品约束
 
-| 假设 | 设计影响 |
+| 约束 | 设计影响 |
 |---|---|
-| 产品是 Java GUI/API 服务 | 会话操作通过服务端统一进入 Memory Application Service |
-| 产品面向多个租户 | 所有业务表使用 `tenant_id`，Repository 不接受无租户查询 |
-| 关系型数据库采用 GaussDB | 使用事务、递归查询和 JSONB；SQL 尽量保持 PostgreSQL-compatible |
-| 需要审计和恢复 | entry 不更新、不覆盖；状态投影与审计事件分离 |
-| 允许高并发请求重试 | append、branch、compaction commit 使用幂等键和 revision 检查 |
+| Java GUI/API 服务 | 所有会话操作统一进入 `MemorySessionApplicationService` |
+| 不考虑多租户 | 业务表只使用 `session_id` 作为会话作用域，不增加租户列 |
+| 集中式 GaussDB | 使用单分片事务、外键、行锁、JSONB 和递归 CTE |
+| SQL 能力基线 | 以 Centralized V2.0-3.x 官方语法设计，并在实际服务端版本复验 |
+| openGauss JDBC 定制版本 | 锁定指定依赖，不回退到 PostgreSQL JDBC 或其他公开版本 |
+| 数据库是最终事实源 | JSONL 只用于导入、导出和恢复，不进行长期双写 |
+| 允许并发请求重试 | 写命令使用 operation id、revision 和 expected leaf |
 
-如果最终数据库不是 GaussDB，应保留本 SR 的领域模型和事务边界，仅重新验证 JSONB、递归 CTE、索引和行级安全能力。
+集中式在本设计中表示一个逻辑分片及其高可用副本，不表示单机测试实例。当前不引入分布键；若未来容量超过单分片能力，按 `session_id` 迁移到分布式形态并重新设计外键和跨分片约束。
 
 ## 3. pi 源码事实
 
-本节只记录观察到的 pi 行为，不代表 Java 已有实现。
+本节仅记录基线提交中观察到的行为。Java/GaussDB 尚无对应实现，后续章节均为 target-only design。
 
-相对上一版分析基线 `dcfe36c79702ec240b146c45f167ab75ecddd205`，当前基线中的 `SessionManager`、compaction、branch summarization 和文件跟踪实现未发生变化；`AgentSession` 改用 model runtime facade 获取模型认证信息，但 `navigateTree()` 的 leaf 选择、摘要生成和目标侧挂载语义未改变。
+### 3.1 当前 coding-agent 仍使用 JSONL
 
-### 3.1 SessionEntry 是持久化事实源
+`packages/coding-agent/src/core/session-manager.ts` 的生产会话格式版本为 v3。entry 包括 `message`、`thinking_level_change`、`model_change`、`compaction`、`branch_summary`、`custom`、`custom_message`、`label` 和 `session_info`。`_appendEntry()` 把 entry 追加到内存和 JSONL，并将 leaf 指向新 entry。
 
-当前生产版 `SessionManager` 定义了 `message`、`thinking_level_change`、`model_change`、`compaction`、`branch_summary`、`custom`、`custom_message`、`label` 和 `session_info` 等 entry。`CompactionEntry` 使用 `summary`、`firstKeptEntryId`、`tokensBefore`、`details` 和 `fromHook`；`BranchSummaryEntry` 使用 `fromId`、`summary`、`details` 和 `fromHook`。
+普通 `branch()` 和 `resetLeaf()` 只更新进程内 `leafId`；只有后续追加 entry 才会把新分支写入 JSONL。因此，旧 JSONL 无法恢复“移动 leaf 后尚未追加”的最终位置。
 
-源码证据：[`SessionEntry` types](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L46-L143)。
+源码证据：
 
-### 3.2 Context rebuild 只选择当前路径
+- [`SessionEntry` 和 JSONL v3](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/session-manager.ts#L30-L153)
+- [`_persist()` / `_appendEntry()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/session-manager.ts#L1015-L1049)
+- [`branch()` / `resetLeaf()` / `branchWithSummary()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/session-manager.ts#L1354-L1405)
 
-`buildContextEntries()` 从当前 leaf 向 root 形成路径。如果路径中存在 compaction，它把最新 compaction 转为摘要消息，保留 `firstKeptEntryId` 到 compaction 之前的 entry，并保留 compaction 之后的 entry。随后 `buildSessionContext()` 将 entry 投影为 LLM 消息。
+### 3.2 新 harness 定义存储抽象和完整 entry 集合
 
-源码证据：[`buildContextEntries()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L414-L449)。
+`packages/agent` 的新 harness 定义 `SessionStorage` 和 `SessionRepo`，把会话语义与 JSONL、内存或 SQLite 介质分开。其 `SessionTreeEntry` 在旧 coding-agent 类型基础上增加：
 
-### 3.3 普通写入是追加，production leaf 不是独立 entry
+- `active_tools_change`：保存活动工具名。
+- `leaf`：保存显式导航的 `targetId`。
+- `compaction.retainedTail`：把保留消息直接存入 compaction entry。
 
-`_appendEntry()` 将 entry 加入内存列表、把 leaf 指向新 entry，并通过 `appendFileSync()` 写入 JSONL。生产版 `branch()` 和 `resetLeaf()` 只改变内存中的 `leafId`；普通 tree 导航没有单独的 leaf entry。带摘要导航会追加 `branch_summary`，因此摘要 entry 会成为新的 leaf。
+`SessionStorage.setLeafId()` 的契约要求持久化 leaf entry；`SessionRepo` 统一 create、open、list、delete 和 fork。
 
-这意味着 Java 若要在 ToB 场景中保证“只导航但尚未追加下一条消息”的状态可恢复，需要进行架构改造，不能直接假设 pi 的内存 leaf 语义已经持久化。
+源码证据：
 
-源码证据：[`_appendEntry()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L975-L980)、[`branch()` / `resetLeaf()` / `branchWithSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/session-manager.ts#L1289-L1326)。
+- [`SessionTreeEntry`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/types.ts#L375-L464)
+- [`SessionStorage` / `SessionRepo`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/types.ts#L498-L537)
+- [`Session` append 和 moveTo](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/session/session.ts#L214-L357)
 
-### 3.4 Compaction 的触发、切割和增量摘要
+### 3.3 Context rebuild 和 compaction
 
-当前默认值是 `enabled=true`、`reserveTokens=16384`、`keepRecentTokens=20000`。触发条件为：
+新 harness 先从完整活动路径推导 model、thinking level 和 active tools，再应用 context entry transform：
 
-```text
-contextTokens > contextWindow - reserveTokens
-```
+- 无 compaction 时保留活动路径。
+- 最新 compaction 含 `retainedTail` 时，context 使用 compaction、其自带 retained tail 和 compaction 后续 entry。
+- 旧 compaction 不含 `retainedTail` 时，使用 `firstKeptEntryId` 保留旧格式边界。
+- compaction entry 投影为 summary message，并追加其 `retainedTail`。
+- `custom` 默认不进入 context，只有已注册 projector 才能产生消息。
 
-切割点允许位于 user、assistant、bashExecution、custom、branchSummary 和 compactionSummary 消息，不能位于 toolResult。单个 turn 过大时，代码生成历史摘要和 turn prefix 摘要。
+默认 compaction 设置是启用、保留 16,384 tokens 给 prompt/output、保留最近 20,000 tokens。触发条件是 `contextTokens > contextWindow - reserveTokens`。准备阶段避免从 tool result 中间切割，支持 split turn，并把近期消息物化为 `retainedTail`。
 
-源码证据：[`DEFAULT_COMPACTION_SETTINGS`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L106-L110)、[`shouldCompact()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L209-L215)、[`isCutPointMessage()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L282-L317)、[`prepareCompaction()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L633-L705)。
+源码证据：
 
-重复压缩时，前一次非 hook compaction 的 summary 会作为 `previousSummary` 输入；生成结果追加为新的 compaction entry。
+- [`defaultContextEntryTransform()` / `sessionEntryToContextMessages()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/session/session.ts#L45-L147)
+- [`shouldCompact()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/compaction/compaction.ts#L250-L253)
+- [`prepareCompaction()` / `compact()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/compaction/compaction.ts#L605-L813)
 
-源码证据：[`generateSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L546-L608)、[`compact()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L740-L825)。
+### 3.4 pi SQLite 是数据库行为参考
 
-### 3.5 Branch summary 的生成和挂载
+`packages/storage/sqlite-node` 已实现新 harness 的数据库后端，但当前 coding-agent runtime 尚未接入它。其观察行为是：
 
-`collectEntriesForBranchSummary()` 找到旧 leaf 与目标 entry 的 common ancestor，收集旧路径上的 entry。`AgentSession.navigateTree()` 生成摘要后，把 `branch_summary` 挂到目标侧的 `newLeafId`，而不是挂到被离开的旧分支末尾。
+- `sessions.active_leaf_id` 保存当前 leaf。
+- `session_entries` 使用 `(session_id, id)` 主键和 session 内唯一 `entry_seq`。
+- `setLeafId()` 追加 `leaf` entry；leaf entry 的 `targetId` 成为当前 leaf，而 leaf marker 自身不进入 context path。
+- entry、序号、物化统计、当前 leaf 和 branch path 在一个 SQLite 事务内更新。
+- `branch_entries` 物化活动路径，以换取读取性能。
+- malformed entry 在若干读取路径被跳过，保持 JSONL 式宽松恢复。
 
-源码证据：[`collectEntriesForBranchSummary()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/branch-summarization.ts#L102-L145)、[`navigateTree()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/agent-session.ts#L2832-L3016)。
+源码证据：
 
-### 3.6 文件操作和序列化
+- [`001_initial.sql`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql#L1-L59)
+- [`setLeafId()` / `appendEntry()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L266-L346)
+- [`leafIdAfterEntry()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/storage/shared.ts#L27-L29)
+- [`getPathToRootOrCompaction()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L125-L183)
 
-内建摘要从 assistant tool call 中提取 `read`、`write` 和 `edit` 的 `path`，计算：
+### 3.5 Branch summary 和 fork
 
-```text
-modifiedFiles = written + edited
-readFiles = read - modifiedFiles
-```
+branch summary 从旧 leaf 向上收集到与目标路径的最深 common ancestor，然后按时间顺序生成摘要。`moveTo()` 先持久化目标 leaf；有 summary 时再把 `branch_summary` 挂到目标 entry 一侧。
 
-tool result 在摘要序列化时最多保留 2000 个字符。compaction 会继承前一个 pi-generated compaction 的 file details；branch summary 会累计 branch summary 自身的 details。这两个累计链路在当前代码中不是跨机制合并。
+fork 的默认 position 是 `before`：目标必须是 user message，并使用其 parent 作为有效 leaf。`at` 则包含目标 entry。SQLite repo 把选定路径复制到新会话。
 
-源码证据：[`extractFileOpsFromMessage()` / `computeFileLists()` / `serializeConversation()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/utils.ts#L29-L162)、[`extractFileOperations()`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/compaction/compaction.ts#L41-L67)。
+源码证据：
 
-### 3.7 Extension hooks
+- [`collectEntriesForBranchSummary()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/compaction/branch-summarization.ts#L70-L100)
+- [`getEntriesToFork()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/session/repo-utils.ts#L32-L50)
+- [`SqliteSessionRepo.fork()`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/repo.ts#L163-L191)
 
-当前 production AgentSession 支持 `session_before_compact`、`session_compact`、`session_before_tree` 和 `session_tree`。压缩 hook 可以取消操作或提供自定义 summary、firstKeptEntryId、tokensBefore 和 details；tree hook 可以取消导航或提供自定义摘要。
+### 3.6 观察行为、目标选择和理由
 
-源码证据：[`SessionBeforeCompactEvent` / `SessionBeforeTreeEvent`](https://github.com/badlogic/pi-mono/blob/216e672e7c9fc65682553394b74e483c0c9e47f7/packages/coding-agent/src/core/extensions/types.ts#L579-L638)。
+| 主题 | 观察到的 pi 行为 | Java/GaussDB 目标 | 分类与理由 |
+|---|---|---|---|
+| 事实源 | coding-agent 使用 JSONL；新 harness 支持可插拔存储 | GaussDB `session_entry` | 架构改造：提供事务和并发访问 |
+| leaf | 旧 runtime 只在内存移动；新 harness/SQLite 写 `leaf` entry | 采用 `leaf` entry + state current leaf | pi 新存储语义对齐 |
+| compaction | 新 harness 支持 `retainedTail`，兼容 `firstKeptEntryId` | 两种格式均可读取 | 兼容约束 |
+| active path | SQLite 使用 `branch_entries` 物化 | v1 使用递归 CTE | 架构选择：避免路径写放大 |
+| malformed entry | SQLite 部分读取会跳过 | context rebuild 失败并报告 entry | 安全强化：禁止静默丢失上下文 |
+| 并发 | pi 主要依赖单进程顺序控制 | 行锁 + revision + expected leaf | 可靠性强化 |
+| 多租户 | pi 无租户概念 | 不增加租户模型 | 产品约束 |
+| 长期记忆 | pi 无内建跨会话抽取和召回 | 本 SR 不新增 | 产品范围约束 |
 
 ## 4. Java 目标行为
 
-本节是 target-only Java design。它保留 pi 的可见语义，并明确 ToB 差异。
+### 4.1 创建和打开
 
-### 4.1 追加消息
+创建会话时，在同一事务中写入 `agent_session`、空的 `agent_session_state` 和 committed create operation。初始 `current_leaf_entry_id=NULL`、`revision=0`、`next_append_seq=1`。
 
-当 Agent Runtime 完成一个可持久化消息时，Memory Application Service 在一个短数据库事务内完成：
+打开会话只读取 header、state 和必要投影，不预加载全部 entry。context、tree 和分页分别通过 Repository 查询。
 
-1. 根据认证上下文锁定租户内 session state。
-2. 校验 expected leaf 和 session revision。
-3. 分配单调递增 `append_seq`。
-4. 插入不可变 `session_entry`。
-5. 更新 materialized current leaf 和 revision。
-6. 提交事务并返回 entry id。
+### 4.2 追加 entry
 
-LLM 请求、工具执行和网络 I/O 不得在该数据库事务中执行。
+普通 append 在一个短事务中：
 
-### 4.2 恢复上下文
+1. 识别或建立 `session_write_operation`。
+2. 锁定 `agent_session_state`。
+3. 校验 expected revision 和 expected leaf。
+4. 使用 `next_append_seq` 插入不可变 `session_entry`。
+5. 更新标签、名称、统计和文件操作投影。
+6. 把 current leaf 设为新 entry，递增 revision 和 sequence。
+7. 保存稳定响应并提交。
 
-Memory Application Service 从数据库读取当前 leaf 到 root 的路径，然后由 Java `ContextRebuilder` 执行与 pi 对齐的确定性投影：
+LLM、工具、网络调用和文件操作不在该事务中执行。
 
-1. 从完整 active path 推导 model 和 thinking level。
+### 4.3 显式 leaf 移动
+
+`moveTo(targetId)` 验证目标属于当前会话，然后追加一个 `leaf` entry：
+
+- `leaf.parentId` 是移动前 current leaf。
+- `leaf.payload.targetId` 是目标 entry，允许为 `null`。
+- `agent_session_state.current_leaf_entry_id` 更新为目标，而不是 leaf marker。
+- leaf marker 进入追加日志和审计，但不进入模型 context path。
+
+有 branch summary 时，同一提交事务内先写 leaf marker，再写 parent 为目标 entry 的 `branch_summary`，最终 current leaf 指向 summary entry。该目标侧挂载与 pi 一致；单事务提交是 Java 可靠性强化。
+
+### 4.4 Context rebuild
+
+Context rebuild 获取稳定的 root-to-leaf 完整路径及 state revision：
+
+1. 从完整路径推导最后生效的 model、thinking level 和 active tools。
 2. 找到最新 compaction。
-3. 输出 compaction summary message。
-4. 保留 firstKeptEntryId 之后、compaction 之前的 entry。
-5. 保留 compaction 之后的 entry。
-6. 将 branch summary、custom message 和普通 message 转成 AgentMessage。
+3. 有 `retainedTail` 时输出 compaction summary、retained tail 和 compaction 后续 entry。
+4. 旧格式使用 `firstKeptEntryId` 选择保留 entry。
+5. 投影 message、custom message、compaction 和 branch summary。
+6. `custom` 仅通过注册的 projector 产生消息。
 
-Context rebuild 不依赖 session 文件顺序；`append_seq` 只用于稳定排序和审计，树关系由 `parent_entry_id` 决定。
+返回的 `ContextSnapshot` 包含 `sessionId`、`revision`、`leafEntryId`、完整活动路径标识及最终 runtime context。
 
-### 4.3 Compaction
+### 4.5 Compaction 和 branch summary
 
-当 context token 超过模型窗口减去 reserveTokens，Agent Runtime 请求 Memory Application Service 准备 compaction。服务读取一个带 revision 的 active path snapshot；摘要模型在事务外执行。提交摘要时再次校验 revision 和 expected leaf：
+Coordinator 从不可变 `ContextSnapshot` 准备摘要输入，在数据库事务外调用模型。提交摘要时重新锁定 state：
 
-- 校验通过：追加 compaction entry，更新 current leaf，提交。
-- 校验失败：不写入过期摘要，重新读取路径并重试或返回可重试冲突。
+- revision 和 leaf 均相同：写入摘要 entry 和投影，更新 state。
+- 任一不同：不保存过期结果，返回 `STALE_CONTEXT_SNAPSHOT`。
 
-这是一项并发安全架构改造。pi 当前实现通过单进程控制流避免大多数并发竞争，Java ToB 服务不能依赖该假设。
+重试必须读取新 snapshot 并重新计算 cut point 或 common ancestor，不能复用旧的 `firstKeptEntryId`、`retainedTail` 或目标路径。
 
-### 4.4 Tree navigation 和 branch summary
+### 4.6 Fork
 
-用户选择目标节点时，服务先计算 common ancestor 和待摘要路径。摘要生成在事务外执行；提交时锁定 session state 并校验 revision。成功后：
+fork 在源 session revision 稳定时读取选定路径，再创建新 session：
 
-- 无 summary：持久化 leaf move event，并更新 current leaf。
-- 有 summary：在目标侧插入 `branch_summary` entry，并把该 entry 设为 current leaf。
+- 未指定 entry 时复制源 session 的全部追加 entry，与 pi repo 行为一致。
+- `before` 只接受 user message，并以其 parent 为有效 leaf。
+- `at` 包含目标 entry。
+- 复制 entry 保留原 entry id 和 timestamp，在新 session 中重新分配 `append_seq`。
+- 新 session 的 `parent_session_id` 指向源 session。
+- fork 事务写入新 header、entries、projections、state 和 operation；源 session 不变。
 
-目标侧挂载是 pi 当前 production 行为。Java 额外持久化 leaf move event 是 ToB 审计和恢复要求，属于架构改造。
-
-### 4.5 扩展状态
-
-扩展可以写 `custom` entry，也可以写 `custom_message` entry。`custom` 默认不进入 LLM context；`custom_message` 进入 context。扩展 details 原样保存在 JSONB，但服务必须限制大小、禁止 secret 字段，并记录 extension type 和写入身份。
-
-## 5. 目标架构
+## 5. 目标架构和 JDBC
 
 ### 5.1 组件职责
 
 | 组件 | 职责 |
 |---|---|
-| Agent Runtime | 驱动 turn、工具和 LLM；不直接访问数据库 |
-| Memory Application Service | 编排 append、context、compaction、tree navigation 和迁移 |
-| Context Rebuilder | 将 active path 确定性地投影为 runtime context |
-| Compaction Coordinator | 生成 snapshot、调用摘要模型、提交 compaction entry |
-| Branch Summary Coordinator | 计算分支路径、调用摘要模型、提交 branch summary |
-| Session Repository | 读取 session state、路径和元数据 |
-| Entry Repository | 追加 entry、读取 entry、执行幂等校验 |
-| Audit Repository | 保存 leaf move、冲突、迁移和管理操作审计 |
-| GaussDB | 保存 durable source of truth 和物化查询投影 |
+| Agent Runtime | 驱动 turn、工具和 LLM，不直接访问数据库 |
+| `MemorySessionApplicationService` | 编排 session、append、move、fork、context 和迁移 |
+| `ContextRebuilder` | 将完整活动路径确定性投影为 runtime context |
+| `CompactionCoordinator` | 准备 snapshot、生成摘要、提交 compaction |
+| `BranchSummaryCoordinator` | 计算分支差异、生成摘要、提交目标侧 entry |
+| `SessionRepository` | header、state、列表、树和 fork 查询 |
+| `EntryRepository` | entry 追加、分页、路径和投影 |
+| `WriteOperationRepository` | 幂等操作、稳定响应和冲突识别 |
+| `GaussDbJdbcAdapter` | JDBC 事务、SQLState 映射、JSONB 编解码 |
+| GaussDB | 会话事实源、状态与查询投影 |
 
-![Append and branch transaction](./diagrams/memory/memory-write-transaction.svg)
+![Append, move, and summary transaction](./diagrams/memory/memory-write-transaction.svg)
 
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L46)
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L57)
 
-### 5.2 Java 包边界
-
-以下是 target-only 包边界，不表示当前 Java 工程已经存在这些类：
+### 5.2 Java 模块边界
 
 ```text
-com.example.agent.memory.api
+memory.api
   MemorySessionApplicationService
-  MemoryContextQuery
-  MemoryWriteCommand
+  command/*
+  view/*
 
-com.example.agent.memory.domain
-  SessionAggregate
+memory.domain
+  SessionHeader
+  SessionState
   SessionEntry
-  CompactionEntry
-  BranchSummaryEntry
   ContextSnapshot
-  TenantId
+  MemoryError
+  SessionEntryCodec
 
-com.example.agent.memory.application
+memory.application
   ContextRebuilder
   CompactionCoordinator
   BranchSummaryCoordinator
-  JsonlImportService
+  SessionImportService
 
-com.example.agent.memory.infrastructure.gauss
-  GaussSessionRepository
-  GaussEntryRepository
-  GaussAuditRepository
-  GaussSessionRowMapper
+memory.infrastructure.gaussdb
+  GaussDbSessionRepository
+  GaussDbEntryRepository
+  GaussDbWriteOperationRepository
+  GaussDbTransactionManager
+  JsonbJdbcCodec
+  GaussDbSqlStateMapper
 ```
 
-Java 使用 sealed interface 或明确的 entry record 表达领域类型；数据库 `payload` 仍保留原始 JSON，以便未知 extension entry 可被导入和重新导出。
+领域层和 Application Service 不导入 openGauss 类型。只有 `memory.infrastructure.gaussdb` 可以依赖驱动特有类。
+
+### 5.3 驱动与连接契约
+
+| 项目 | 固定选择 |
+|---|---|
+| Maven 坐标 | `org.opengauss:opengauss-jdbc:6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1` |
+| 驱动类 | `org.opengauss.Driver` |
+| URL | `jdbc:opengauss://host:port/database` |
+| Java 边界 | `DataSource`、`Connection`、`PreparedStatement`、`ResultSet` |
+| JSONB | 统一通过 `JsonbJdbcCodec` 绑定和读取 |
+| Schema | 显式版本化迁移，不允许 ORM 自动创建或变更 |
+
+定制版本来自内部制品仓库，不允许解析失败后自动回退到其他 openGauss JDBC 或 PostgreSQL JDBC。应用依赖树排除 `org.postgresql:postgresql`，避免同一 JVM 中的驱动冲突。
+
+JDBC 版本不等同于 GaussDB 服务端版本。部署清单必须分别记录服务端版本、驱动 JAR 文件摘要和 Maven 坐标。
+
+连接 URL、用户名、密码、TLS、连接超时、statement timeout、连接池大小和健康检查参数由部署配置提供，不写入领域对象或数据库 metadata。启动流程先加载驱动，再建立连接并校验 `memory_schema_version`；应用账号无 DDL 权限。
+
+`JsonbJdbcCodec` 是唯一允许使用驱动特有 JSON/OTHER 类型的适配器。具体绑定 API必须以该定制 JAR 的实际公开类型为准，不从其他 openGauss 版本推断。
+
+### 5.4 Schema 迁移
+
+- 每个发布包携带顺序、不可变 SQL migration。
+- 独立迁移身份执行 DDL；运行身份只执行 DML。
+- `memory_schema_version` 记录已安装版本。
+- 应用启动只验证版本，不自动升级。
+- migration 失败必须整体回滚；不支持事务的 DDL 必须在发布脚本中明确补偿步骤。
 
 ## 6. 逻辑数据模型
 
-本章只定义会话事件面及其直接治理记录。表名中的 `memory` 表示 pi 的 Session Memory 写命令，不表示跨会话长期记忆库。`runtime_checkpoint*`、`memory_store*`、`agent_definition*` 和 `artifact*` 均不属于本 SR。
-
 ### 6.1 `agent_session`
 
-保存 header 和当前状态投影：
+保存稳定 header：会话 id、格式版本、cwd、父会话、metadata 和创建时间。当前 leaf、revision 和统计不与 header 混放。
 
-- `(tenant_id, session_id)` 是主键。
-- `current_leaf_entry_id` 是可恢复的当前 leaf。
-- `revision` 用于乐观并发检查。
-- `next_append_seq` 用于在 session 行锁内分配顺序。
-- `parent_session_id` 只表示同租户 fork 关系；跨租户复制必须走独立授权流程并保存外部来源，而不是建立直接外键。
+### 6.2 `agent_session_state`
 
-### 6.2 `session_entry`
+每个 session 恰好一行：
 
-每条 entry 只插入一次，payload 保存该 entry 的完整原始 JSON 形状。固定列用于树遍历、租户过滤、类型过滤、排序和审计；易变扩展字段不拆成大量 nullable 列。
+- `current_leaf_entry_id` 是活动路径 leaf，可为空。
+- `revision` 是命令级乐观版本，每个成功修改命令递增一次。
+- `next_append_seq` 在 state 行锁内分配。
+- session name、消息数、token 和 cost 是可重建投影。
 
-### 6.3 `session_leaf_event`
+模型、思考级别和 active tools 不保存在 state，因为它们随活动分支变化，必须从完整路径推导。
 
-记录显式 branch、reset、恢复和追加造成的 leaf 改变。`session_revision` 为同一会话提供稳定、唯一的状态变更顺序。它是 Java ToB 新增的审计事件，不参与 LLM context。`agent_session.current_leaf_entry_id` 是它的最新物化结果。
+### 6.3 `session_entry`
 
-### 6.4 `session_file_operation`
+不可变会话事实表。固定列保存身份、树关系、类型、顺序和时间；`payload JSONB` 保存 type-specific 字段及未知扩展字段。读取时通过固定列和 payload 重建完整 `SessionTreeEntry`。
 
-从内建 compaction/branch summary details 展开文件路径，支持文件级审计和会话查询。它不是 LLM context 的事实源；summary 和 entry payload 仍然保留。
+`operation_id` 把本次写入关联到幂等命令。普通 append 写一条 entry；带摘要的 move 可在同一 operation 下写 leaf marker 和 branch summary 两条 entry。
 
-### 6.5 `memory_write_operation`
+### 6.4 `session_write_operation`
 
-保存会话写命令的幂等治理记录。事务先建立 `started` 行，完成 entry、leaf 和 session 投影后再在同一事务中改为 `committed` 并写入稳定响应；回滚时 `started` 行一起回滚。该表不是长期记忆内容表。
+保存写命令的幂等键、规范化请求 SHA-256、状态和稳定响应。`started`、entry、state 和最终 `committed` 在同一事务内，因此回滚后不会留下可见半完成行。
 
-### 6.6 数据关系
+### 6.5 `session_label`
+
+保存每个 target entry 当前生效的非空 label。label entry 仍是事实；该表只是按目标查询的投影。清除 label 时删除投影行。
+
+### 6.6 `session_file_operation`
+
+从 pi 生成的 compaction 或 branch summary `details.readFiles`、`details.modifiedFiles` 展开。该表不参与 context rebuild，可从 entry 重建。
+
+### 6.7 数据关系
 
 ![Session event plane data model](./diagrams/memory/memory-data-model.svg)
 
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L97)
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L120)
 
-## 7. GaussDB DDL 草案
+## 7. 集中式 GaussDB DDL 草案
 
-以下 DDL 是 target-only 草案。实际部署前需要根据 GaussDB 版本验证 JSONB、递归 CTE、索引和约束语法。
+以下是 target-only migration v1。上线前必须在实际集中式 GaussDB 版本和指定 JDBC JAR 上执行兼容性测试。
 
 ```sql
+CREATE TABLE memory_schema_version (
+    component       VARCHAR(64) NOT NULL,
+    schema_version  INTEGER     NOT NULL,
+    installed_at    TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (component)
+);
+
 CREATE TABLE agent_session (
-    tenant_id              VARCHAR(64)  NOT NULL,
-    session_id             VARCHAR(128) NOT NULL,
-    session_version        INTEGER      NOT NULL DEFAULT 3,
-    cwd                    TEXT         NOT NULL,
-    parent_session_id      VARCHAR(128),
-    current_leaf_entry_id  VARCHAR(128),
-    revision               BIGINT       NOT NULL DEFAULT 0,
-    next_append_seq        BIGINT       NOT NULL DEFAULT 1,
-    created_at             TIMESTAMPTZ  NOT NULL,
-    updated_at             TIMESTAMPTZ  NOT NULL,
-    metadata               JSONB        NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (tenant_id, session_id),
-    FOREIGN KEY (tenant_id, parent_session_id)
-        REFERENCES agent_session (tenant_id, session_id)
+    session_id              VARCHAR(128) NOT NULL,
+    session_format_version  INTEGER      NOT NULL DEFAULT 3,
+    cwd                     TEXT         NOT NULL,
+    parent_session_id       VARCHAR(128),
+    metadata                JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    created_at              TIMESTAMPTZ  NOT NULL,
+    updated_at              TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (session_id),
+    FOREIGN KEY (parent_session_id)
+        REFERENCES agent_session (session_id)
+        ON DELETE SET NULL,
+    CHECK (session_format_version > 0)
 );
 
-COMMENT ON TABLE agent_session IS '会话身份及当前状态投影；记忆事实保存在 session_entry';
-COMMENT ON COLUMN agent_session.tenant_id IS '认证租户标识；必须来自服务端 TenantContext，禁止信任请求体';
-COMMENT ON COLUMN agent_session.session_id IS '租户内会话标识；默认可使用 UUIDv7，最大长度由接口契约约束';
-COMMENT ON COLUMN agent_session.session_version IS '持久化会话格式版本；用于兼容 pi 会话版本，不作为并发版本';
-COMMENT ON COLUMN agent_session.cwd IS '会话创建时的工作目录快照；不得用于推导租户身份';
-COMMENT ON COLUMN agent_session.parent_session_id IS '同租户 fork 来源会话标识；根会话为空，跨租户复制不得建立直接外键';
-COMMENT ON COLUMN agent_session.current_leaf_entry_id IS '当前活动分支的叶子 entry 标识；空会话或 reset 到根前位置时可为空';
-COMMENT ON COLUMN agent_session.revision IS '会话上下文乐观锁版本；追加 entry 或移动 leaf 成功后递增';
-COMMENT ON COLUMN agent_session.next_append_seq IS '下一个会话内追加序号；必须在锁定 agent_session 行后分配';
-COMMENT ON COLUMN agent_session.created_at IS '会话数据库记录的创建时间';
-COMMENT ON COLUMN agent_session.updated_at IS '会话状态投影最后更新时间；不等同于原始消息事件时间';
-COMMENT ON COLUMN agent_session.metadata IS '低频可扩展会话元数据；不得保存 provider secret 等敏感凭据';
-
-CREATE TABLE session_entry (
-    tenant_id          VARCHAR(64)  NOT NULL,
-    session_id         VARCHAR(128) NOT NULL,
-    entry_id           VARCHAR(128) NOT NULL,
-    parent_entry_id    VARCHAR(128),
-    entry_type         VARCHAR(64)  NOT NULL,
-    append_seq         BIGINT       NOT NULL,
-    event_time         TIMESTAMPTZ  NOT NULL,
-    payload            JSONB        NOT NULL,
-    created_at         TIMESTAMPTZ  NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, entry_id),
-    UNIQUE (tenant_id, session_id, append_seq),
-    FOREIGN KEY (tenant_id, session_id)
-        REFERENCES agent_session (tenant_id, session_id),
-    FOREIGN KEY (tenant_id, session_id, parent_entry_id)
-        REFERENCES session_entry (tenant_id, session_id, entry_id),
-    CHECK (parent_entry_id IS NULL OR parent_entry_id <> entry_id),
-    CHECK (entry_type IN (
-        'message', 'thinking_level_change', 'model_change',
-        'compaction', 'branch_summary', 'custom', 'custom_message',
-        'label', 'session_info'
-    ))
-);
-
-COMMENT ON TABLE session_entry IS '不可变会话 entry 事实表；通过 parent_entry_id 组成会话树';
-COMMENT ON COLUMN session_entry.tenant_id IS 'entry 所属认证租户标识；参与所有主键、外键和查询过滤';
-COMMENT ON COLUMN session_entry.session_id IS 'entry 所属会话标识；仅在同一租户内解释';
-COMMENT ON COLUMN session_entry.entry_id IS '会话内 entry 唯一标识；兼容 pi 短 ID 和完整 UUID';
-COMMENT ON COLUMN session_entry.parent_entry_id IS '父 entry 标识；为空表示树根，必须属于同一租户和会话';
-COMMENT ON COLUMN session_entry.entry_type IS 'SessionEntry 判别类型；决定 payload 解析和上下文投影规则';
-COMMENT ON COLUMN session_entry.append_seq IS '会话内单调递增追加序号；用于稳定排序和审计，不表示树关系';
-COMMENT ON COLUMN session_entry.event_time IS 'entry 原始事件时间；JSONL 导入时保留源 timestamp 的时间语义';
-COMMENT ON COLUMN session_entry.payload IS 'entry 完整业务 JSON；保留类型专属及扩展字段并受大小和敏感信息限制';
-COMMENT ON COLUMN session_entry.created_at IS 'entry 写入数据库的时间；可与原始事件时间不同';
-
-CREATE TABLE memory_write_operation (
-    tenant_id       VARCHAR(64)  NOT NULL,
+CREATE TABLE session_write_operation (
     operation_id    VARCHAR(128) NOT NULL,
     session_id      VARCHAR(128) NOT NULL,
     operation_type  VARCHAR(32)  NOT NULL,
     request_hash    CHAR(64)     NOT NULL,
-    status          VARCHAR(16)  NOT NULL DEFAULT 'started',
+    status          VARCHAR(16)  NOT NULL,
     result_payload  JSONB,
-    created_at      TIMESTAMPTZ  NOT NULL,
+    started_at      TIMESTAMPTZ  NOT NULL,
     committed_at    TIMESTAMPTZ,
-    PRIMARY KEY (tenant_id, operation_id),
-    UNIQUE (tenant_id, session_id, operation_id),
-    FOREIGN KEY (tenant_id, session_id)
-        REFERENCES agent_session (tenant_id, session_id),
+    PRIMARY KEY (operation_id),
+    UNIQUE (session_id, operation_id),
     CHECK (operation_type IN (
-        'append', 'branch', 'reset', 'resume',
-        'compaction', 'branch_summary', 'import'
+        'create', 'append', 'move', 'compaction',
+        'branch_summary', 'fork', 'delete', 'import'
     )),
     CHECK (
-        (status = 'started' AND result_payload IS NULL AND committed_at IS NULL)
+        (status = 'started'
+            AND result_payload IS NULL
+            AND committed_at IS NULL)
         OR
-        (status = 'committed' AND result_payload IS NOT NULL AND committed_at IS NOT NULL)
+        (status = 'committed'
+            AND result_payload IS NOT NULL
+            AND committed_at IS NOT NULL)
     )
 );
 
-COMMENT ON TABLE memory_write_operation IS '会话记忆写命令的幂等治理记录；不是跨会话长期记忆内容表';
-COMMENT ON COLUMN memory_write_operation.tenant_id IS '幂等操作所属认证租户标识';
-COMMENT ON COLUMN memory_write_operation.operation_id IS '租户内唯一幂等键；相同请求重试必须复用该值';
-COMMENT ON COLUMN memory_write_operation.session_id IS '幂等写操作目标会话标识';
-COMMENT ON COLUMN memory_write_operation.operation_type IS '幂等命令类型；用于约束重试必须命中相同业务操作';
-COMMENT ON COLUMN memory_write_operation.request_hash IS '规范化请求内容的 SHA-256 十六进制摘要；用于识别幂等键误复用';
-COMMENT ON COLUMN memory_write_operation.status IS '同一事务内的 started 或 committed 状态；回滚不保留 started 行';
-COMMENT ON COLUMN memory_write_operation.result_payload IS '首次成功提交的稳定响应；仅 committed 状态非空';
-COMMENT ON COLUMN memory_write_operation.created_at IS '幂等写操作首次进入事务的时间';
-COMMENT ON COLUMN memory_write_operation.committed_at IS '幂等写操作首次成功提交时间；started 状态为空';
-
-CREATE TABLE session_leaf_event (
-    tenant_id          VARCHAR(64)  NOT NULL,
-    session_id         VARCHAR(128) NOT NULL,
-    event_id           VARCHAR(128) NOT NULL,
-    session_revision   BIGINT       NOT NULL,
-    from_leaf_entry_id VARCHAR(128),
-    to_leaf_entry_id   VARCHAR(128),
-    reason             VARCHAR(32)  NOT NULL,
-    operation_id       VARCHAR(128) NOT NULL,
-    occurred_at        TIMESTAMPTZ  NOT NULL,
-    details            JSONB        NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (tenant_id, session_id, event_id),
-    UNIQUE (tenant_id, session_id, session_revision),
-    FOREIGN KEY (tenant_id, session_id)
-        REFERENCES agent_session (tenant_id, session_id),
-    FOREIGN KEY (tenant_id, session_id, from_leaf_entry_id)
-        REFERENCES session_entry (tenant_id, session_id, entry_id),
-    FOREIGN KEY (tenant_id, session_id, to_leaf_entry_id)
-        REFERENCES session_entry (tenant_id, session_id, entry_id),
-    FOREIGN KEY (tenant_id, session_id, operation_id)
-        REFERENCES memory_write_operation (tenant_id, session_id, operation_id),
-    CHECK (reason IN (
-        'append', 'branch', 'reset', 'resume',
-        'compaction', 'branch_summary', 'import'
+CREATE TABLE session_entry (
+    session_id       VARCHAR(128) NOT NULL,
+    entry_id         VARCHAR(128) NOT NULL,
+    parent_entry_id  VARCHAR(128),
+    append_seq       BIGINT       NOT NULL,
+    entry_type       VARCHAR(64)  NOT NULL,
+    event_time       TIMESTAMPTZ  NOT NULL,
+    payload          JSONB        NOT NULL,
+    operation_id     VARCHAR(128) NOT NULL,
+    created_at       TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (session_id, entry_id),
+    UNIQUE (session_id, append_seq),
+    FOREIGN KEY (session_id)
+        REFERENCES agent_session (session_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (session_id, parent_entry_id)
+        REFERENCES session_entry (session_id, entry_id),
+    FOREIGN KEY (session_id, operation_id)
+        REFERENCES session_write_operation (session_id, operation_id),
+    CHECK (append_seq > 0),
+    CHECK (parent_entry_id IS NULL OR parent_entry_id <> entry_id),
+    CHECK (entry_type IN (
+        'message',
+        'thinking_level_change',
+        'model_change',
+        'active_tools_change',
+        'compaction',
+        'branch_summary',
+        'custom',
+        'custom_message',
+        'label',
+        'session_info',
+        'leaf'
     ))
 );
 
-COMMENT ON TABLE session_leaf_event IS '当前 leaf 变化的不可变审计事件；不参与 LLM 上下文';
-COMMENT ON COLUMN session_leaf_event.tenant_id IS 'leaf 事件所属认证租户标识';
-COMMENT ON COLUMN session_leaf_event.session_id IS 'leaf 事件所属会话标识';
-COMMENT ON COLUMN session_leaf_event.event_id IS 'leaf 变化审计事件的唯一标识';
-COMMENT ON COLUMN session_leaf_event.session_revision IS '该 leaf 变化提交后的会话 revision；会话内唯一且稳定排序';
-COMMENT ON COLUMN session_leaf_event.from_leaf_entry_id IS '变化前 leaf entry 标识；首次追加或无前置 leaf 时可为空';
-COMMENT ON COLUMN session_leaf_event.to_leaf_entry_id IS '变化后 leaf entry 标识；reset 到根前位置时可为空';
-COMMENT ON COLUMN session_leaf_event.reason IS 'leaf 变化原因；区分普通追加、导航、摘要追加、恢复和导入';
-COMMENT ON COLUMN session_leaf_event.operation_id IS '触发本次 leaf 变化的同会话幂等操作标识';
-COMMENT ON COLUMN session_leaf_event.occurred_at IS 'leaf 状态变化实际提交时间';
-COMMENT ON COLUMN session_leaf_event.details IS 'leaf 变化的扩展审计信息；不作为当前 leaf 的事实源';
-
-CREATE TABLE session_file_operation (
-    tenant_id       VARCHAR(64)  NOT NULL,
-    session_id      VARCHAR(128) NOT NULL,
-    source_entry_id VARCHAR(128) NOT NULL,
-    operation_type  VARCHAR(16)  NOT NULL,
-    file_path       TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, source_entry_id, operation_type, file_path),
-    FOREIGN KEY (tenant_id, session_id, source_entry_id)
-        REFERENCES session_entry (tenant_id, session_id, entry_id),
-    CHECK (operation_type IN ('read', 'written', 'edited'))
+CREATE TABLE agent_session_state (
+    session_id             VARCHAR(128) NOT NULL,
+    current_leaf_entry_id  VARCHAR(128),
+    revision               BIGINT       NOT NULL DEFAULT 0,
+    next_append_seq        BIGINT       NOT NULL DEFAULT 1,
+    session_name           TEXT,
+    message_count          BIGINT       NOT NULL DEFAULT 0,
+    cached_tokens          BIGINT       NOT NULL DEFAULT 0,
+    uncached_tokens        BIGINT       NOT NULL DEFAULT 0,
+    total_tokens           BIGINT       NOT NULL DEFAULT 0,
+    cost_total             NUMERIC(20, 8) NOT NULL DEFAULT 0,
+    updated_at             TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (session_id),
+    FOREIGN KEY (session_id)
+        REFERENCES agent_session (session_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (session_id, current_leaf_entry_id)
+        REFERENCES session_entry (session_id, entry_id),
+    CHECK (revision >= 0),
+    CHECK (next_append_seq > 0),
+    CHECK (
+        message_count >= 0
+        AND cached_tokens >= 0
+        AND uncached_tokens >= 0
+        AND total_tokens >= 0
+        AND cost_total >= 0
+    )
 );
 
-COMMENT ON TABLE session_file_operation IS '从 compaction 或 branch summary details 展开的文件级查询和审计投影';
-COMMENT ON COLUMN session_file_operation.tenant_id IS '文件操作投影所属认证租户标识';
-COMMENT ON COLUMN session_file_operation.session_id IS '文件操作投影所属会话标识';
-COMMENT ON COLUMN session_file_operation.source_entry_id IS '产生该文件操作投影的 compaction 或 branch summary entry 标识';
-COMMENT ON COLUMN session_file_operation.operation_type IS '文件操作分类；限定为 read、written 或 edited';
-COMMENT ON COLUMN session_file_operation.file_path IS '租户内文件路径；查询和展示必须执行权限校验及必要脱敏';
-COMMENT ON COLUMN session_file_operation.created_at IS '文件操作投影写入数据库的时间';
+CREATE TABLE session_label (
+    session_id            VARCHAR(128) NOT NULL,
+    target_entry_id       VARCHAR(128) NOT NULL,
+    source_label_entry_id VARCHAR(128) NOT NULL,
+    label                 TEXT         NOT NULL,
+    updated_at            TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (session_id, target_entry_id),
+    FOREIGN KEY (session_id, target_entry_id)
+        REFERENCES session_entry (session_id, entry_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (session_id, source_label_entry_id)
+        REFERENCES session_entry (session_id, entry_id)
+        ON DELETE CASCADE,
+    CHECK (LENGTH(TRIM(label)) > 0)
+);
 
-```
+CREATE TABLE session_file_operation (
+    session_id       VARCHAR(128) NOT NULL,
+    source_entry_id  VARCHAR(128) NOT NULL,
+    operation_type   VARCHAR(16)  NOT NULL,
+    file_path        TEXT         NOT NULL,
+    created_at       TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (
+        session_id,
+        source_entry_id,
+        operation_type,
+        file_path
+    ),
+    FOREIGN KEY (session_id, source_entry_id)
+        REFERENCES session_entry (session_id, entry_id)
+        ON DELETE CASCADE,
+    CHECK (operation_type IN ('read', 'modified')),
+    CHECK (LENGTH(file_path) > 0)
+);
 
-`agent_session.current_leaf_entry_id` 不直接建立循环外键；写事务必须先验证 entry 属于同一 `(tenant_id, session_id)`。如果部署方需要数据库强约束，应使用可延迟约束或把 session state 拆成独立状态表。
+CREATE INDEX idx_agent_session_created
+    ON agent_session (created_at DESC, session_id);
 
-## 8. 索引与查询
+CREATE INDEX idx_agent_session_parent
+    ON agent_session (parent_session_id);
 
-```sql
 CREATE INDEX idx_session_entry_parent
-    ON session_entry (tenant_id, session_id, parent_entry_id);
+    ON session_entry (session_id, parent_entry_id);
 
-CREATE INDEX idx_session_entry_sequence
-    ON session_entry (tenant_id, session_id, append_seq);
+CREATE INDEX idx_session_entry_type_seq
+    ON session_entry (session_id, entry_type, append_seq);
 
-CREATE INDEX idx_session_entry_type
-    ON session_entry (tenant_id, session_id, entry_type, append_seq);
+CREATE INDEX idx_session_write_operation_session
+    ON session_write_operation (session_id, started_at);
 
-CREATE INDEX idx_session_entry_payload
-    ON session_entry USING GIN (payload jsonb_path_ops);
+CREATE INDEX idx_session_label_source
+    ON session_label (session_id, source_label_entry_id);
 
-CREATE INDEX idx_session_leaf_event_time
-    ON session_leaf_event (tenant_id, session_id, occurred_at, event_id);
+CREATE INDEX idx_session_file_operation_path
+    ON session_file_operation (file_path);
 
-CREATE INDEX idx_memory_write_operation_session
-    ON memory_write_operation (tenant_id, session_id, created_at);
-
-CREATE INDEX idx_file_operation_path
-    ON session_file_operation (tenant_id, file_path);
+INSERT INTO memory_schema_version (
+    component,
+    schema_version,
+    installed_at
+) VALUES (
+    'session-memory',
+    1,
+    CURRENT_TIMESTAMP
+);
 ```
 
-### 8.1 Active path 查询
+DDL 有意不包含：
 
-递归查询必须同时绑定 `tenant_id` 和 `session_id`。应用层不得先按 `entry_id` 全局查询再补租户过滤。
+- `tenant_id` 和任何多租户约束。
+- `session_leaf_event`；`leaf` entry 已承担不可变导航事实。
+- SQLite `branch_entries`；集中式 v1 通过递归 CTE读取路径。
+- payload 通用 GIN 索引；当前查询不按任意 JSON 字段过滤，避免无依据的写放大。
+- 分布式 `DISTRIBUTE BY`；当前数据库明确为集中式。
+
+`session_write_operation.session_id` 有意不建立 session 外键，使 create 可以先占用幂等键，并使 delete 后仍能返回稳定结果。被 entry 引用的 operation 与 session entry 同生命周期；未被 entry 引用的 create/delete operation，以及 session 删除后成为孤立记录的 operation，按幂等保留期清理。`session_entry` 的复合外键保证 entry 与 operation 的 session 一致。
+
+entry 的 type-specific 引用，例如 `leaf.targetId`、`label.targetId`、`compaction.firstKeptEntryId` 和 `branch_summary.fromId`，由 `SessionEntryCodec` 在写入前校验属于同一 session。current leaf 和 label 投影另外使用数据库外键保护。
+
+## 8. 路径查询与 Context rebuild
+
+### 8.1 完整活动路径
+
+读取先获得 state 的 `revision` 和 `current_leaf_entry_id`，再在同一只读事务快照中执行递归查询：
 
 ```sql
 WITH RECURSIVE active_path AS (
-    SELECT e.*, 0 AS depth
-    FROM session_entry e
-    JOIN agent_session s
-      ON s.tenant_id = e.tenant_id
-     AND s.session_id = e.session_id
-     AND s.current_leaf_entry_id = e.entry_id
-    WHERE e.tenant_id = :tenant_id
-      AND e.session_id = :session_id
+    SELECT
+        e.session_id,
+        e.entry_id,
+        e.parent_entry_id,
+        e.append_seq,
+        e.entry_type,
+        e.event_time,
+        e.payload,
+        0 AS depth
+    FROM agent_session_state s
+    JOIN session_entry e
+      ON e.session_id = s.session_id
+     AND e.entry_id = s.current_leaf_entry_id
+    WHERE s.session_id = ?
 
     UNION ALL
 
-    SELECT parent.*, child.depth + 1
-    FROM session_entry parent
-    JOIN active_path child
-      ON parent.tenant_id = child.tenant_id
-     AND parent.session_id = child.session_id
+    SELECT
+        parent.session_id,
+        parent.entry_id,
+        parent.parent_entry_id,
+        parent.append_seq,
+        parent.entry_type,
+        parent.event_time,
+        parent.payload,
+        child.depth + 1
+    FROM active_path child
+    JOIN session_entry parent
+      ON parent.session_id = child.session_id
      AND parent.entry_id = child.parent_entry_id
 )
-SELECT *
+SELECT
+    session_id,
+    entry_id,
+    parent_entry_id,
+    append_seq,
+    entry_type,
+    event_time,
+    payload
 FROM active_path
 ORDER BY depth DESC;
 ```
 
-查询结果只负责提供 root-to-leaf 的 entry path；compaction 过滤和消息投影由 `ContextRebuilder` 负责，避免把 prompt 语义散落到 SQL。
+空 session 的 current leaf 为 null，直接返回空路径。Repository 设置最大允许深度和 statement timeout；超限返回 `INVALID_ENTRY`，不返回部分路径。
+
+SQL 始终读取完整活动路径，Java 再应用 compaction。这样 model、thinking level 和 active tools 不会因为数据库提前截断 compaction 之前的状态 entry 而丢失。
+
+### 8.2 Context 投影
+
+```text
+fullPath = recursivePath(currentLeaf)
+state = deriveModelThinkingAndTools(fullPath)
+latestCompaction = last compaction in fullPath
+
+if no compaction:
+  contextEntries = fullPath
+else if latestCompaction.retainedTail exists:
+  contextEntries = [latestCompaction] + entriesAfterCompaction
+else:
+  contextEntries =
+    [latestCompaction]
+    + entriesFromFirstKeptBeforeCompaction
+    + entriesAfterCompaction
+
+messages = project(contextEntries)
+```
+
+`project(compaction)` 输出 summary message 后紧接 stored `retainedTail`。`leaf`、label、session info、model/thinking/tools change 不直接产生模型消息。
 
 ![Database context rebuild](./diagrams/memory/memory-context-rebuild.svg)
 
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L184)
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L219)
 
 ## 9. 事务、并发和幂等
 
-### 9.1 Append transaction
-
-```text
-BEGIN
-  INSERT memory_write_operation(status = started) ON CONFLICT DO NOTHING
-  if operation_id already exists:
-    read the existing operation
-    verify session_id, operation_type, and request_hash
-    if status is committed, return the stored result
-  SELECT agent_session FOR UPDATE
-  verify tenant_id, session_id, expected_leaf, expected_revision
-  use next_append_seq and increment it
-  INSERT session_entry
-  INSERT session_leaf_event(reason = append, session_revision = revision + 1)
-  UPDATE agent_session.current_leaf_entry_id, next_append_seq, revision, and updated_at
-  UPDATE memory_write_operation(status = committed, result_payload, committed_at)
-COMMIT
-```
-
-同一个 `operation_id` 重试时返回第一次提交结果；如果 session、operation type 或 `request_hash` 不一致，返回幂等键复用错误。并发请求对同一唯一键发生冲突时，数据库先等待首次事务提交或回滚：首次事务提交后读取稳定结果，首次事务回滚后由重试事务重新插入。`started`、entry、leaf event、session 投影和最终结果属于同一事务，因此不会留下可见的半完成操作。数据库事务不包含模型调用、工具执行或远程服务调用。
-
-### 9.2 Compaction commit
-
-摘要生成必须使用 immutable `ContextSnapshot`。提交时再次锁定 session state：
-
-- revision 和 expected leaf 一致时追加 compaction entry。
-- revision 不一致时返回 `STALE_CONTEXT_SNAPSHOT`，保留原摘要结果但不落库。
-- 重试必须基于新 snapshot 重新计算 firstKeptEntryId，不能复用旧切点。
-
-### 9.3 Tree navigation commit
-
-tree navigation 与 compaction 使用同一 revision 机制。摘要生成过程不持有数据库锁；只有最终 leaf move、branch summary entry、审计事件和 revision 更新在一个事务内提交。
+### 9.1 通用写事务
 
 ![Write transaction sequence](./diagrams/memory/memory-write-transaction.svg)
 
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L46)
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L57)
 
-## 10. 租户隔离与安全
+```text
+BEGIN
+  INSERT session_write_operation(status = started)
+    ON CONFLICT (operation_id) DO NOTHING
 
-以下是 Java ToB 的安全强化，不是 pi 的 JSONL 行为：
+  if operation already exists:
+    verify session_id, operation_type, request_hash
+    if committed:
+      return stored result after transaction completes
 
-- `TenantContext` 由认证层创建，Repository 方法必须显式接收并校验它。
-- 所有主键、外键、查询、唯一约束和缓存 key 都包含 `tenant_id`。
-- 不允许从 payload、客户端 header 或 session path 推导可信租户身份。
-- 数据库连接使用最小权限账号；应用写账号不能执行任意 DDL。
-- payload 中禁止保存 API key、OAuth token、cookie 和完整授权 header。
-- 日志只记录 tenant、session、entry、operation 和 correlation id；summary、prompt、tool result 默认脱敏或截断。
-- 数据库连接使用 TLS；备份、归档和临时导出必须使用平台加密能力。
-- `session_file_operation` 的 file path 需要按租户权限控制，避免跨租户暴露代码仓库路径。
-- 租户配额至少限制 session 数量、entry 数量、payload 字节数、summary 长度和单次导入大小。
+  SELECT agent_session_state
+    WHERE session_id = ?
+    FOR UPDATE
 
-是否启用数据库原生 row-level security 取决于最终 GaussDB 版本能力；不能把未验证的 RLS 语法当作本设计的唯一隔离措施。
+  verify expected_revision
+  verify expected_leaf_entry_id
+  validate all referenced entries
+  allocate append_seq values
+  INSERT immutable session_entry row(s)
+  update session_label/session_file_operation projections
+  UPDATE agent_session_state
+  UPDATE session_write_operation to committed
+COMMIT
+```
 
-## 11. JSONL 迁移与回滚
+相同 operation id、相同 request hash 的 retry 返回首次成功结果。operation id 已存在但 session、type 或 request hash 不同，返回 `IDEMPOTENCY_KEY_REUSE`。唯一键冲突由数据库等待首次事务完成：首次事务回滚后 retry 可重新建立 operation。
 
-### 11.1 导入
+`request_hash` 是规范化命令 JSON 的 SHA-256：包含 command type、session id、expected revision、expected leaf 和全部业务 payload；排除 operation id、trace id、认证信息及其他传输 metadata。规范化使用 UTF-8、对象 key 字典序和稳定的数字/空值编码。
 
-1. 逐行解析 header 和 entry。
-2. 根据 header 创建 `(tenant_id, session_id)`。
-3. 按文件顺序分配 `append_seq`，保留原始 `timestamp` 和完整 payload。
-4. 校验 parentId、firstKeptEntryId、fromId 和 label targetId 的引用。
-5. 从 compaction/branch details 展开 `session_file_operation`。
-6. 使用确定性 `operation_id` 在同一事务中创建 committed import operation、初始 current leaf 和 `reason=import` 的 leaf event。
-7. 生成导入计数、hash、孤儿 entry 和 payload 解析错误报告。
+### 9.2 Revision 语义
 
-当前 pi production session 文件没有显式 leaf entry；因此历史 JSONL 只能可靠表达文件最后 entry，无法恢复“只在进程内 branch 后但尚未追加”的瞬时 leaf。这是导入限制，不应伪装成原始数据存在。
+- revision 初始为 0。
+- 每个成功修改会话状态的 Application Service 命令递增一次。
+- 一个 branch-summary 命令即使写 leaf marker 和 summary 两条 entry，也只递增一次。
+- 只读查询、列表和导出不改变 revision。
+- expected revision 或 expected leaf 不匹配返回 `REVISION_CONFLICT`。
+- 摘要结果提交时快照不匹配返回更具体的 `STALE_CONTEXT_SNAPSHOT`。
 
-### 11.2 回滚
+### 9.3 投影一致性和重建
 
-首期采用数据库只读导出作为回滚材料：按 `append_seq` 导出 header、entry payload 和必要的 leaf state。切换期间保留 JSONL 原文件只读，不进行双向写入；双写会引入两个事实源和难以审计的冲突。
+投影与 entry 在同一事务中更新。`ProjectionRebuilder` 在维护窗口内按 `append_seq` 重放 entry 到临时表，校验计数和摘要后原子切换或覆盖目标投影。重建不改 entry、current leaf、revision 或 operation。
 
-### 11.3 分阶段发布
+损坏 payload 的策略：
 
-| 阶段 | 结果 |
+- 新写入在事务前由 `SessionEntryCodec` 拒绝，返回 `INVALID_ENTRY`。
+- 已持久化损坏 entry 在分页管理接口中标记错误，在 context rebuild 中使整个 snapshot 失败。
+- 不复制 SQLite 的静默 skip 行为，避免模型接收不完整且未告警的上下文。
+
+## 10. Java 接口和错误
+
+### 10.1 Application Service
+
+```java
+interface MemorySessionApplicationService {
+    SessionView createSession(CreateSessionCommand command);
+    SessionView openSession(String sessionId);
+    List<SessionSummary> listSessions(SessionListQuery query);
+    void deleteSession(DeleteSessionCommand command);
+    SessionView forkSession(ForkSessionCommand command);
+    AppendResult appendEntry(AppendEntryCommand command);
+    MoveResult moveTo(MoveToCommand command);
+    ContextSnapshot loadContext(LoadContextQuery query);
+    EntryPage pageEntries(EntryPageQuery query);
+}
+```
+
+这是公共领域契约，不暴露 JDBC、SQLState、JSONB driver object 或数据库行类型。
+
+### 10.2 命令并发字段
+
+| 命令 | operation id | expected revision | expected leaf |
+|---|---:|---:|---:|
+| create | 必须 | 固定为 0 | 固定为 null |
+| append | 必须 | 必须 | 必须，可为 null |
+| move / branch summary | 必须 | 必须 | 必须，可为 null |
+| compaction commit | 必须 | snapshot revision | snapshot leaf |
+| fork | 必须 | 源 session revision | 源 session leaf |
+| delete | 必须 | 必须 | 必须，可为 null |
+| import | 必须 | 固定为 0 | 固定为 null |
+
+delete 对已删除 session 的同 operation retry 返回首次稳定结果；`session_write_operation` 不随 session 删除，并在幂等保留期结束后清理。
+
+### 10.3 稳定错误
+
+| 错误 | 触发条件 |
 |---|---|
-| M0 | 创建 schema、权限、索引和 Repository contract |
-| M1 | 导入历史 JSONL，执行数量/hash/context parity 校验 |
-| M2 | Java 读路径启用 DB，失败时只读回退 JSONL |
-| M3 | Java 新写入只进入 DB，完成并发和幂等观测 |
-| M4 | 关闭 JSONL 写入，保留受控导出和迁移工具 |
-| M5 | 根据租户保留策略归档或删除 JSONL |
+| `NOT_FOUND` | session 或目标 entry 不存在 |
+| `INVALID_ENTRY` | payload、类型、引用、路径或 projection 无效 |
+| `INVALID_FORK_TARGET` | before 目标不是 user message，或目标不可达 |
+| `REVISION_CONFLICT` | expected revision/leaf 与 state 不一致 |
+| `IDEMPOTENCY_KEY_REUSE` | operation id 对应不同规范化请求 |
+| `STALE_CONTEXT_SNAPSHOT` | 摘要生成期间 revision 或 leaf 变化 |
+| `STORAGE_ERROR` | JDBC、超时、连接或无法分类的数据库错误 |
 
-## 12. 需求与验收
+`GaussDbSqlStateMapper` 负责把唯一键、外键、锁超时、事务回滚、连接故障和 statement timeout 映射为稳定错误，不把数据库错误文本直接返回客户端。
 
-### 12.1 PI parity
+## 11. 迁移、发布和运维
 
-- FR-PI-MEM-001：同一 active path 产生与 pi 等价的 context entry 顺序。
-- FR-PI-MEM-002：最新 compaction 产生一个 summary message，并按 firstKeptEntryId 保留近期 entry。
-- FR-PI-MEM-003：toolResult 不能成为 compaction cut point。
-- FR-PI-MEM-004：重复 compaction 使用 previous summary 进行增量更新。
-- FR-PI-MEM-005：branch summary 使用 old leaf 到 common ancestor 的 entry 集合生成。
-- FR-PI-MEM-006：custom entry 默认不进入 LLM context，custom_message 可以进入。
+### 11.1 JSONL 导入
 
-### 12.2 Java ToB
+1. 解析 header 和 v1-v3 entry。
+2. 为 header 创建 session。
+3. 按文件顺序分配 `append_seq`，保留原 timestamp。
+4. 把 base 字段写入固定列，其余字段写入 payload。
+5. 校验 parent、firstKept、fromId、label target 和 leaf target。
+6. 重建标签、名称、统计和文件操作投影。
+7. current leaf 默认取最后 entry；如果文件含新 harness leaf entry，则按 leaf target 计算。
+8. 生成 entry 数、内容 hash、孤儿和解析错误报告。
 
-- FR-JAVA-MEM-001：所有读写必须绑定认证租户上下文。
-- FR-JAVA-MEM-002：entry、leaf state、leaf audit event 在同一事务内保持一致。
-- FR-JAVA-MEM-003：普通 branch/reset 后进程重启仍能恢复当前 leaf。
-- FR-JAVA-MEM-004：重复 operation_id 不产生重复 entry。
-- FR-JAVA-MEM-005：过期 compaction/branch summary 不得覆盖新 revision。
-- FR-JAVA-MEM-006：payload 不得保存 provider secret。
-- FR-JAVA-MEM-007：历史 JSONL 可导入并输出 parity 报告。
-- FR-JAVA-MEM-008：Entry、Leaf Event 和 Write Operation 必须通过包含 tenant 与 session 的数据库外键绑定到同一会话。
-- FR-JAVA-MEM-009：每次 leaf 变化必须保存唯一 `session_revision`，可稳定重放会话状态变更顺序。
+旧 coding-agent JSONL 不记录“最后一次只移动 leaf”的状态，导入器不得伪造该 leaf；报告中标记 `UNRECOVERABLE_LEAF_MOVE`。
 
-### 12.3 测试设计
+### 11.2 SQLite 导入
 
-| 测试组 | 核心场景 |
+- 以 `sessions`、`session_entries` 和 `active_leaf_id` 为事实来源。
+- 按 `entry_seq` 导入，保留 entry id、parent、timestamp 和 payload。
+- 导入 `leaf` 和 `retainedTail`。
+- `branch_entries`、`session_materialized` 和 `entry_materialized` 不直接复制，目标投影统一重建。
+- 校验源 active leaf 与重放 leaf entry 得到的状态；不一致时停止该 session 导入。
+
+### 11.3 导出和回滚
+
+按 `append_seq` 重建 JSONL header 和完整 entry。数据库保持唯一写入事实源，不启用长期双写。迁移切换前保留原 JSONL/SQLite 只读副本；回滚通过受控导出或切回未被修改的源副本完成。
+
+### 11.4 发布阶段
+
+| 阶段 | 完成条件 |
 |---|---|
-| Context parity | 无 compaction、单次/重复 compaction、firstKeptEntryId、branch summary、custom message |
-| Tree property | 多分支、common ancestor、目标侧摘要挂载、空 root、孤儿数据拒绝 |
-| Transaction | append、branch、reset、compaction commit 的回滚和 revision 冲突 |
-| Idempotency | 同 operation_id 重试、session/type/hash 不一致、首次事务提交/回滚后的并发重试、无残留 started 行 |
-| Tenant security | 同 entry/session id 跨租户不可读、不可写、不可通过递归查询泄露 |
-| Migration | v1/v2/v3 JSONL、坏 JSON、缺失 parent、错误 firstKeptEntryId、重复导入 |
-| Limit | payload、tool result、summary、entry 数量、单租户配额超限 |
-| Recovery | commit 后进程退出、只导航后重启、数据库连接中断和重试 |
+| M0 | migration、权限、JDBC compatibility suite 通过 |
+| M1 | 历史数据影子导入，entry/hash/context parity 通过 |
+| M2 | 生产请求同时计算旧/新 read result，只返回旧结果并记录差异 |
+| M3 | 切换 GaussDB 读取；写入只进入 GaussDB |
+| M4 | 停止旧存储写入，保留受控导出和恢复副本 |
 
-## 13. 设计取舍
+### 11.5 指标和告警
 
-| ID | 问题 | pi 源码事实 | Java ToB 选择 | 差异分类 |
-|---|---|---|---|---|
-| TD-MEM-01 | 持久化介质 | append-only JSONL | GaussDB `session_entry` + JSONB payload | 架构改造 |
-| TD-MEM-02 | active leaf | production leaf 主要由内存管理 | current leaf + leaf event 持久化 | 架构改造 |
-| TD-MEM-03 | 并发 | 主要按单进程 AgentSession 控制 | row lock + revision + idempotency | ToB 可靠性强化 |
-| TD-MEM-04 | 租户 | 本地 session path 无租户概念 | 全表 tenant key + authenticated TenantContext | 安全强化 |
-| TD-MEM-05 | 原始 payload | TypeScript 对象直接写 JSONL | 固定查询列 + JSONB 原始 payload | Java 实现选择 |
-| TD-MEM-06 | 文件追踪 | summary details 中保存文件列表 | 保留 details，并增加查询投影 | ToB 审计强化 |
-| TD-MEM-07 | 向量检索 | pi compaction 不要求向量库 | 本期不引入向量索引 | 产品范围约束 |
-| TD-MEM-08 | LLM 事务边界 | 摘要调用发生在 AgentSession 控制流中 | LLM 调用事务外，提交时检查 snapshot | 架构改造 |
-| TD-MEM-09 | Agent 数据库边界 | pi 基线只提供本地 session entry tree | 本 SR 仅覆盖会话事件面；控制面、checkpoint、长期记忆和 artifact 独立设计 | 架构边界 |
-| TD-MEM-10 | 关系完整性 | JSONL 引用由加载逻辑解释 | tenant + session 进入 Session、Entry、Leaf Event、Write Operation 复合外键 | 安全强化 |
+- append、move、compaction commit 延迟和失败率。
+- revision conflict、stale snapshot 和 idempotency hit 数量。
+- context path 深度、查询耗时、rebuild 耗时和输出消息数。
+- JSONB payload 大小、session entry 数和单次 import 大小。
+- projection rebuild 差异和 migration parity 失败。
+- JDBC pool exhausted、连接失败、锁等待和 statement timeout。
 
-## 14. 后续设计
+## 12. 安全
 
-以下主题不阻塞本期数据库持久化，但必须按独立数据平面设计。候选模型及外部依据见[数据库模式拆解文档](./agent-database-patterns/README.md)：
+虽然不设计多租户，仍执行以下安全强化：
 
-- `SR-RUN-001`：Run、Step、Checkpoint、Blob、Pending Write 和工具调用恢复语义。
-- `SR-LTM-001`：跨会话长期记忆的 owner、scope、source、version、抽取、归档、删除和召回策略。
-- `SR-AGENT-DB-001`：Agent Definition、Version、Resolved Snapshot、Environment 和 Tool Binding。
-- `SR-ARTIFACT-001`：文件与对象内容、hash、权限和生命周期。
-- summary、message text 和 file path 的全文/向量检索。
-- 租户级保留策略、合规删除和加密密钥轮换。
-- 大会话分区、冷热归档和异步 context cache。
-- 事件发布、CDC、跨区域复制和灾备 RPO/RTO。
+- 数据库连接强制 TLS，凭据来自部署 secret，不写入 metadata、payload 或日志。
+- 运行账号最小权限，禁止 DDL、用户管理和任意 schema 访问。
+- payload 禁止 API key、OAuth token、cookie 和完整 authorization header。
+- prompt、summary、tool result 和 file path 默认不进入普通日志；诊断日志脱敏并限制长度。
+- 限制单 entry payload、retained tail、summary、路径深度、导入文件和单 session entry 数。
+- JDBC 使用参数化 SQL；表名、列名和排序字段不从请求直接拼接。
+- 备份、导出和临时文件使用平台加密与访问审计。
 
-## 15. 版本记录
+## 13. 测试与验收
+
+### 13.1 pi parity
+
+- 所有 11 种 entry 的编码、解码、分页和回放。
+- 无 compaction、单次/重复 compaction、`retainedTail` 和旧 `firstKeptEntryId`。
+- split turn、tool result 不能作为 cut point、previous summary 增量更新。
+- branch common ancestor、旧路径摘要、目标侧 summary 挂载。
+- custom 默认不进入 context，custom projector 和 custom message 正确投影。
+- model、thinking level 和 active tools 从完整活动路径推导。
+- fork 默认 before、显式 at、非法目标和 entry id 保留。
+
+### 13.2 数据库事务
+
+- append 的 entry、state、operation 和投影原子提交或回滚。
+- move 写 leaf marker，但 state 指向 target。
+- 带 summary 的 move 在一次命令中写两个 entry，只增加一次 revision。
+- 同 operation 并发 retry 只产生一组 entry。
+- 相同 operation id 不同 hash 返回 `IDEMPOTENCY_KEY_REUSE`。
+- revision/leaf 冲突、锁等待、statement timeout 和连接中断。
+- projection 重建结果与在线投影一致。
+
+### 13.3 JDBC compatibility suite
+
+必须使用精确版本 `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`，不允许用其他版本代测：
+
+- `org.opengauss.Driver` 加载和 `jdbc:opengauss:` URL。
+- TLS、认证、连接池 validation query 和 failover 后重连。
+- JSONB insert、update、null、Unicode、大 payload 和读取。
+- 递归 CTE、复合外键、`SELECT ... FOR UPDATE` 和事务回滚。
+- prepared statement、batch insert、NUMERIC cost 和 TIMESTAMPTZ。
+- 唯一键、外键、锁超时、statement timeout 和连接错误的 SQLState 映射。
+- schema migration 的事务性及重复执行保护。
+
+### 13.4 迁移
+
+- JSONL v1、v2、v3、新 harness leaf 和 retained tail。
+- 当前 pi SQLite session、active leaf、labels 和 materialized state。
+- 缺失 parent、非法 firstKept、错误 leaf target、坏 JSON 和重复 entry。
+- entry 数、规范化 hash、活动路径、context messages 和最终 state parity。
+- 旧 JSONL 未持久化 leaf move 的限制报告。
+
+### 13.5 验收标准
+
+- 相同合法活动树输入产生与 pi harness 等价的 context messages 和状态。
+- 任意成功写命令后，entry、state、operation 和投影不存在部分可见状态。
+- 服务重启后可恢复显式 leaf move。
+- 并发 retry 不产生重复 entry，过期摘要不能覆盖新分支。
+- 文档中所有 DDL 在目标集中式 GaussDB 和指定 JDBC JAR 上通过 compatibility suite。
+- 迁移 parity 不一致的 session 不允许进入切换清单。
+
+## 14. 设计取舍
+
+| ID | 问题 | 选择 | 分类 |
+|---|---|---|---|
+| TD-MEM-01 | 持久化介质 | 集中式 GaussDB | 架构改造 |
+| TD-MEM-02 | JDBC | 锁定指定 openGauss JDBC 定制版本 | 产品约束 |
+| TD-MEM-03 | leaf 审计 | 使用 pi `leaf` entry，不建独立 leaf event 表 | pi 新 harness 对齐 |
+| TD-MEM-04 | current state | header 与 `agent_session_state` 分表 | 架构选择 |
+| TD-MEM-05 | active path | 递归 CTE，不复制 SQLite branch materialization | 架构选择 |
+| TD-MEM-06 | compaction | `retainedTail` 为主，兼容 firstKept | 兼容约束 |
+| TD-MEM-07 | 并发 | state 行锁 + revision + expected leaf + idempotency | 可靠性强化 |
+| TD-MEM-08 | 损坏 entry | context 失败，不静默跳过 | 安全强化 |
+| TD-MEM-09 | 多租户 | 不建模 | 产品范围约束 |
+| TD-MEM-10 | 跨会话记忆 | 不建模，不增加向量索引 | 产品范围约束 |
+| TD-MEM-11 | 原始 payload | 固定树列 + type-specific JSONB | Java 实现选择 |
+| TD-MEM-12 | 摘要事务 | 模型调用在事务外，提交时校验 snapshot | 架构改造 |
+
+## 15. 官方能力依据
+
+- [GaussDB 实例类型：集中式与分布式](https://support.huaweicloud.com/intl/en-us/productdesc-gaussdb/gaussdb_01_013.html)
+- [GaussDB Centralized V2.0-3.x `WITH RECURSIVE`](https://support.huaweicloud.com/intl/en-us/centralized-devg-v3-gaussdb/gaussdb-42-0649.html)
+- [openGauss 6.0 JDBC 驱动类与兼容说明](https://docs.opengauss.org/en/docs/6.0.0/docs/DeveloperGuide/jdbc-package-driver-class-and-environment-class.html)
+- [openGauss 6.0 JDBC 驱动加载](https://docs.opengauss.org/en/docs/6.0.0/docs/DeveloperGuide/loading-the-driver-jdbc.html)
+
+这些公开文档只能证明标准产品能力。定制 JDBC 版本 `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1` 的二进制兼容性必须由第 13.3 节测试确认。
+
+## 16. 版本记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.5 | 2026-07-30 | 更新 pi 基线至 `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`；收敛为单租户会话内记忆；采用新 harness/SQLite 的 `leaf`、`active_tools_change` 和 `retainedTail`；数据库固定为集中式 GaussDB；锁定 openGauss JDBC 定制版本；以 state、operation 和可重建投影替代旧租户及 leaf event 模型 |
 | v0.4 | 2026-07-20 | 将 SR 边界收敛为 Session Event Plane；基于主流 Agent 数据库调研明确拆分控制面、Runtime Checkpoint、跨会话长期记忆和 Artifact；为 Entry、Leaf Event、Write Operation 补齐复合外键与会话 revision 顺序；修正幂等操作先建记录再写结果的事务状态模型 |
 | v0.3 | 2026-07-17 | 将 pi 源码基线更新为 `216e672e7c9fc65682553394b74e483c0c9e47f7`，重新核对记忆相关实现和源码锚点；确认 model runtime facade 变更未改变记忆语义 |
 | v0.2 | 2026-07-16 | 为 DDL 草案中的全部表和字段补充数据库 COMMENT；不改变表结构和行为设计 |

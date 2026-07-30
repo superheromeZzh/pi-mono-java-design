@@ -12,7 +12,7 @@
 - [主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界](./agent-database-patterns/README.md)
 - [Agent 元数据 GaussDB 表设计](./agent-metadata-gaussdb-design/README.md)
 - [pi-mono-java Manager 驱动的多 Agent 运行设计](./pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [pi-mono Java ToB 记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
+- [pi-mono Java 集中式 GaussDB 会话记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
 
 ## 约定
 

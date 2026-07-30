@@ -1,4 +1,4 @@
-' Generated from public documentation and source repositories analyzed 2026-07-20.
+' Generated from public documentation and source repositories analyzed 2026-07-30.
 ' Run from this directory: plantuml -tsvg diagram.puml
 
 @startuml agent-database-reference-layers
@@ -83,23 +83,25 @@ skinparam roundcorner 8
 skinparam componentStyle rectangle
 skinparam ArrowColor #53657D
 
-' Source evidence: badlogic/pi-mono@216e672e7c9fc65682553394b74e483c0c9e47f7,
-' packages/coding-agent/src/core/session-manager.ts: SessionEntry, _appendEntry,
-' buildContextEntries, branch, resetLeaf, and branchWithSummary.
-' Observed behavior: pi persists a tree of session entries and rebuilds model context
-' from the current leaf path; it does not expose a separate workflow checkpoint store
-' or cross-session memory database in this baseline.
+' Source evidence: badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc,
+' packages/agent/src/harness/types.ts: SessionTreeEntry and SessionStorage;
+' packages/agent/src/harness/session/session.ts: defaultContextEntryTransform and moveTo;
+' packages/storage/sqlite-node/src/sqlite/storage/index.ts: setLeafId and appendEntry.
+' Observed behavior: the new pi harness persists a session entry tree and leaf markers,
+' and rebuilds model context from the current leaf path.
 ' Design reason: the current Memory SR should harden the session event plane without
 ' presenting future checkpoint and long-term memory tables as current pi behavior.
-' Java divergence: durable leaf events, tenant isolation, revisions, and idempotency
-' are target-only reliability and security changes.
+' Java divergence: GaussDB, revisions, idempotency, and strict corrupt-entry handling
+' are target-only architecture and reliability changes.
+' Product constraint: the current design has no tenant model.
 
 package "Current SR Scope" #E9F7EF {
   database "agent_session" as Session
+  database "agent_session_state" as State
   database "session_entry" as Entry
-  database "session_leaf_event" as Leaf
+  database "session_label" as Label
   database "session_file_operation" as FileOp
-  database "memory_write_operation" as WriteOp
+  database "session_write_operation" as WriteOp
 }
 
 package "Separate Future Topics" #F7F9FC {
@@ -110,10 +112,13 @@ package "Separate Future Topics" #F7F9FC {
 }
 
 Session *--> Entry : owns immutable tree
-Session *--> Leaf : materializes leaf changes
+Session *--> State : owns current state
+State --> Entry : current leaf target
+Entry --> Entry : leaf marker and parent tree
+Entry *--> Label : derived projection
 Entry *--> FileOp : derived projection
 WriteOp --> Session : idempotent command
-WriteOp --> Leaf : commits leaf change
+WriteOp --> Entry : commits entries
 
 AgentControl ..> Session : future resolved snapshot reference
 Session ..> RuntimeCheckpoint : future in-flight recovery
@@ -123,10 +128,11 @@ Entry ..> Artifact : future content reference
 note bottom of Entry
 The current source of truth remains
 the active session entry path.
+Leaf navigation is stored as an entry.
 end note
 
 note bottom of LongMemory
-Not part of SR-MEM-001 v0.4.
+Not part of SR-MEM-001 v0.5.
 Requires independent lifecycle,
 retrieval, retention, and deletion design.
 end note

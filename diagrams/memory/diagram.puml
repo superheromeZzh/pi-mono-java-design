@@ -1,93 +1,116 @@
 @startuml memory-architecture
 !pragma layout smetana
-title Java ToB Memory Persistence Architecture
+title Java Centralized GaussDB Session Memory
 skinparam componentStyle rectangle
 
-' Source evidence: packages/coding-agent/src/core/session-manager.ts: SessionEntry,
-' _appendEntry, buildContextEntries, commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
-' Observed behavior: pi appends session entries and rebuilds context from the active leaf path.
-' Design reason: keep context semantics in the application layer and make the database the durable source.
-' Java divergence: tenant isolation, durable leaf events, revision checks, and idempotency are target-only.
+' Source evidence:
+' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - packages/agent/src/harness/types.ts: SessionStorage and SessionRepo
+' - packages/agent/src/harness/session/session.ts: Session and buildSessionContext
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: SqliteSessionStorage
+' Observed behavior: pi separates session semantics from storage in the new harness.
+' Design reason: keep context semantics in Java and make GaussDB the durable source.
+' Java divergence: JDBC transactions, revisions, and idempotency are target-only.
+' Product constraint: this design has no tenant model or cross-session memory.
 
 package "Agent Application" {
   [Agent Runtime] as runtime
-  [Memory Application Service] as memory
+  [Memory Session Application Service] as memory
   [Context Rebuilder] as context
   [Compaction Coordinator] as compact
   [Branch Summary Coordinator] as branch
-  [Tenant Context] as tenant
+  [Import And Export Service] as migration
 }
 
-package "Persistence Adapter" {
+package "GaussDB JDBC Adapter" {
   [Session Repository] as sessionRepo
   [Entry Repository] as entryRepo
-  [Audit Repository] as auditRepo
+  [Write Operation Repository] as operationRepo
+  [JSONB JDBC Codec] as jsonCodec
 }
 
-database "GaussDB" as db
+database "Centralized GaussDB" as db
 
-runtime --> memory : append / load context
-tenant --> memory : authenticated scope
+runtime --> memory : session commands
 memory --> context : active path snapshot
-memory --> compact : prepare / commit compaction
-memory --> branch : prepare / commit branch summary
-memory --> sessionRepo : session state
+memory --> compact : prepare and commit
+memory --> branch : prepare and commit
+migration --> memory : import and export
+memory --> sessionRepo : header and state
 memory --> entryRepo : immutable entries
-memory --> auditRepo : leaf and operation audit
+memory --> operationRepo : idempotent writes
+entryRepo --> jsonCodec : payload mapping
 sessionRepo --> db
 entryRepo --> db
-auditRepo --> db
+operationRepo --> db
 compact --> memory : summary result
 branch --> memory : summary result
-context --> runtime : AgentMessage context
+context --> runtime : context snapshot
+
+note bottom of jsonCodec
+openGauss JDBC
+6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1
+end note
 
 @enduml
 
 @startuml memory-write-transaction
-title Append And Branch Transaction
+title Append Move And Summary Transactions
 
-' Source evidence: packages/coding-agent/src/core/session-manager.ts: _appendEntry,
-' appendCompaction, branchWithSummary; packages/coding-agent/src/core/agent-session.ts:
-' compact and navigateTree; commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
-' Observed behavior: pi generates summaries before appending compaction or branch_summary entries.
-' Design reason: keep LLM latency outside the database lock while committing a short atomic state change.
-' Java divergence: optimistic revision, idempotency record, and explicit leaf audit event are target-only.
+' Source evidence:
+' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - packages/agent/src/harness/session/session.ts: appendTypedEntry and moveTo
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: setLeafId and appendEntry
+' - packages/agent/src/harness/compaction/compaction.ts: prepareCompaction and compact
+' Observed behavior: pi stores leaf markers and generates summaries before append.
+' Design reason: commit entry, projections, leaf state, and operation atomically.
+' Java divergence: revision checks and idempotency are target-only reliability changes.
 
 actor "Agent Runtime" as runtime
 participant "Memory Service" as memory
 participant "Summary Model" as model
-database "GaussDB" as db
+database "Centralized GaussDB" as db
 
-== Append message ==
-runtime -> memory : append(command, tenant, expectedRevision)
+== Append or move ==
+runtime -> memory : command(operationId, expectedRevision, expectedLeaf)
 group short database transaction
-  memory -> db : reserve idempotency operation
-  db --> memory : new operation or committed result
+  memory -> db : reserve or read write operation
   alt committed retry
+    db --> memory : stored result
     memory --> runtime : stored result
   else new operation
     memory -> db : lock session state
-    memory -> db : insert entry and leaf event
-    memory -> db : update leaf and revision
-    memory -> db : commit operation result
-    db --> memory : committed entry id
+    memory -> db : verify revision and leaf
+    alt append
+      memory -> db : insert immutable entry
+      memory -> db : set current leaf to new entry
+    else move
+      memory -> db : insert leaf marker
+      memory -> db : set current leaf to target
+    end
+    memory -> db : update projections and revision
+    memory -> db : commit stable result
     memory --> runtime : success
   end
 end
 
 == Compaction or branch summary ==
-runtime -> memory : prepare(snapshot request)
-memory -> db : read active path and revision
+runtime -> memory : prepare summary
+memory -> db : read active path, revision, and leaf
 db --> memory : immutable snapshot
-memory -> model : generate summary outside transaction
-model --> memory : summary and cut point
-memory -> db : lock state and verify revision
-alt revision changed
+memory -> model : generate outside transaction
+model --> memory : summary result
+memory -> db : lock state and verify snapshot
+alt snapshot changed
   db --> memory : stale snapshot
-  memory --> runtime : retryable conflict
-else revision unchanged
-  memory -> db : insert summary entry and audit event
-  memory -> db : update leaf and revision
+  memory --> runtime : STALE_CONTEXT_SNAPSHOT
+else snapshot unchanged
+  alt compaction
+    memory -> db : insert compaction entry
+  else branch summary
+    memory -> db : insert leaf marker and branch summary
+  end
+  memory -> db : update projections, leaf, revision, and operation
   db --> memory : committed
   memory --> runtime : success
 end
@@ -104,28 +127,38 @@ skinparam classAttributeIconSize 0
 skinparam classBorderColor #53657D
 skinparam classBackgroundColor #F7F9FC
 
-' Source evidence: packages/coding-agent/src/core/session-manager.ts: SessionEntry,
-' _appendEntry, buildContextEntries, branch, resetLeaf, and branchWithSummary;
-' commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
-' Observed behavior: pi stores a session entry tree and rebuilds context from the
-' selected leaf path.
-' Design reason: constrain tenant and session ownership in the database while keeping
-' immutable entries separate from mutable leaf state and command governance.
-' Java divergence: relational foreign keys, leaf revisions, file projections, and
-' idempotency operation state are target-only reliability and security changes.
+' Source evidence:
+' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - packages/agent/src/harness/types.ts: SessionTreeEntry and SessionStorage
+' - packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: appendEntry
+' Observed behavior: pi stores an immutable entry tree plus current leaf state.
+' Design reason: separate stable session headers, mutable state, facts, and projections.
+' Java divergence: foreign keys, revisions, and write operations are target-only.
+' Architecture change: recursive CTE replaces SQLite branch path materialization.
 
 class "agent_session" as agent_session <<table>> {
-  tenant_id : varchar(64) [PK]
   session_id : varchar(128) [PK]
   --
+  session_format_version : integer
+  cwd : text
   parent_session_id : varchar(128) [FK]
-  current_leaf_entry_id : varchar(128)
+  metadata : jsonb
+}
+
+class "agent_session_state" as session_state <<table>> {
+  session_id : varchar(128) [PK, FK]
+  --
+  current_leaf_entry_id : varchar(128) [FK]
   revision : bigint
   next_append_seq : bigint
+  session_name : text
+  message_count : bigint
+  total_tokens : bigint
+  cost_total : numeric
 }
 
 class "session_entry" as session_entry <<table>> {
-  tenant_id : varchar(64) [PK, FK]
   session_id : varchar(128) [PK, FK]
   entry_id : varchar(128) [PK]
   --
@@ -133,81 +166,89 @@ class "session_entry" as session_entry <<table>> {
   append_seq : bigint [UQ]
   entry_type : varchar(64)
   payload : jsonb
-}
-
-class "memory_write_operation" as memory_write_operation <<table>> {
-  tenant_id : varchar(64) [PK, FK]
-  operation_id : varchar(128) [PK]
-  --
-  session_id : varchar(128) [FK]
-  operation_type : varchar(32)
-  status : varchar(16)
-  request_hash : char(64)
-  result_payload : jsonb
-}
-
-class "session_leaf_event" as session_leaf_event <<table>> {
-  tenant_id : varchar(64) [PK, FK]
-  session_id : varchar(128) [PK, FK]
-  event_id : varchar(128) [PK]
-  --
-  session_revision : bigint [UQ]
-  from_leaf_entry_id : varchar(128) [FK]
-  to_leaf_entry_id : varchar(128) [FK]
   operation_id : varchar(128) [FK]
 }
 
-class "session_file_operation" as session_file_operation <<table>> {
-  tenant_id : varchar(64) [PK, FK]
+class "session_write_operation" as write_operation <<table>> {
+  operation_id : varchar(128) [PK]
+  --
+  session_id : varchar(128) [reference]
+  operation_type : varchar(32)
+  request_hash : char(64)
+  status : varchar(16)
+  result_payload : jsonb
+}
+
+class "session_label" as session_label <<projection>> {
+  session_id : varchar(128) [PK, FK]
+  target_entry_id : varchar(128) [PK, FK]
+  --
+  source_label_entry_id : varchar(128) [FK]
+  label : text
+}
+
+class "session_file_operation" as file_operation <<projection>> {
   session_id : varchar(128) [PK, FK]
   source_entry_id : varchar(128) [PK, FK]
   operation_type : varchar(16) [PK]
   file_path : text [PK]
 }
 
-agent_session ||--o{ agent_session
-agent_session ||--o{ session_entry
-session_entry ||--o{ session_entry
-agent_session ||--o{ memory_write_operation
-agent_session ||--o{ session_leaf_event
-memory_write_operation ||--o| session_leaf_event
-session_entry ||--o{ session_file_operation
-session_entry |o--o{ session_leaf_event
+agent_session ||--|| session_state : owns current state
+agent_session ||--o{ session_entry : owns immutable tree
+write_operation ..> agent_session : targets session id
+session_entry ||--o{ session_entry : parent
+write_operation ||--o{ session_entry : commits
+session_entry ||--o{ session_label : derives label
+session_entry ||--o{ file_operation : derives file operations
+session_state "1" --> "0..1" session_entry : current leaf target
 
-note bottom of agent_session
-current_leaf_entry_id is validated in the write transaction.
-It has no immediate circular foreign key in this draft.
+note bottom of session_entry
+Leaf navigation is an entry.
+The state points to leaf.targetId,
+not to the leaf marker itself.
+end note
+
+note bottom of session_state
+Model, thinking level, and active tools
+are derived from the active path.
 end note
 
 @enduml
 
 @startuml memory-context-rebuild
-title Database Context Rebuild
+title Centralized GaussDB Context Rebuild
 
-' Source evidence: packages/coding-agent/src/core/session-manager.ts: buildSessionPath,
-' buildContextEntries, buildSessionContext; commit 216e672e7c9fc65682553394b74e483c0c9e47f7.
-' Observed behavior: pi walks parentId to root, keeps the latest compaction boundary, and projects entries to messages.
-' Design reason: SQL should fetch a stable tree path; Java should own prompt and message semantics.
-' Java divergence: the path is fetched by a recursive SQL query and current leaf is durable in the target schema.
+' Source evidence:
+' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - packages/agent/src/harness/session/session.ts: defaultContextEntryTransform
+' - packages/agent/src/harness/session/session.ts: sessionEntryToContextMessages
+' - packages/agent/src/harness/types.ts: CompactionEntry
+' Observed behavior: pi rebuilds context from the active path and latest compaction.
+' Design reason: fetch the full path so branch-scoped model, thinking, and tools remain visible.
+' Java divergence: GaussDB obtains the path with a recursive CTE and a durable leaf.
 
 actor "Agent Runtime" as runtime
 participant "Memory Service" as memory
-database "GaussDB" as db
+database "Centralized GaussDB" as db
 participant "Context Rebuilder" as rebuild
 
-runtime -> memory : loadContext(tenant, session)
-memory -> db : recursive path query by durable leaf
-db --> memory : root to leaf entries
-memory -> rebuild : entries and session metadata
-rebuild -> rebuild : derive model and thinking level
+runtime -> memory : loadContext(sessionId)
+memory -> db : read state revision and current leaf
+memory -> db : recursive root-to-leaf query
+db --> memory : full active path
+memory -> rebuild : path, revision, and leaf
+rebuild -> rebuild : derive model, thinking, and active tools
 rebuild -> rebuild : locate latest compaction
-alt compaction exists
-  rebuild -> rebuild : inject summary and firstKept boundary
-  rebuild -> rebuild : keep boundary entries and newer entries
-else no compaction
-  rebuild -> rebuild : keep active path
+alt no compaction
+  rebuild -> rebuild : project full active path
+else compaction has retainedTail
+  rebuild -> rebuild : summary plus stored tail plus newer entries
+else legacy compaction
+  rebuild -> rebuild : summary plus firstKept boundary plus newer entries
 end
-rebuild --> memory : AgentMessage context
+rebuild -> rebuild : apply custom projectors
+rebuild --> memory : context snapshot
 memory --> runtime : context snapshot
 
 @enduml

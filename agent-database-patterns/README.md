@@ -1,10 +1,10 @@
 # 主流 Agent 数据库模式拆解与 pi-mono Java 采纳边界
 
 > 文档编号：`SR-DB-REF-001`
-> 版本：`v0.1.0`
-> 日期：`2026-07-20`
+> 版本：`v0.2.0`
+> 日期：`2026-07-30`
 > 状态：参考设计
-> pi 源码基线：[`216e672e7c9fc65682553394b74e483c0c9e47f7`](https://github.com/badlogic/pi-mono/tree/216e672e7c9fc65682553394b74e483c0c9e47f7)
+> pi 源码基线：[`fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`](https://github.com/badlogic/pi-mono/tree/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc)
 > Java 源码基线：无；本文采纳建议均为 target-only design
 
 ## 1. 结论
@@ -22,9 +22,11 @@
 对现有 [`SR-MEM-001`](../memory-jsonl-to-gaussdb.md) 的本轮采纳结论是：
 
 - 保留 `agent_session` + `session_entry` 会话树作为 pi context rebuild 的事实源。
-- 吸收 Google ADK 的全链路作用域键和复合外键思路。
+- 采用 pi 新 harness 的 `SessionStorage` / `SessionRepo` 介质边界。
+- 采用 pi SQLite 的持久化 `leaf` entry 和可变 current leaf 投影。
 - 吸收 Anthropic、AWS 的不可变事件与可变状态投影分离思路。
 - 吸收 OpenAI Agents SDK 的稳定列 + 原始 JSON payload 思路。
+- 当前产品不考虑多租户，因此不采纳外部系统的 tenant、actor 或 user 复合作用域键。
 - 不在当前 SR 中加入 LangGraph/Microsoft 的 runtime checkpoint 表；pi 当前恢复语义不是 workflow superstep checkpoint。
 - 不在当前 SR 中加入 Letta/AWS/LangGraph 的跨会话长期记忆表；其抽取、召回、保留和删除生命周期需要独立 SR。
 
@@ -44,7 +46,15 @@ PlantUML：[查看源码](./diagram.puml#L4)
 | Microsoft Agent Framework | [`7c6b1e975f75193ace223a05c6535b8556f93ee4`](https://github.com/microsoft/agent-framework/tree/7c6b1e975f75193ace223a05c6535b8556f93ee4) | [`python/packages/azure-cosmos/agent_framework_azure_cosmos/_checkpoint_storage.py`](https://github.com/microsoft/agent-framework/blob/7c6b1e975f75193ace223a05c6535b8556f93ee4/python/packages/azure-cosmos/agent_framework_azure_cosmos/_checkpoint_storage.py#L35-L77) `CosmosCheckpointStorage`；[`python/packages/core/agent_framework/_workflows/_checkpoint.py`](https://github.com/microsoft/agent-framework/blob/7c6b1e975f75193ace223a05c6535b8556f93ee4/python/packages/core/agent_framework/_workflows/_checkpoint.py#L30-L98) `WorkflowCheckpoint` |
 | Letta | [`b76da9092518cbaa2d09042e52fdcbde69243e18`](https://github.com/letta-ai/letta/tree/b76da9092518cbaa2d09042e52fdcbde69243e18) | [`letta/orm/agent.py`](https://github.com/letta-ai/letta/blob/b76da9092518cbaa2d09042e52fdcbde69243e18/letta/orm/agent.py#L45-L203) `Agent`；[`letta/orm/conversation_messages.py`](https://github.com/letta-ai/letta/blob/b76da9092518cbaa2d09042e52fdcbde69243e18/letta/orm/conversation_messages.py#L15-L73) `ConversationMessage`；[`letta/orm/block.py`](https://github.com/letta-ai/letta/blob/b76da9092518cbaa2d09042e52fdcbde69243e18/letta/orm/block.py#L20-L61) `Block`；[`letta/orm/passage.py`](https://github.com/letta-ai/letta/blob/b76da9092518cbaa2d09042e52fdcbde69243e18/letta/orm/passage.py#L21-L103) `BasePassage` / `ArchivalPassage` |
 
-### 2.2 托管服务事实基线
+### 2.2 pi 数据库存储基线
+
+| 分析提交 | 仓库相对路径与符号 |
+|---|---|
+| [`fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`](https://github.com/badlogic/pi-mono/tree/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc) | [`packages/agent/src/harness/types.ts`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/types.ts#L375-L537) `SessionTreeEntry`、`SessionStorage`、`SessionRepo`；[`packages/agent/src/harness/session/session.ts`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/harness/session/session.ts#L45-L147) context transform；[`packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql#L1-L59) schema；[`packages/storage/sqlite-node/src/sqlite/storage/index.ts`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L266-L346) `setLeafId` / `appendEntry` |
+
+观察到的新基线已经包含数据库 session backend：SQLite 将 entry、sequence、materialized state、current leaf 和 branch path 在事务中更新。当前 coding-agent 仍使用旧 `SessionManager` JSONL runtime，因此 SQLite 是新 harness 的已实现存储行为，不应描述为 coding-agent 已完成数据库切换。
+
+### 2.3 托管服务事实基线
 
 托管服务未公开内部数据库提交或表结构。本文只记录其公开资源与持久化语义：
 
@@ -203,7 +213,7 @@ agent_messages(id, session_id, message_data, created_at)
 - 不同生命周期的状态作用域分表。
 - Event JSON 与固定查询列并存。
 
-当前 SR 采纳：为 `session_entry`、leaf event、幂等操作补齐到 `agent_session` 的复合外键，并继续要求所有递归查询绑定 `tenant_id + session_id`。
+当前 SR 只吸收“固定作用域列进入约束”的一般原则。由于产品明确不考虑多租户，目标表只使用 `session_id`；不会为了模拟外部系统而增加 `tenant_id`。
 
 ### 4.4 Microsoft Agent Framework
 
@@ -284,8 +294,8 @@ agent_messages(id, session_id, message_data, created_at)
 | 原始 payload | JSON text | Event JSON | JSONB + BYTEA | JSON document | API payload/content | 结构列 + 自定义列 | JSONB payload |
 | 执行恢复 | 非主要目标 | Session replay | 完整 checkpointer | Workflow snapshot | 托管恢复 | Run/Step 状态 | 独立后续 SR |
 | 跨会话记忆 | 自定义 backend | Memory Bank | Store + Vector | Provider 扩展 | Memory Store/Record | Block + Archive | 独立后续 SR |
-| 多租户作用域 | 由应用决定 | app + user + session | thread namespace | workflow partition | actor/workspace namespace | organization/project | tenant + session |
-| 版本与审计 | 高级 Session usage/branch | schema metadata | migrations/checkpoint history | checkpoint version | Agent/Memory versions | block history | entry immutable + leaf audit |
+| 作用域键 | 由应用决定 | app + user + session | thread namespace | workflow partition | actor/workspace namespace | organization/project | 单一 `session_id` |
+| 版本与审计 | 高级 Session usage/branch | schema metadata | migrations/checkpoint history | checkpoint version | Agent/Memory versions | block history | immutable entry + durable leaf |
 | TTL/保留 | backend 决定 | 服务/应用决定 | Store TTL | Cosmos policy可配置 | 明确事件/记忆生命周期 | 应用策略 | 后续 retention SR |
 
 ## 6. 当前 Memory SR 的采纳边界
@@ -298,19 +308,22 @@ PlantUML：[查看源码](./diagram.puml#L75)
 
 - `session_entry` 是不可变事实源。
 - `parent_entry_id` 表达上下文树，`append_seq` 只表达稳定追加顺序。
-- `agent_session.current_leaf_entry_id` 是当前 leaf 的物化状态。
+- `agent_session_state.current_leaf_entry_id` 是当前 leaf 的物化状态。
+- 显式导航保存为 `leaf` entry；state 指向 `leaf.targetId`，而不是 marker 自身。
+- 新 compaction 使用 `retainedTail`，同时兼容旧 `firstKeptEntryId`。
 - compaction 和 branch summary 仍是 entry，而不是单独长期记忆记录。
 - Java `ContextRebuilder` 负责 prompt 语义，SQL 只返回稳定 active path。
 
-这些决定直接来自 pi `SessionEntry`、`_appendEntry()`、`buildContextEntries()` 和 tree navigation 行为。
+这些决定来自 pi 新 harness 的 `SessionTreeEntry`、context transform、`SessionStorage.setLeafId()` 以及 SQLite `appendEntry()`；旧 coding-agent JSONL 仍作为迁移兼容基线。
 
 ### 6.2 本轮吸收
 
 | 来源 | 吸收内容 | 落点 | 差异分类 |
 |---|---|---|---|
-| Google ADK | 作用域键进入完整关系约束 | Session、Entry、Leaf Event、Write Operation 复合外键 | 安全强化 |
 | OpenAI SDK / Google ADK | 固定查询列 + 原始 JSON | `session_entry` 固定树列和 JSONB payload | Java 实现选择 |
-| Anthropic / AWS | 不可变 event + 可变 projection | immutable entry/leaf event + materialized current leaf | 架构改造 |
+| pi SQLite | 不可变 entry + 可变 current leaf | `session_entry` + `agent_session_state` | pi 新 harness 对齐 |
+| pi SQLite | 持久化 leaf navigation | `leaf` entry；不另建 leaf event 表 | pi 新 harness 对齐 |
+| Anthropic / AWS | 不可变 event + 可变 projection | immutable entry + rebuildable projections | 架构改造 |
 | LangGraph | 将 checkpoint 与 memory store 分开 | 当前 SR 明确排除二者，分别后续设计 | 架构边界 |
 | Letta / Anthropic | 长期记忆需要版本 | 后续 Memory Store SR 必须包含 version/audit | 后续约束 |
 
@@ -318,6 +331,8 @@ PlantUML：[查看源码](./diagram.puml#L75)
 
 - 不增加 `runtime_checkpoint*` 表，除非 Java Runtime 明确需要恢复工具调用中的执行状态。
 - 不增加 `memory_store*`、`memory_embedding*` 表，除非跨 Session 记忆的抽取和召回需求已确定。
+- 不增加 tenant、actor 或 user 复合键；当前产品作用域只有 session。
+- 不复制 SQLite `branch_entries`；集中式 GaussDB v1 使用递归 CTE。
 - 不把 Agent Definition、Tool Binding、Credential 放入 `agent_session.metadata`。
 - 不将 session file path、prompt 或 tool result 直接复制到审计日志。
 - 不用完整状态快照替换不可变 entry tree。
@@ -327,7 +342,7 @@ PlantUML：[查看源码](./diagram.puml#L75)
 1. `SR-RUN-001`：Java Agent Run/Step/Checkpoint，先明确可恢复的中断点和工具幂等语义。
 2. `SR-LTM-001`：跨会话长期记忆，定义 owner、scope、source、version、extraction、recall、TTL 和删除。
 3. `SR-AGENT-DB-001`：Agent Definition/Version/Snapshot 与 Environment、Tool Binding 的关系。
-4. `SR-ARTIFACT-001`：文件、对象存储、内容 hash、租户权限和生命周期。
+4. `SR-ARTIFACT-001`：文件、对象存储、内容 hash、访问权限和生命周期。
 
 在对应需求和 Java 运行时实现出现前，上述表只属于 target-only 候选模型，不应写成现有 pi 行为。
 
@@ -335,4 +350,5 @@ PlantUML：[查看源码](./diagram.puml#L75)
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.2.0` | 2026-07-30 | 更新 pi 基线；纳入新 harness 和 SQLite 存储事实；当前 Memory SR 改为单 session 作用域、持久化 `leaf`、`retainedTail` 和独立 session state；移除当前 SR 的多租户及独立 leaf event 采纳结论 |
 | `v0.1.0` | 2026-07-20 | 拆解 OpenAI Agents SDK、LangGraph、Google ADK、Microsoft Agent Framework、AWS AgentCore、Anthropic Managed Agents 和 Letta 的公开数据库/持久化模式；建立五类数据平面与当前 pi Memory SR 采纳边界 |
