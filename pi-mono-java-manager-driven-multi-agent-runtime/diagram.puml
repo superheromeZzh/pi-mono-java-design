@@ -86,8 +86,8 @@ title Managed Multi-Agent Session and Context Assembly
 ' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java: handle
 ' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java: invokeModel, toLlmTools
 ' Observed behavior: Java currently reads conversation_id during Upgrade and uses one base cwd.
-' Java divergence: v2 authenticates Upgrade, binds Agent and conversation in the connect frame,
-' and atomically subscribes to an independently owned run after Session assembly.
+' Java divergence: v2 authenticates Upgrade and maps closed Frames to a server-side SessionTransport.
+' Architecture change: ManagedSessionTransport owns logical connection state; WebSocket is an adapter.
 ' Design reason: isolate prompt, model, tool, persistence, and run recovery across Agents.
 
 skinparam backgroundColor #FFFFFF
@@ -109,7 +109,9 @@ skinparam sequence {
 
 actor Client
 participant "Upgrade auth" as Auth
-participant "WebSocket v2" as WS
+participant "ChatWebSocketAdapter" as WS
+participant "SessionTransportFactory" as TransportFactory
+participant "ManagedSessionTransport" as Transport
 participant "AgentDirectoryResolver" as Resolver
 participant "ManagedSessionPool" as Pool
 participant "ManagedAgentSessionFactory" as Factory
@@ -122,11 +124,15 @@ database "User session store" as Store
 Client -> Auth : Upgrade /api/ws/chat\nCookie or Authorization Bearer
 Auth -> Auth : validate identity and browser Origin
 Auth --> WS : immutable connection auth context
-Client -> WS : req connect\nagent_id, conversation_id?, model_id?
-WS -> Resolver : resolve(agent_id)
+WS -> TransportFactory : open(auth context)
+TransportFactory --> WS : per-connection transport
+Client -> WS : RequestFrame connect\nagent_id, conversation_id?, model_id?
+WS -> WS : validate closed Frame\nand optional traceparent
+WS -> Transport : connect(command, invocation metadata)
+Transport -> Resolver : resolve(agent_id)
 Resolver -> Resolver : normalize and verify controlled root
-Resolver --> WS : agentCwd
-WS -> Pool : getOrCreate(agent_id, conversation_id)
+Resolver --> Transport : agentCwd
+Transport -> Pool : getOrCreate(agent_id, conversation_id)
 
 alt new conversation
   Pool -> ModelManager : resolveModel(agent_id, model_id)
@@ -146,11 +152,14 @@ Session -> Loop : systemPrompt, messages, AgentTools
 Loop -> Loop : map AgentTools to Context.tools
 Loop --> Pool : ready
 Pool -> Hub : get active run for SessionKey
-Hub -> Hub : atomically subscribe and capture snapshot
-Hub --> WS : cursor and active_run snapshot
-WS --> Client : res connect with conversation_id,\nmodel, limits, and active_run
-Hub --> WS : events after snapshot cursor
-WS --> Client : ordered structured deltas
+Transport -> Hub : atomically register logical subscription\nand capture cursor plus snapshot
+Hub --> Transport : active_run snapshot and buffered publisher
+Transport --> WS : SessionConnectResult
+WS --> Client : ResponseFrame payload with conversation_id,\nmodel, limits, features, active_run
+WS -> Transport : subscribe to events() after response write
+Hub --> Transport : SessionEvents after snapshot cursor
+Transport --> WS : ordered typed events
+WS --> Client : EventFrames with connection seq
 
 note over Factory,Loop
 Managed prompt inputs:
@@ -162,7 +171,7 @@ note over Pool,Store
 Isolation key:
 (agent_id, conversation_id)
 The run is owned by Pool and Hub,
-not by the WebSocket connection.
+not by the transport or WebSocket.
 end note
 @enduml
 
@@ -252,12 +261,14 @@ title Managed WebSocket Session Protocol
 ' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java: handle, onAgentEvent
 ' pi-mono-java modules/agent-core/src/main/java/com/campusclaw/agent/event/MessageUpdateEvent.java: message, assistantMessageEvent
 ' pi-mono-java modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java: typed deltas
-' openclaw docs/gateway/protocol.md: connect and req/res/event frames
-' openclaw packages/gateway-protocol/src/schema/logs-chat.ts: ChatEvent
-' openclaw src/gateway/server-broadcast.ts: per-client sequence and backpressure
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' openclaw packages/gateway-protocol/src/schema/frames.ts: RequestFrameSchema, GatewayFrameSchema
+' openclaw packages/gateway-protocol/src/schema/logs-chat.ts: ChatDeltaEventSchema
+' openclaw docs/gateway/clients.md: Recover state after reconnect
+' openclaw src/gateway/server-broadcast.ts: createGatewayBroadcaster
 ' Observed behavior: Java v1 captures one Session per connection, emits cumulative Message updates,
 ' and aborts AgentSession when the WebSocket closes.
-' Java divergence: v2 emits structured deltas and keeps the active run in ManagedSessionPool.
+' Java divergence: v2 maps Frame payloads to typed SessionTransport requests and events.
 ' Architecture change: one connection is scoped to one Agent and conversation, unlike OpenClaw Gateway multiplexing.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
 
@@ -280,7 +291,8 @@ skinparam sequence {
 
 actor Client
 participant "Upgrade auth" as Auth
-participant "WebSocket v2" as WS
+participant "ChatWebSocketAdapter" as WS
+participant "ManagedSessionTransport" as Transport
 participant "ManagedSessionPool" as Pool
 participant "ManagedRunHub" as Hub
 participant "AgentSession" as Session
@@ -290,34 +302,46 @@ database "Session JSONL" as Store
 Client -> Auth : Upgrade /api/ws/chat\nCookie or Authorization Bearer
 Auth -> Auth : reject URL token and business query\nvalidate identity and browser Origin
 Auth --> Client : 101 Switching Protocols
-Client -> WS : req connect within 5 seconds
-WS -> Pool : resolve or create SessionKey\nand validate effective model
+Auth -> WS : immutable auth context
+WS -> Transport : create per-connection transport
+Client -> WS : RequestFrame connect within 5 seconds
+WS -> WS : validate traceparent and closed Frame
+WS -> Transport : connect(command, invocation metadata)
+Transport -> Pool : resolve or create SessionKey\nand validate effective model
 Pool -> Hub : atomic subscribe and snapshot
-Hub --> WS : cursor and active_run snapshot
-WS --> Client : res connect with model,\nsession, limits, active_run
-Hub --> WS : events after cursor
+Hub --> Transport : cursor, active_run, buffered publisher
+Transport --> WS : SessionConnectResult
+WS --> Client : ResponseFrame payload with model,\nfeatures, limits, active_run
+WS -> Transport : subscribe to events()
+Hub --> Transport : events after cursor
 
 alt idle conversation
-  Client -> WS : req chat.send with idempotency_key
-  WS -> Pool : atomically create primary run
+  Client -> WS : RequestFrame chat.send\nwith idempotency_key and traceparent?
+  WS -> Transport : request(ChatSend, metadata)
+  Transport -> Pool : atomically create primary run
   Pool -> Session : prompt(message, attachments)
-  Pool --> WS : run_id and accepted
-  WS --> Client : res ok
+  Pool --> Transport : run_id and accepted
+  Transport --> WS : SessionResponse
+  WS --> Client : ResponseFrame ok with payload
   Session -> Hub : AssistantMessageEvent delta
   Hub -> Projection : project for fixed run policy
   Projection --> Hub : safe structured delta
   Hub -> Hub : increment run_seq and update snapshot
-  Hub --> WS : run.started, message.started,\nmessage.updated, tool events
+  Hub --> Transport : typed SessionEvents
+  Transport --> WS : run, message, and tool events
   WS -> WS : increment connection seq
-  WS --> Client : event frames
+  WS --> Client : EventFrames
 else active conversation
-  Client -> WS : req chat.send
-  WS --> Client : res RUN_ACTIVE
+  Client -> WS : RequestFrame chat.send
+  WS -> Transport : request(ChatSend, metadata)
+  Transport --> WS : RUN_ACTIVE
+  WS --> Client : ResponseFrame error
 end
 
 alt transport disconnects while run is active
   Client -x WS : connection closed
-  WS -> Hub : unsubscribe only
+  WS -> Transport : close()
+  Transport -> Hub : unsubscribe only
   note over Pool,Session
   The run continues.
   No AgentSession abort is called.
@@ -326,18 +350,25 @@ alt transport disconnects while run is active
   Hub -> Store : persist final Message and run outcome
   Client -> Auth : reconnect and authenticate
   Auth --> Client : 101 Switching Protocols
-  Client -> WS : req connect for same SessionKey
-  WS -> Pool : resolve existing Session
-  Pool -> Hub : atomic subscribe and snapshot
-  Hub --> WS : cursor, partial Message, active tools
-  WS --> Client : res connect snapshot first
-  Hub --> WS : deltas with run_seq after snapshot
-  WS --> Client : ordered event frames
+  Auth -> WS : new immutable auth context
+  WS -> Transport : create new transport
+  Client -> WS : RequestFrame connect for same SessionKey
+  WS -> Transport : connect(command, metadata)
+  Transport -> Pool : resolve existing Session
+  Pool -> Hub : atomic logical subscribe and snapshot
+  Hub --> Transport : cursor, partial Message, active tools
+  Transport --> WS : SessionConnectResult
+  WS --> Client : ResponseFrame snapshot first
+  WS -> Transport : subscribe to events()
+  Hub --> Transport : deltas with run_seq after snapshot
+  Transport --> WS : typed events
+  WS --> Client : ordered EventFrames
 end
 
 alt explicit abort
-  Client -> WS : req chat.abort(run_id)
-  WS -> Pool : abort active run idempotently
+  Client -> WS : RequestFrame chat.abort(run_id)
+  WS -> Transport : request(ChatAbort, metadata)
+  Transport -> Pool : abort active run idempotently
   Pool -> Session : abort()
   Session -> Hub : run.completed(aborted)
 else slow consumer
@@ -352,6 +383,67 @@ note over WS,Hub
 Event seq is connection-local.
 run_seq is continuous across reconnects.
 Snapshot response is sent before post-cursor deltas.
+end note
+@enduml
+
+@startuml managed_session_transport_dependency_inversion
+title Managed Session Transport Dependency Inversion
+
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' Source: packages/sdk/src/types.ts (OpenClawTransport, ConnectableOpenClawTransport)
+' Source: packages/sdk/src/transport.ts (GatewayClientTransport)
+' Source: src/gateway/server-methods/shared-types.ts (GatewayRequestHandler, RespondFn)
+' Source: src/gateway/server/ws-types.ts (GatewayWsClient)
+' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster)
+' Observed behavior: OpenClaw fully inverts the client SDK transport dependency.
+' Observed behavior: OpenClaw server handlers are frame-neutral, but broadcast still owns WebSocket objects.
+' Current Java behavior: ChatWebSocketHandler directly owns AgentSession command and close behavior.
+' Target design: CampusClaw exposes one server-side SessionTransport per physical connection.
+' Design reason: keep Session and run semantics independent from WebSocket while preserving a small API.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam ArrowColor #475569
+
+package "Network adapters" as Adapters {
+  component "ChatWebSocketAdapter\nFrame codec, trace context,\nseq, flow control, close codes" as WebSocketAdapter
+  component "Future REST plus SSE adapter\nnot part of protocol v2" as FutureAdapter
+}
+
+package "Application ports" as Ports {
+  interface "SessionTransportFactory\nopen(authContext)" as TransportFactory
+  interface "SessionTransport\nconnect(command, metadata)\nrequest(request, metadata)\nevents()\nclose()" as TransportPort
+}
+
+package "Managed runtime" as Runtime {
+  component "ManagedSessionTransport\nstate: NEW, CONNECTING,\nCONNECTED, CLOSED" as ManagedTransport
+  component "ManagedSessionPool" as Pool
+  component "ManagedRunHub" as Hub
+  component "Model and Tool Managers" as Managers
+}
+
+WebSocketAdapter --> TransportFactory : immutable auth context
+TransportFactory --> ManagedTransport : create per connection
+ManagedTransport ..|> TransportPort
+WebSocketAdapter --> TransportPort : typed connect and requests
+TransportPort --> WebSocketAdapter : Flow Publisher of SessionEvents
+ManagedTransport --> Pool : Session commands
+ManagedTransport --> Hub : atomic snapshot and event stream
+ManagedTransport --> Managers : propagated Trace Context
+FutureAdapter ..> TransportPort : future adapter only
+
+note bottom of Ports
+The port contains no WebSocket, JSON,
+Spring session, or close-code types.
+end note
+
+note bottom of Runtime
+close removes the subscription only.
+The active run remains owned by Pool and Hub.
 end note
 @enduml
 
@@ -397,7 +489,7 @@ Loop -> AiService : stream(model, Context, options)
 AiService -> Registry : getProvider(MODEL_MANAGER)
 Registry --> AiService : ModelManagerApiProvider
 AiService -> Provider : streamSimple(model, Context, metadata)
-Provider -> Provider : require immutable agent_id\nand conversation_id
+Provider -> Provider : require immutable agent_id,\nconversation_id, and Trace Context
 Provider -> ModelManager : invoke(agent_id, model.id,\nContext, mapped options)
 ModelManager -> ModelManager : revalidate Agent model binding
 

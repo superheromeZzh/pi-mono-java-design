@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.1.0 |
+| 文档版本 | 1.2.0 |
 | 状态 | 目标设计，尚未实施 |
-| 更新日期 | 2026-07-30 |
+| 更新日期 | 2026-07-31 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| OpenClaw 源码基线 | `91dca69dae23d3bdeff5aefb8400249a04216039` |
+| OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8` |
 | 运行形态 | 单 JVM、多 Agent、WebSocket 会话 |
 
 ## 1. 结论
@@ -21,6 +21,11 @@ pi-mono-java 可以直接读取的 Agent 运行目录。目录只承担 Prompt �
 Agent 独立的 `AgentSession` 和 `Agent`。模型由 Model Manager 调用，业务
 工具由 Tool Manager 发现和执行。连接断开只取消事件订阅，不终止正在执行的
 run；客户端重连后从原子快照继续消费。
+
+WebSocket 只作为网络 Adapter。服务端为每条连接创建一个
+`ManagedSessionTransport`，通过 `connect/request/events/close` 暴露强类型
+Session 通道。Request Frame 可携带 W3C `traceparent`，connect Response
+返回经过客户端声明、服务能力和授权共同过滤的有效 features。
 
 模型实际可执行的工具固定为：
 
@@ -67,7 +72,8 @@ delta，`message.completed`、重连快照和历史接口才携带完整 Message
 
 - 三类元数据到 Agent 运行目录的确定性映射；
 - Agent cwd、Session 隔离和 WebSocket 握手；
-- Session-scoped WebSocket v2、结构化流事件、恢复和背压；
+- Session-scoped WebSocket v2、Frame、能力协商、追踪、结构化流事件、恢复和背压；
+- 服务端 SessionTransport 端口与 WebSocket Adapter 的依赖倒置；
 - Managed Prompt 与 pi-mono-java `Context` 的组装；
 - Tool Manager 的逻辑工具发现和执行；
 - Model Manager Provider 的模型选择和流式事件适配；
@@ -138,7 +144,7 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 | 当前 JSONL 路径 | [`SessionPool.java#L345-L377`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java#L345-L377) | 当前按进程 cwd 编码 Session 目录 |
 | WebSocket 握手 | [`ServerMode.java#L377-L391`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java#L377-L391) | 当前只提取 `conversation_id` |
 | WebSocket 生命周期 | [`ChatWebSocketHandler.java#L115-L135`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L115-L135)、[`#L168-L188`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L168-L188) | 当前一条连接捕获一个 AgentSession，连接关闭会调用 abort |
-| WebSocket 命令 | [`ChatWebSocketHandler.java#L195-L227`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L195-L227) | 当前使用 `prompt`、`steer`、`abort`、`new_session` 等 v1 命令，没有统一 req/res/event Envelope |
+| WebSocket 命令 | [`ChatWebSocketHandler.java#L195-L227`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L195-L227) | 当前使用 `prompt`、`steer`、`abort`、`new_session` 等 v1 命令，没有统一 req/res/event Frame |
 | WebSocket 消息更新 | [`ChatWebSocketHandler.java#L422-L459`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L422-L459)、[`useChatWs.ts#L439-L448`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/frontend/src/composables/useChatWs.ts#L439-L448) | 当前 `message_update` 携带累计 Message，前端用新快照替换旧快照 |
 | v1 协议文档 | [`docs/asyncapi/chat-ws.yaml#L1-L76`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/docs/asyncapi/chat-ws.yaml#L1-L76) | 当前 AsyncAPI 版本为 1.0.0，记录 query 握手、v1 命令和累计 Message 行为 |
 | Agent 流事件 | [`MessageUpdateEvent.java#L17-L20`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/agent-core/src/main/java/com/campusclaw/agent/event/MessageUpdateEvent.java#L17-L20)、[`AgentLoop.java#L255-L276`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java#L255-L276) | Java 内部事件同时保留累计 AssistantMessage 和细粒度 AssistantMessageEvent，v2 可直接映射后者 |
@@ -152,22 +158,25 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 
 ```text
 repository: https://github.com/openclaw/openclaw
-commit:     91dca69dae23d3bdeff5aefb8400249a04216039
+commit:     b015925bc30f6a8363f290b07d5f8588e21422b8
 ```
 
 | 主题 | 源码证据 | 观察到的行为 |
 |---|---|---|
-| 握手与 Envelope | [`docs/gateway/protocol.md#L34-L50`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/docs/gateway/protocol.md#L34-L50)、[`#L83-L158`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/docs/gateway/protocol.md#L83-L158)、[`frames.ts#L155-L188`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/packages/gateway-protocol/src/schema/frames.ts#L155-L188) | Gateway 使用 connect challenge/hello 和 req/res/event Envelope；连接是通用 Gateway 连接，不固定到单个 Agent Session |
-| Chat 多路复用 | [`logs-chat.ts#L160-L240`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/packages/gateway-protocol/src/schema/logs-chat.ts#L160-L240) | `chat.send` 每次携带 `sessionKey`，同一连接可承载不同 Session |
-| Chat delta | [`server-chat.ts#L278-L296`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/src/gateway/server-chat.ts#L278-L296)、[`#L881-L951`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/src/gateway/server-chat.ts#L881-L951) | Chat delta 同时支持 `deltaText`、累计 message 和 replace 语义 |
-| 客户端合并与恢复 | [`chat-gateway.ts#L72-L96`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/ui/src/pages/chat/chat-gateway.ts#L72-L96)、[`gateway-store.ts#L379-L389`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/ui/src/app/gateway-store.ts#L379-L389)、[`docs/gateway/clients.md#L111-L134`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/docs/gateway/clients.md#L111-L134) | 客户端合并增量；发现事件序列缺口时重连，并通过权威快照/历史恢复 |
-| 序列与背压 | [`server-broadcast.ts#L190-L327`](https://github.com/openclaw/openclaw/blob/91dca69dae23d3bdeff5aefb8400249a04216039/src/gateway/server-broadcast.ts#L190-L327) | 广播按客户端维护连接序列，并对慢消费者应用背压策略 |
+| 握手与 Frame | [`docs/gateway/protocol.md#L83-L168`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/docs/gateway/protocol.md#L83-L168)、[`frames.ts#L12-L198`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/frames.ts#L12-L198) | Gateway Protocol v4 使用 challenge/connect/hello；源码明确把 req/res/event 定义为 WebSocket envelope contracts，Request Frame 支持 `traceparent` |
+| Chat 多路复用和精确订阅 | [`logs-chat.ts#L112-L168`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/logs-chat.ts#L112-L168)、[`protocol.md#L583-L588`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/docs/gateway/protocol.md#L583-L588) | `chat.send` 每次携带 `sessionKey`；同一 Gateway 连接可承载多个 Session，并可为一个 Session 精确订阅消息事件 |
+| Chat delta | [`logs-chat.ts#L188-L252`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/logs-chat.ts#L188-L252)、[`server-chat.ts#L278-L296`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-chat.ts#L278-L296)、[`#L922-L944`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-chat.ts#L922-L944) | Protocol v4 的 Chat delta 同时支持 `deltaText`、可选累计 message 和 replace 语义 |
+| 客户端恢复 | [`docs/gateway/clients.md#L111-L130`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/docs/gateway/clients.md#L111-L130) | 重连后恢复 Session 订阅、读取 `chat.history`、采用 `inFlightRun`，并按连接序列和 run 序列发现缺口 |
+| 客户端 Transport | [`types.ts#L20-L33`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/sdk/src/types.ts#L20-L33)、[`transport.ts#L73-L174`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/sdk/src/transport.ts#L73-L174)、[`client.ts#L342-L438`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/sdk/src/client.ts#L342-L438) | SDK 依赖 `OpenClawTransport.request/events/close`，WebSocket `GatewayClientTransport` 是可替换实现 |
+| 服务端耦合和背压 | [`shared-types.ts#L110-L116`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/shared-types.ts#L110-L116)、[`#L337-L353`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/shared-types.ts#L337-L353)、[`ws-types.ts#L23-L26`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server/ws-types.ts#L23-L26)、[`server-broadcast.ts#L293-L327`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-broadcast.ts#L293-L327) | Request Handler 已不接收 WebSocket，但服务器广播仍直接读取 `socket.bufferedAmount` 并调用 `socket.send/close` |
 
-本设计借鉴 Envelope、序列和“快照后继续增量”的恢复原则，但不复制
+本设计借鉴 Frame、`traceparent`、有效能力声明、序列和权威恢复原则，但不复制
 OpenClaw 的 Gateway 多路复用。CampusClaw 当前产品边界是 ToB 的
 Session-scoped 连接：一个连接的认证、Agent 权限、Conversation、模型和
 thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计歧义。这是产品
-约束和安全加固，不是 WebSocket 协议本身的限制。
+约束和安全加固，不是 WebSocket 协议本身的限制。OpenClaw 的
+`OpenClawTransport` 是客户端端口；CampusClaw 的 `SessionTransport` 是
+服务端逻辑会话通道，属于借鉴依赖倒置思想后的架构改造，不宣称为同一接口。
 
 ## 4. 目标组件与权威边界
 
@@ -180,6 +189,9 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 | Runtime bundle compiler | 固定版本、展开依赖、验证并生成 Agent 目录 | 把元数据投影为 pi-mono-java 资源 |
 | AgentDirectoryResolver | `agent_id` 到受控 cwd 的映射 | 阻止客户端选择任意工作目录 |
 | ManagedAgentSessionFactory | 当前 Agent 的 Prompt、Skill、Model、Tool 和 Session 装配 | 每个 Session 创建独立 Agent |
+| SessionTransportFactory | 不可变连接认证上下文 | 为每条物理连接创建独立的逻辑 Session 通道 |
+| ManagedSessionTransport | connect 状态、Session 绑定、强类型请求和事件订阅 | 实现 `connect/request/events/close`，隔离应用语义与网络实现 |
+| ChatWebSocketAdapter | WebSocket Frame、连接序列和网络流控 | 映射 Frame 与 Session 类型，处理首帧、Ping/Pong、1009 和 1013 |
 | ManagedSessionPool | `(agent_id, conversation_id)` 到 Session 和 active run 的映射 | 内存隔离、恢复、运行所有权和淘汰 |
 | ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于连接持续运行，并为订阅者生成原子恢复点 |
 | ConnectionAuthAdapter | Cookie/Bearer 身份与 Manager audience 凭据 | 固化连接身份、校验 Origin 并避免凭据进入 Agent 数据 |
@@ -474,18 +486,20 @@ Managed profile 不遍历全局或祖先上下文，不加载其他 Agent Skill�
 
 创建顺序：
 
-1. WebSocket Upgrade 建立认证上下文，首帧 connect 解析
-   `agent_id`、`model_id`、`conversation_id`；
-2. AgentDirectoryResolver 得到受控 `agentCwd`；
-3. ManagedSessionPool 使用 `(agent_id, conversation_id)` 查找 Session；
-4. 新会话校验显式 `model_id`，恢复会话校验保存的 Model；
-5. ManagedAgentSessionFactory 加载当前 Agent SYSTEM 和 Skill；
-6. Factory 注册三个通用 AgentTool；
-7. Factory 注入不可变 Session 调用元数据；
-8. 每个 Session 创建独立 Agent；
-9. AgentLoop 在每轮把三个 AgentTool 投影为 `Context.tools`；
-10. ManagedRunHub 原子注册连接订阅并捕获 active-run 快照，connect Response
-    发出后才排出快照 cursor 之后的事件。
+1. WebSocket Upgrade 建立不可变 `ConnectionAuthContext`；
+2. `SessionTransportFactory.open(authContext)` 为当前连接创建
+   `ManagedSessionTransport`；
+3. `ChatWebSocketAdapter` 校验 Request Frame 和 `traceparent`，把首帧
+   connect 映射为 `SessionConnectCommand`；
+4. AgentDirectoryResolver 得到受控 `agentCwd`；
+5. ManagedSessionPool 使用 `(agent_id, conversation_id)` 查找 Session；
+6. 新会话校验显式 `model_id`，恢复会话校验保存的 Model；
+7. ManagedAgentSessionFactory 加载当前 Agent SYSTEM 和 Skill，注册三个
+   通用 AgentTool，并创建独立 Agent；
+8. AgentLoop 在每轮把三个 AgentTool 投影为 `Context.tools`；
+9. `connect()` 原子注册逻辑订阅、捕获 active-run 快照和事件 cursor；
+10. Adapter 先发送 connect Response Frame，再订阅 `events()`；Publisher
+    先排出 cursor 之后的暂存事件，再进入实时事件流。
 
 ## 7. Tool Manager 适配
 
@@ -506,6 +520,8 @@ call_tool:
 
 `agent_id`、`conversation_id`、用户和租户身份来自服务端 SessionContext，
 不允许模型在参数中指定或覆盖。
+`InvocationContext` 还携带从 `SessionInvocationMetadata` 继承的已校验
+Trace Context，Tool Manager 调用创建子 span；该上下文不改变授权结果。
 
 Java 侧逻辑接口：
 
@@ -564,7 +580,7 @@ validation.
 
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
-[PlantUML 源码](diagram.puml#L169)
+[PlantUML 源码](diagram.puml#L178)
 
 Agent 直接工具路径：
 
@@ -671,18 +687,21 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 ```json
 {
   "agent_id": "agent-a",
-  "conversation_id": "conversation-1"
+  "conversation_id": "conversation-1",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 }
 ```
 
 单例 Provider 不保存当前 Agent 身份，不使用 ThreadLocal，也不依赖
-`SettingsManager.workingDir`。
+`SettingsManager.workingDir`。`traceparent` 必须来自 Adapter 已校验的
+`SessionInvocationMetadata`；Provider 为 Model Manager 调用创建子 span，
+不得从未校验的 Frame 字符串重建上下文。
 
 ### 8.3 流式事件
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L358)
+[PlantUML 源码](diagram.puml#L450)
 
 Model Manager 事件一对一映射为 Java `AssistantMessageEvent`：
 
@@ -758,6 +777,7 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`conversation_id`、token 或
   "type": "req",
   "id": "connect-1",
   "method": "connect",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
   "params": {
     "min_protocol": 2,
     "max_protocol": 2,
@@ -777,6 +797,11 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`conversation_id`、token 或
 首帧超时或首帧不是 `connect` 时使用 1008 关闭。协议区间不包含版本 2 时，
 先返回 `UNSUPPORTED_PROTOCOL`，再使用 1002 关闭。
 
+`capabilities` 必须包含 `structured_message_delta`。数组允许携带服务端尚不
+认识的能力名；未知值被忽略且不回显，避免客户端新增可选能力就无法连接。
+客户端声明不构成授权，`full_thinking` 仍需通过 tenant、Agent、Model 和
+用户 scope 的全部策略。
+
 新会话省略 `conversation_id`，必须提供 `agent_id + model_id`。服务端生成
 `conversation_id`，经 `AgentDirectoryResolver` 解析 cwd，并用 Model
 Manager 精确校验模型。恢复会话提供 `agent_id + conversation_id`：
@@ -794,7 +819,7 @@ Manager 精确校验模型。恢复会话提供 `agent_id + conversation_id`：
   "type": "res",
   "id": "connect-1",
   "ok": true,
-  "result": {
+  "payload": {
     "protocol": 2,
     "connection_id": "conn-01",
     "agent_id": "agent-a",
@@ -807,35 +832,76 @@ Manager 精确校验模型。恢复会话提供 `agent_id + conversation_id`：
       "heartbeat_seconds": 20,
       "connect_timeout_seconds": 5
     },
+    "features": {
+      "methods": [
+        "chat.send",
+        "chat.steer",
+        "chat.abort",
+        "chat.history",
+        "session.get",
+        "models.list",
+        "model.set",
+        "thinking.set",
+        "prompt_templates.list",
+        "skills.list"
+      ],
+      "events": [
+        "run.started",
+        "message.started",
+        "message.updated",
+        "tool.started",
+        "tool.updated",
+        "tool.completed",
+        "message.completed",
+        "run.completed"
+      ],
+      "capabilities": ["structured_message_delta"]
+    },
     "active_run": null
   }
 }
 ```
+
+`features.methods/events/capabilities` 是客户端声明、服务能力、粗粒度身份和
+Agent 配置共同过滤后的稳定有序列表。它用于发现和降级，不构成调用授权；
+动态 active-run 状态、附件归属以及 Model/Tool 权限仍在每次请求或执行时
+校验。
 
 恢复时 `active_run` 可包含 `run_id`、快照对应的 `run_seq`、当前
 `message_snapshot` 和 `active_tools`。connect 成功后任何试图再次调用
 `connect` 或更换 Agent/Conversation 的请求都返回 `INVALID_REQUEST`；
 创建新 Conversation 必须建立新连接。
 
-### 9.3 Envelope、标识符和命令
+### 9.3 Frame、追踪、标识符和命令
 
 所有文本帧均使用 JSON。四类公共结构为：
 
 ```text
-Request  = {type:"req", id, method, params?}
-Response = {type:"res", id, ok, result? | error?}
-Event    = {type:"event", event, seq, payload}
-Error    = {code, message, details?, retryable?, retry_after_ms?}
+RequestFrame  = {type:"req", id, method, params?, traceparent?}
+ResponseFrame = {type:"res", id, ok, payload? | error?}
+EventFrame    = {type:"event", event, seq, payload}
+Error         = {code, message, details?, retryable?, retry_after_ms?}
 ```
 
-`Request.id` 在连接内由客户端生成且用于关联唯一 Response。命令接受成功
-仅代表服务端已原子接受操作，不代表 run 已完成。`Event.seq` 是连接级从 1
-开始的单调序列，重连后重新开始；run 事件的 `payload.run_seq` 则在同一
-run 内跨重连连续递增。
+所有 Frame 都是封闭对象，未知顶层字段在进入 SessionTransport 前被拒绝。
+`RequestFrame.id` 在连接内由客户端生成且用于关联唯一 Response Frame。命令
+接受成功仅代表服务端已原子接受操作，不代表 run 已完成。
+`EventFrame.seq` 是连接级从 1 开始的单调序列，重连后重新开始；run 事件的
+`payload.run_seq` 则在同一 run 内跨重连连续递增。
+本协议不增加 OpenClaw Gateway 全局快照使用的 `stateVersion`：Session-scoped
+Chat 没有需要同步的全局 presence/health 状态，恢复以连接 `seq`、run
+`run_seq`、active-run 快照和权威 Session 历史完成。
+
+`traceparent` 是可选的 W3C Trace Context，最长 128 字符。Adapter 使用标准
+解析器校验 version、trace-id、parent-id 和 flags；非法值返回
+`INVALID_REQUEST`。合法上下文经不可变 `SessionInvocationMetadata` 传给
+ManagedSessionTransport，并作为 Model Manager、Tool Manager span 的父上下文。
+缺失时由服务端创建新 trace。该字段不进入 Prompt、JSONL、业务事件或普通
+业务日志，也不接受 `tracestate` 或 `baggage` Frame 字段。
 
 命令集固定如下：
 
-| method | 关键参数 | 成功结果和约束 |
+| method | 关键参数 | 成功 payload 和约束 |
 |---|---|---|
 | `chat.send` | `message`、`attachment_ids[]`、`idempotency_key`、可选 `thinking` | 返回 `run_id + accepted`；同一 Conversation 已有主 run 时返回 `RUN_ACTIVE` |
 | `chat.steer` | `run_id`、`message`、`idempotency_key` | 向指定 active run 注入 steering message，不新建主 run |
@@ -856,7 +922,62 @@ tenant/user/Agent/Conversation/command 范围内判重；同 key 同负载返回
 在接受 `chat.send` 前校验附件属于当前 tenant/user、未过期且可供当前
 Agent 使用；客户端路径、URL 和二进制内容不能替代 ID。
 
-### 9.4 流式事件和 Message 投影
+### 9.4 服务端 SessionTransport
+
+目标接口为：
+
+```java
+interface SessionTransportFactory {
+    SessionTransport open(ConnectionAuthContext authContext);
+}
+
+interface SessionTransport {
+    CompletionStage<SessionConnectResult> connect(
+            SessionConnectCommand command,
+            SessionInvocationMetadata metadata);
+
+    CompletionStage<SessionResponse> request(
+            SessionRequest request,
+            SessionInvocationMetadata metadata);
+
+    Flow.Publisher<SessionEvent> events();
+
+    CompletionStage<Void> close();
+}
+```
+
+`SessionTransport` 是每条物理连接独占的服务端逻辑通道，状态机固定为：
+
+```text
+NEW -> CONNECTING -> CONNECTED -> CLOSED
+```
+
+- `SessionTransportFactory.open()` 只接收 Upgrade 产生的不可变认证上下文；
+- `connect()` 只能成功一次，绑定 Agent/Conversation 并原子捕获恢复点；
+- `request()` 只接受强类型 `SessionRequest`，在 connect 前或 close 后调用
+  返回稳定状态错误；
+- `events()` 是单订阅、有序且支持背压的 `Flow.Publisher<SessionEvent>`；
+- `close()` 幂等，只解除连接订阅和有界缓冲，不 abort run。
+
+`ManagedSessionTransport` 实现该接口并依赖 ManagedSessionPool、ManagedRunHub
+和各 Manager。`ChatWebSocketAdapter` 消费接口，不实现接口：它负责 Upgrade
+后的首帧计时、JSON Frame 编解码、请求 ID 关联、连接 `seq`、Ping/Pong、
+单帧限制、发送缓冲以及 close code。应用核心和 `SessionTransport` 类型中
+不得出现 Spring `WebSocketSession`、`TextMessage` 或 WebSocket close code。
+
+连接恢复时，`connect()` 在同一临界区内注册逻辑订阅、捕获 snapshot/cursor
+并开始暂存后续事件。Adapter 成功写出 connect Response Frame 后才订阅
+`events()`；Publisher 先重放 cursor 后的暂存事件，再进入实时流。该顺序在
+不增加 `activate()` 方法的前提下消除快照与 delta 的竞态。
+
+未来 REST + SSE 可以复用同一强类型 Session 契约并提供新的 Adapter，但本
+版本只规范 WebSocket，不定义 SSE 端点、恢复 token 或 OpenAPI。
+
+![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
+
+[PlantUML 源码](diagram.puml#L389)
+
+### 9.5 流式事件和 Message 投影
 
 服务端事件族固定为：
 
@@ -894,7 +1015,7 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 `tool.started/updated/completed` 表示 Tool Manager 的实际执行过程。两者
 使用相同 `tool_call_id` 关联，但不能混为一个事件。
 
-### 9.5 Thinking 披露
+### 9.6 Thinking 披露
 
 披露级别固定为 `hidden < summary < full`：
 
@@ -911,7 +1032,7 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 策略在 run 开始时固化为该 run 的不可变投影上下文。中途权限收紧时立即按
 更严格策略投影后续事件，但不重发已经披露的数据。
 
-### 9.6 run 所有权、重连和无竞态快照
+### 9.7 run 所有权、重连和无竞态快照
 
 `ManagedSessionPool` 持有 AgentSession 和 active run；WebSocket 只持有
 订阅。连接关闭时取消订阅，不调用 `AgentSession.abort()`。run 只在以下
@@ -942,7 +1063,7 @@ bounded post-snapshot event buffer
 连接 `seq` 或单个 run 的 `run_seq` 缺口时不得猜测缺失文本，应断开并按
 上述流程恢复。
 
-### 9.7 流控、心跳和错误
+### 9.8 流控、心跳和错误
 
 服务端不得静默丢弃 delta。默认限制为：
 
@@ -972,11 +1093,16 @@ MANAGER_AUTH_FAILED
 MANAGER_UNAVAILABLE
 ```
 
+WebSocket Adapter 只在上一帧异步写入成功后向 `events()` Publisher 请求下一
+条事件，使网络发送能力沿 Reactive Streams demand 反向形成背压。Publisher
+和 Adapter 的待发送数据都必须计入同一个连接缓冲预算；预算耗尽时终止该
+订阅并映射为 1013，不推进一个未成功发送的连接 `seq`。
+
 Manager 认证失败不得把上游凭据或响应正文写入 `details`。`retryable` 和
 `retry_after_ms` 只描述同一命令是否适合稍后重试；对可能产生副作用的命令，
 客户端仍必须复用原 `idempotency_key`。
 
-### 9.8 内存隔离
+### 9.9 内存隔离
 
 ManagedSessionPool 的 key 为：
 
@@ -994,7 +1120,7 @@ SessionKey(agent_id, conversation_id)
 它们对应不同 AgentSession、Agent、cwd、Prompt、Skill、Model 和 Tool
 调用上下文。
 
-### 9.9 JSONL 路径
+### 9.10 JSONL 路径
 
 用户级 Session 存储：
 
@@ -1028,14 +1154,16 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 ![Managed WebSocket Session 协议](managed_websocket_session_protocol.svg)
 
-[PlantUML 源码](diagram.puml#L247)
+[PlantUML 源码](diagram.puml#L256)
 
 ## 10. pi-mono-java 目标适配点
 
 | 当前位置 | 目标改造 | 分类 |
 |---|---|---|
 | WebSocket Upgrade route | 不解析业务 query；校验 Cookie/Bearer/Origin，创建不可变 ConnectionAuthContext | 安全加固 |
-| `ChatWebSocketHandler` | 首帧 connect、统一 req/res/event Envelope、Session-scoped 绑定、结构化 delta 和流控 | 架构改造 |
+| `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
+| `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.1.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；复合 key、按 Agent JSONL 路径、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1043,7 +1171,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | `SystemPromptBuilder` | 增加 Managed profile，只组合允许的 Prompt 来源和 cwd | 安全加固 |
 | `AgentTool` 实现 | 保留 read，新增 get_tool_info 和 call_tool；不注册业务 Tool | 产品约束 |
 | `Api` / `ApiProviderRegistry` | 增加 MODEL_MANAGER Api 和 Spring Provider | 架构改造 |
-| `Agent` stream options | 合并不可变 agent_id、conversation_id metadata | 架构改造 |
+| `Agent` stream options | 合并不可变 agent_id、conversation_id 和解析后的 Trace Context metadata | 架构改造 |
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
 | Web 前端 `useChatWs` | 按 message_id/content_index 合并 delta；序列缺口时重连并应用快照 | 架构改造 |
 | REST attachment service | 上传后返回租户和用户范围的 attachment_id，供 chat.send 引用 | 安全加固 |
@@ -1159,6 +1287,14 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ### 12.6 WebSocket v2
 
+- `RequestFrame/ResponseFrame/EventFrame` 拒绝未知顶层字段，成功响应只允许
+  `payload`，错误响应只允许 `error`；
+- 缺失 `traceparent` 时创建新 trace；合法值传播到 Model/Tool Manager，
+  非法值返回 `INVALID_REQUEST`，且任何 trace 字段不进入 Prompt 或 JSONL；
+- capabilities 缺少 `structured_message_delta` 时拒绝连接；未知值被忽略，
+  `full_thinking` 只在客户端声明和全部授权同时满足时出现在有效 features；
+- connect 返回的 methods、events、capabilities 顺序稳定、无重复，并按粗粒度
+  授权过滤；列表披露不会绕过逐请求授权；
 - 新会话只接受 `agent_id + model_id`，恢复会话接受
   `agent_id + conversation_id` 并重新校验保存模型；
 - Upgrade URL 中的业务 query 和 token 被拒绝，首帧 connect 的 5 秒约束
@@ -1171,8 +1307,16 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
   `RUN_ACTIVE`；
 - `chat.steer` 和 `chat.abort` 只作用于指定 active `run_id`，重复 abort
   保持幂等；
-- `message.updated` 只携带本次 delta，客户端可按 content_index 还原为
+- `message.updated` 只携带本次 delta，不携带 OpenClaw 式累计 message 或
+  replace；客户端可按 content_index 还原为
   `message.completed` 的最终 Message；
+- `SessionTransport` 状态机拒绝重复 connect、connect 前 request 和 close 后
+  request；`events()` 只允许一个订阅者，`close()` 幂等；
+- 使用假的 `SessionTransport` 可独立测试 WebSocket Frame 映射；使用假的
+  Manager/Pool/Hub 可在不创建 WebSocket 的情况下测试
+  `ManagedSessionTransport`；
+- ManagedSessionPool、ManagedRunHub、AgentSession 和 SessionTransport
+  不引用 Spring WebSocket 类型、`TextMessage` 或 close code；
 - 断线期间 run 继续；重连的快照和快照 cursor 之后的 delta 无丢失、无重复；
 - run 在断线期间结束后，`chat.history` 返回持久化终态；
 - hidden、summary、full 在实时、快照和历史中保持同一披露结果，未经 Manager
@@ -1193,7 +1337,11 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - 通用工具 description 完整表达发现和执行协议；
 - Model 和 Tool Manager 分别是调用权威；
 - Session 使用 `(agent_id, conversation_id)` 隔离；
-- WebSocket 首帧固定 Session，实时流使用结构化 delta；
+- WebSocket 首帧固定 Session，所有命令和事件使用封闭 Frame，成功响应使用
+  `payload`，实时流使用结构化纯 delta；
+- SessionTransport 以 connect/request/events/close 隔离 Session 应用语义和
+  WebSocket 网络实现；
+- traceparent 只进入遥测和下游 Manager 调用，有效 features 可发现但不构成授权；
 - run 生命周期独立于连接，重连通过原子快照和 run_seq 恢复；
 - 同一披露策略覆盖实时、快照和历史；
 - 认证凭据不进入 Agent 数据和协议事件；
@@ -1205,5 +1353,6 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.2.0 | 2026-07-31 | 以 OpenClaw Protocol v4 最新基线优化 WebSocket v2；统一 Frame/payload、增加 traceparent 与有效 features，并定义服务端 SessionTransport 依赖倒置 |
 | 1.1.0 | 2026-07-30 | 定义 Session-scoped WebSocket v2、首帧 connect、Cookie/Bearer 认证、结构化 delta、run 独立生命周期、原子重连快照、thinking 披露、流控和规范性 AsyncAPI |
 | 1.0.0 | 2026-07-29 | 初版；定义元数据到运行目录映射、三通用工具、Skill 渐进式披露、Model/Tool Manager 适配和单 JVM 多 Agent Session 隔离 |

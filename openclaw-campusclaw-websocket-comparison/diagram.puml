@@ -1,8 +1,8 @@
 @startuml websocket_connection_scope_comparison
 title WebSocket Connection Scope Comparison
 
-' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
-' Source: docs/gateway/protocol.md (Gateway protocol, broadcast scope)
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' Source: docs/gateway/protocol.md (Gateway protocol, exact session subscriptions)
 ' Source: packages/gateway-protocol/src/schema/logs-chat.ts (ChatSendParamsSchema, ChatEventSchema)
 ' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster)
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
@@ -32,7 +32,7 @@ package "OpenClaw - implemented" as openclaw {
   component "Node and control APIs" as oc_control
 
   oc_client --> oc_conn
-  oc_conn --> oc_gateway : req/res/event
+  oc_conn --> oc_gateway : Request/Response/Event Frames
   oc_gateway --> oc_session_a : sessionKey=A
   oc_gateway --> oc_session_b : sessionKey=B
   oc_gateway --> oc_control : methods and events
@@ -68,7 +68,7 @@ package "CampusClaw v2 - target only" as campus_v2 {
 
 note bottom of openclaw
   One connection may address many sessions.
-  Subscription and scope filters still apply.
+  Exact subscription, scope, and visibility filters apply.
 end note
 
 note bottom of java_v1
@@ -85,7 +85,7 @@ end note
 @startuml websocket_handshake_comparison
 title WebSocket Handshake and Authentication Comparison
 
-' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
 ' Source: docs/gateway/protocol.md (Handshake, authentication, protocol versioning)
 ' Source: docs/gateway/clients.md (scopes, pairing, capabilities)
 ' Source: packages/gateway-protocol/src/schema/frames.ts (ConnectParamsSchema, HelloOkSchema)
@@ -93,7 +93,7 @@ title WebSocket Handshake and Authentication Comparison
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
 ' Source: docs/asyncapi/chat-ws.yaml (query parameters and v1 messages)
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
-' Observed behavior: OpenClaw emits a challenge before the first client connect frame.
+' Observed behavior: OpenClaw emits a challenge before the first client connect Request Frame.
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
 ' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
 ' Design reason: enterprise credentials stay in transport authentication and never enter chat payloads.
@@ -118,7 +118,7 @@ participant "Agent and Model Managers" as MGR
 OC -> OG : WebSocket Upgrade
 OG --> OC : event connect.challenge {nonce, ts}
 OC -> OG : req connect {minProtocol, maxProtocol,\nauth, device, role, scopes, caps}
-OG --> OC : res hello-ok {protocol, policy, snapshot}
+OG --> OC : res payload hello-ok {protocol, features,\npolicy, snapshot}
 note over OC,OG
 The challenge is a server event.
 The first client frame is connect.
@@ -139,25 +139,26 @@ end note
 CC -> EDGE : Upgrade /api/ws/chat\nCookie or Authorization Bearer
 EDGE -> EDGE : validate Origin and identity consistency
 EDGE -> V2 : immutable authenticated connection context
-CC -> V2 : req connect within 5 seconds\n{min_protocol, max_protocol,\nagent_id, conversation_id?, model_id?}
+CC -> V2 : req connect within 5 seconds\n{min_protocol, max_protocol, agent_id,\nconversation_id?, model_id?, traceparent?}
 V2 -> MGR : authorize agent and resolve model
 MGR --> V2 : effective identity and model
-V2 --> CC : res connect {protocol, connection_id,\nsession, limits, active_run?}
+V2 --> CC : res payload {protocol, connection_id,\nsession, limits, features, active_run?}
 note over CC,V2
 No business query parameter and no URL token.
 The connection cannot switch agent or conversation.
+Unknown capabilities are ignored and not echoed.
+Effective features do not replace request authorization.
 end note
 @enduml
 
 @startuml websocket_stream_recovery_comparison
 title Stream and Recovery Comparison
 
-' OpenClaw baseline: 91dca69dae23d3bdeff5aefb8400249a04216039
-' Source: src/gateway/server-chat.ts (resolveBroadcastDelta, emitChatDelta, sequence gap handling)
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' Source: src/gateway/server-chat.ts (resolveBroadcastDelta, emitChatDelta)
 ' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster, per-client seq, slow consumers)
-' Source: ui/src/pages/chat/chat-gateway.ts (resolveAssistantTextFromChatEvent)
-' Source: ui/src/app/gateway-store.ts (sequence gap reconnect)
-' Source: docs/gateway/clients.md (recovery, chat.history, inFlightRun)
+' Source: docs/gateway/protocol.md (sessions.messages.subscribe)
+' Source: docs/gateway/clients.md (re-subscribe, chat.history, inFlightRun)
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (mapEventToJson, close handling)
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (ManagedRunHub)
@@ -185,6 +186,7 @@ participant "ManagedRunHub" as MRH
 participant "Session history" as CCH
 
 == OpenClaw implemented ==
+OC -> OGB : sessions.messages.subscribe(sessionKey)
 OGB --> OC : chat event {seq, runId, sessionKey,\ndeltaText, message?, replace?}
 OGB --> OC : later event with sequence gap
 OC -> OC : detect connection or run sequence gap
@@ -220,4 +222,87 @@ MRH --> CCW : deltas after N
 CCW --> CCC : ordered message.updated events
 CCC -> CCH : chat.history if the run ended while offline
 CCH --> CCC : authoritative completed messages
+@enduml
+
+@startuml websocket_transport_dependency_inversion_comparison
+title WebSocket Transport Dependency Inversion Comparison
+
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' Source: packages/sdk/src/types.ts (OpenClawTransport)
+' Source: packages/sdk/src/transport.ts (GatewayClientTransport)
+' Source: packages/sdk/src/client.ts (transport injection and delegation)
+' Source: src/gateway/server-methods/shared-types.ts (RespondFn, GatewayRequestHandlers)
+' Source: src/gateway/server/ws-types.ts (GatewayWsClient)
+' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster)
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (handle)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (SessionTransport)
+' Observed behavior: OpenClaw SDK clients depend on OpenClawTransport, while server broadcast still operates on WebSocket clients.
+' Current Java behavior: ChatWebSocketHandler directly owns session subscription and aborts the run on disconnect.
+' Target design: ChatWebSocketAdapter depends on SessionTransport and ManagedSessionTransport owns session semantics.
+' Design reason: protocol adapters must not own session or active-run lifetime.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam defaultFontName Arial
+left to right direction
+
+package "OpenClaw client - implemented" as oc_client_pkg {
+  component "OpenClawClient" as oc_sdk
+  interface "OpenClawTransport\nrequest / events / close" as oc_transport
+  component "GatewayClientTransport" as oc_ws_transport
+  component "GatewayClient WebSocket" as oc_ws_client
+
+  oc_sdk --> oc_transport
+  oc_ws_transport ..|> oc_transport
+  oc_ws_transport --> oc_ws_client
+}
+
+package "OpenClaw server - implemented" as oc_server_pkg {
+  component "Gateway method handlers" as oc_handlers
+  interface "RespondFn" as oc_respond
+  component "Gateway broadcaster" as oc_broadcast
+  component "GatewayWsClient\nwith WebSocket" as oc_server_ws
+
+  oc_handlers --> oc_respond
+  oc_broadcast --> oc_server_ws : bufferedAmount / send / close
+}
+
+package "pi-mono-java v1 - current" as java_v1_pkg {
+  component "ChatWebSocketHandler" as java_handler
+  component "AgentSession" as java_agent
+
+  java_handler --> java_agent : subscribe / prompt / abort
+}
+
+package "CampusClaw v2 server - target only" as cc_target_pkg {
+  component "ChatWebSocketAdapter" as cc_adapter
+  interface "SessionTransport\nconnect / request / events / close" as cc_transport
+  component "ManagedSessionTransport" as cc_managed
+  component "ManagedSessionPool" as cc_pool
+  component "ManagedRunHub" as cc_hub
+  component "Future HTTP and SSE adapter" as cc_sse
+
+  cc_adapter --> cc_transport
+  cc_sse --> cc_transport
+  cc_managed ..|> cc_transport
+  cc_managed --> cc_pool
+  cc_managed --> cc_hub
+}
+
+note bottom of oc_client_pkg
+  Client-side transport inversion is complete.
+end note
+
+note bottom of oc_server_pkg
+  Handler response is abstracted.
+  Broadcast and client state remain WebSocket-aware.
+end note
+
+note bottom of cc_target_pkg
+  Adapter maps closed Frames and network backpressure.
+  Managed transport owns snapshot, cursor, and subscription state.
+end note
 @enduml
