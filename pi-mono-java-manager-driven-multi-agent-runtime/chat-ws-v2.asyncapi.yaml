@@ -3,13 +3,17 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.1.0
+  version: 2.2.0
   description: |
-    Manager 驱动的 CampusClaw 对话协议规范。
+    Manager 驱动的 CampusClaw Agent Runtime Session 协议规范。
 
     每条 WebSocket 连接在强制的首帧 `connect` 成功后，只绑定一个经过认证的
-    `(agent_id, conversation_id)`。连接只承担事件订阅；active run 由
+    `(agent_id, session_id)`。连接只承担事件订阅；active run 由
     ManagedSessionPool 持有，因此传输连接断开不会终止模型调用或工具执行。
+
+    `session_id` 由上层会话服务创建并管理，CampusClaw 将其作为不透明的
+    持久上下文标识。上层服务负责用户会话列表、数量限制和业务删除；本协议
+    只定义 Runtime Session 的创建绑定、恢复和流式交互。
 
     版本 2 直接替换 `/api/ws/chat` 上的 v1 传输格式，使用
     request/response/event Frame 和结构化消息增量。协议不接受业务查询
@@ -44,7 +48,7 @@ channels:
     title: 会话范围的对话通道
     description: |
       双向 JSON 通道。客户端必须在五秒内发送 `connect` 首帧。connect 成功后，
-      Agent 和 Conversation 在该连接的整个生命周期内不可更换。
+      Agent 和 Session 在该连接的整个生命周期内不可更换。
     messages:
       ClientRequestFrame:
         $ref: '#/components/messages/ClientRequestFrame'
@@ -100,8 +104,10 @@ components:
             id: connect-1
             method: connect
             params:
+              mode: create
               min_protocol: 2
               max_protocol: 2
+              session_id: session-1
               agent_id: agent-a
               model_id: model-a
               client:
@@ -116,10 +122,11 @@ components:
             id: connect-2
             method: connect
             params:
+              mode: resume
               min_protocol: 2
               max_protocol: 2
               agent_id: agent-a
-              conversation_id: conversation-1
+              session_id: session-1
               client:
                 id: campusclaw-sdk
                 version: 1.0.0
@@ -155,9 +162,9 @@ components:
               protocol: 2
               connection_id: conn-01
               agent_id: agent-a
-              conversation_id: conversation-1
+              session_id: session-1
               model:
-                id: model-a
+                model_id: model-a
                 name: 模型 A
                 reasoning: true
               session:
@@ -195,7 +202,7 @@ components:
                 run_id: run-01
                 run_seq: 14
                 message_snapshot:
-                  id: message-01
+                  message_id: message-01
                   role: assistant
                   status: streaming
                   content:
@@ -210,7 +217,7 @@ components:
             ok: false
             error:
               code: RUN_ACTIVE
-              message: 当前 Conversation 已存在 active run。
+              message: 当前 Session 已存在 active run。
               retryable: true
     ServerEventFrame:
       name: ServerEventFrame
@@ -225,7 +232,7 @@ components:
             seq: 7
             payload:
               agent_id: agent-a
-              conversation_id: conversation-1
+              session_id: session-1
               run_id: run-01
               message_id: message-01
               run_seq: 7
@@ -241,7 +248,7 @@ components:
             seq: 24
             payload:
               agent_id: agent-a
-              conversation_id: conversation-1
+              session_id: session-1
               run_id: run-01
               run_seq: 24
               timestamp: '2026-07-30T08:00:03Z'
@@ -257,6 +264,44 @@ components:
       minLength: 1
       maxLength: 128
       pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    ConnectionId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        CampusClaw 为当前物理 WebSocket 连接生成的标识。重连后变化，只用于
+        传输诊断和连接级序列，不作为 Session、消息或 run 的持久归属键。
+    SessionId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        上层会话服务创建和管理的不透明持久上下文标识。在认证得到的 tenant
+        和 user 作用域内唯一；新会话使用新值，删除后不得复用。
+    AgentId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        Agent Manager 管理的 Agent 标识。Runtime Session 创建后固定绑定，
+        恢复时必须与已保存绑定一致。
+    ModelId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        Model Manager 管理的模型标识。Session 保存当前有效值，每个 run 固化
+        实际使用值；仅在没有 active run 时允许切换。
+    MessageId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: CampusClaw 为一条持久化消息生成的标识。
+    RunId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: CampusClaw 为一次模型和工具执行生成的标识，跨连接恢复保持不变。
+    ToolCallId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        一个 run 内某次 Tool 调用的局部关联标识。它关联模型生成的 toolcall
+        内容与 Tool Manager 执行事件，不参与 Session 路由。
     RequestId:
       type: string
       minLength: 1
@@ -322,62 +367,57 @@ components:
         type: string
         minLength: 1
         maxLength: 128
-    NewSessionConnectParams:
-      type: object
-      additionalProperties: false
-      required:
-        - min_protocol
-        - max_protocol
-        - agent_id
-        - model_id
-        - client
-        - capabilities
-      properties:
-        min_protocol:
-          type: integer
-          minimum: 1
-        max_protocol:
-          type: integer
-          minimum: 1
-        agent_id:
-          $ref: '#/components/schemas/Identifier'
-        model_id:
-          $ref: '#/components/schemas/Identifier'
-        client:
-          $ref: '#/components/schemas/ClientInfo'
-        capabilities:
-          $ref: '#/components/schemas/ClientCapabilities'
-    ResumeSessionConnectParams:
-      type: object
-      additionalProperties: false
-      required:
-        - min_protocol
-        - max_protocol
-        - agent_id
-        - conversation_id
-        - client
-        - capabilities
-      properties:
-        min_protocol:
-          type: integer
-          minimum: 1
-        max_protocol:
-          type: integer
-          minimum: 1
-        agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
-        model_id:
-          $ref: '#/components/schemas/Identifier'
-        client:
-          $ref: '#/components/schemas/ClientInfo'
-        capabilities:
-          $ref: '#/components/schemas/ClientCapabilities'
+    SessionConnectMode:
+      type: string
+      enum:
+        - create
+        - resume
+      description: |
+        create 表示上层服务已分配新的 session_id，并要求幂等建立 Runtime
+        Session；resume 表示只能恢复已有 Session，缺失时返回 SESSION_NOT_FOUND。
     ConnectParams:
-      oneOf:
-        - $ref: '#/components/schemas/NewSessionConnectParams'
-        - $ref: '#/components/schemas/ResumeSessionConnectParams'
+      type: object
+      additionalProperties: false
+      description: |
+        session_id 始终由上层会话服务提供。create 对相同身份、Agent 和 Model
+        的重试保持幂等；resume 不创建缺失或已删除的 Session。Agent 绑定创建后
+        不可改变，resume 中不同的 model_id 只在没有 active run 时表示切换。
+      required:
+        - mode
+        - min_protocol
+        - max_protocol
+        - agent_id
+        - session_id
+        - client
+        - capabilities
+      properties:
+        mode:
+          $ref: '#/components/schemas/SessionConnectMode'
+        min_protocol:
+          type: integer
+          minimum: 1
+        max_protocol:
+          type: integer
+          minimum: 1
+        agent_id:
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        model_id:
+          $ref: '#/components/schemas/ModelId'
+          description: create 时必填；resume 时可省略、沿用或显式请求切换。
+        client:
+          $ref: '#/components/schemas/ClientInfo'
+        capabilities:
+          $ref: '#/components/schemas/ClientCapabilities'
+      allOf:
+        - if:
+            properties:
+              mode:
+                const: create
+          then:
+            required:
+              - model_id
     ConnectRequest:
       type: object
       additionalProperties: false
@@ -446,7 +486,7 @@ components:
         - idempotency_key
       properties:
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         message:
           type: string
           minLength: 1
@@ -480,7 +520,7 @@ components:
         - idempotency_key
       properties:
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
     ChatAbortRequest:
@@ -572,7 +612,7 @@ components:
         - model_id
       properties:
         model_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ModelId'
     ModelSetRequest:
       type: object
       additionalProperties: false
@@ -670,11 +710,11 @@ components:
       type: object
       additionalProperties: false
       required:
-        - id
+        - model_id
         - name
       properties:
-        id:
-          $ref: '#/components/schemas/Identifier'
+        model_id:
+          $ref: '#/components/schemas/ModelId'
         name:
           type: string
           minLength: 1
@@ -830,7 +870,7 @@ components:
         type:
           const: tool_call
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         name:
@@ -851,7 +891,7 @@ components:
         type:
           const: tool_result
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         status:
           type: string
           enum:
@@ -864,14 +904,14 @@ components:
       type: object
       additionalProperties: false
       required:
-        - id
+        - message_id
         - role
         - status
         - content
         - created_at
       properties:
-        id:
-          $ref: '#/components/schemas/Identifier'
+        message_id:
+          $ref: '#/components/schemas/MessageId'
         role:
           type: string
           enum:
@@ -906,7 +946,7 @@ components:
         - status
       properties:
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         name:
@@ -929,7 +969,7 @@ components:
         - active_tools
       properties:
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 0
@@ -946,7 +986,7 @@ components:
         - protocol
         - connection_id
         - agent_id
-        - conversation_id
+        - session_id
         - model
         - session
         - limits
@@ -956,11 +996,11 @@ components:
         protocol:
           const: 2
         connection_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ConnectionId'
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         model:
           $ref: '#/components/schemas/ModelSummary'
         session:
@@ -981,7 +1021,7 @@ components:
         - accepted
       properties:
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         accepted:
           type: boolean
           const: true
@@ -994,7 +1034,7 @@ components:
         - idempotent
       properties:
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         accepted:
           type: boolean
         idempotent:
@@ -1021,15 +1061,15 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - model
         - session
         - active_run
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         model:
           $ref: '#/components/schemas/ModelSummary'
         session:
@@ -1050,7 +1090,7 @@ components:
           items:
             $ref: '#/components/schemas/ModelSummary'
         effective_model_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ModelId'
     ModelSetResult:
       type: object
       additionalProperties: false
@@ -1150,7 +1190,7 @@ components:
         - FORBIDDEN
         - UNSUPPORTED_PROTOCOL
         - AGENT_NOT_FOUND
-        - CONVERSATION_NOT_FOUND
+        - SESSION_NOT_FOUND
         - MODEL_REQUIRED
         - MODEL_NOT_ALLOWED
         - RUN_ACTIVE
@@ -1224,7 +1264,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - run_seq
         - timestamp
@@ -1232,18 +1272,18 @@ components:
         - thinking
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 1
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         model_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ModelId'
         thinking:
           $ref: '#/components/schemas/ThinkingLevel'
     MessageStartedPayload:
@@ -1251,7 +1291,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - message_id
         - run_seq
@@ -1259,13 +1299,13 @@ components:
         - role
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         message_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/MessageId'
         run_seq:
           type: integer
           minimum: 1
@@ -1354,7 +1394,7 @@ components:
         type:
           const: toolcall_start
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         name:
@@ -1372,7 +1412,7 @@ components:
         type:
           const: toolcall_delta
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         delta:
           type: string
           minLength: 1
@@ -1387,7 +1427,7 @@ components:
         type:
           const: toolcall_end
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         arguments:
           type: object
           additionalProperties: true
@@ -1408,7 +1448,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - message_id
         - run_seq
@@ -1417,13 +1457,13 @@ components:
         - update
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         message_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/MessageId'
         run_seq:
           type: integer
           minimum: 1
@@ -1439,7 +1479,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - run_seq
         - timestamp
@@ -1447,18 +1487,18 @@ components:
         - tool_id
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 1
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         name:
@@ -1471,7 +1511,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - run_seq
         - timestamp
@@ -1480,18 +1520,18 @@ components:
         - update
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 1
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         update:
@@ -1514,7 +1554,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - run_seq
         - timestamp
@@ -1523,18 +1563,18 @@ components:
         - status
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 1
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         tool_call_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/ToolCallId'
         tool_id:
           $ref: '#/components/schemas/Identifier'
         status:
@@ -1551,7 +1591,7 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - message_id
         - run_seq
@@ -1559,13 +1599,13 @@ components:
         - message
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         message_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/MessageId'
         run_seq:
           type: integer
           minimum: 1
@@ -1594,18 +1634,18 @@ components:
       additionalProperties: false
       required:
         - agent_id
-        - conversation_id
+        - session_id
         - run_id
         - run_seq
         - timestamp
         - outcome
       properties:
         agent_id:
-          $ref: '#/components/schemas/Identifier'
-        conversation_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/AgentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
         run_id:
-          $ref: '#/components/schemas/Identifier'
+          $ref: '#/components/schemas/RunId'
         run_seq:
           type: integer
           minimum: 1

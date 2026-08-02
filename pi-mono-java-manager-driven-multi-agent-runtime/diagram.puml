@@ -51,7 +51,7 @@ rectangle "Controlled Agent directory\n<agent-runtime-root>/<agent-id>/" as Agen
 database "Agent metadata authority\nAgent model and binding policy" as AgentAuthority
 database "Tool Manager authority\nTool schema, status,\npermission and execution" as ToolManager
 database "Model Manager authority\nModel descriptor,\nallowlist and invocation" as ModelManager
-file "<user-agent-dir>/sessions/<agent-id>/\n<conversation-id>.jsonl" as SessionFile
+file "<user-agent-dir>/sessions/<agent-id>/\n<session-id>.jsonl" as SessionFile
 
 AgentMetadata --> Validate
 SkillMetadata --> Validate
@@ -107,7 +107,7 @@ skinparam sequence {
   GroupBackgroundColor #F8FAFC
 }
 
-actor Client
+actor "Calling session service" as Client
 participant "Upgrade auth" as Auth
 participant "ChatWebSocketAdapter" as WS
 participant "SessionTransportFactory" as TransportFactory
@@ -126,36 +126,36 @@ Auth -> Auth : validate identity and browser Origin
 Auth --> WS : immutable connection auth context
 WS -> TransportFactory : open(auth context)
 TransportFactory --> WS : per-connection transport
-Client -> WS : RequestFrame connect\nagent_id, conversation_id?, model_id?
+Client -> WS : RequestFrame connect\nmode, session_id, agent_id, model_id?
 WS -> WS : validate closed Frame\nand optional traceparent
 WS -> Transport : connect(command, invocation metadata)
 Transport -> Resolver : resolve(agent_id)
 Resolver -> Resolver : normalize and verify controlled root
 Resolver --> Transport : agentCwd
-Transport -> Pool : getOrCreate(agent_id, conversation_id)
+Transport -> Pool : open(SessionScope, agent_id, model_id?)
 
-alt new conversation
+alt mode=create
   Pool -> ModelManager : resolveModel(agent_id, model_id)
   ModelManager --> Pool : ModelDescriptor
-else resume conversation
-  Pool -> Store : load(agent_id, conversation_id)
+else mode=resume
+  Pool -> Store : load(tenant_id, user_id, session_id)
   Store --> Pool : messages and saved model_id
   Pool -> ModelManager : resolveModel(agent_id, effective model_id)
   ModelManager --> Pool : current ModelDescriptor
 end
 
-Pool -> Factory : create(agent_id, conversation_id,\nagentCwd, descriptor, restored messages)
+Pool -> Factory : create(SessionScope, agent_id,\nagentCwd, descriptor, restored messages)
 Factory -> Factory : load controlled SYSTEM.md and Skills
 Factory -> Factory : register read, get_tool_info, call_tool
 Factory -> Session : initialize isolated Session
 Session -> Loop : systemPrompt, messages, AgentTools
 Loop -> Loop : map AgentTools to Context.tools
 Loop --> Pool : ready
-Pool -> Hub : get active run for SessionKey
+Pool -> Hub : get active run for SessionScope
 Transport -> Hub : atomically register logical subscription\nand capture cursor plus snapshot
 Hub --> Transport : active_run snapshot and buffered publisher
 Transport --> WS : SessionConnectResult
-WS --> Client : ResponseFrame payload with conversation_id,\nmodel, limits, features, active_run
+WS --> Client : ResponseFrame payload with session_id,\nmodel, limits, features, active_run
 WS -> Transport : subscribe to events() after response write
 Hub --> Transport : SessionEvents after snapshot cursor
 Transport --> WS : ordered typed events
@@ -169,7 +169,8 @@ end note
 
 note over Pool,Store
 Isolation key:
-(agent_id, conversation_id)
+tenant_id, user_id, session_id
+agent_id is an immutable binding.
 The run is owned by Pool and Hub,
 not by the transport or WebSocket.
 end note
@@ -237,7 +238,7 @@ ToolManager --> GetInfo : live description and schemas
 GetInfo --> Model : tool metadata
 
 Model -> CallTool : call_tool(tool_id, parameters)
-CallTool -> ToolManager : callTool(agent_id, conversation_id,\ntool_id, parameters)
+CallTool -> ToolManager : callTool(agent_id, session_id,\ntool_id, parameters)
 ToolManager -> AgentAuthority : revalidate binding and permission
 AgentAuthority --> ToolManager : current policy
 ToolManager -> ToolManager : validate status and input schema
@@ -269,7 +270,7 @@ title Managed WebSocket Session Protocol
 ' Observed behavior: Java v1 captures one Session per connection, emits cumulative Message updates,
 ' and aborts AgentSession when the WebSocket closes.
 ' Java divergence: v2 maps Frame payloads to typed SessionTransport requests and events.
-' Architecture change: one connection is scoped to one Agent and conversation, unlike OpenClaw Gateway multiplexing.
+' Architecture change: one connection is scoped to one caller-owned session and Agent, unlike OpenClaw Gateway multiplexing.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
 
 skinparam backgroundColor #FFFFFF
@@ -289,7 +290,7 @@ skinparam sequence {
   GroupBackgroundColor #F8FAFC
 }
 
-actor Client
+actor "Calling session service" as Client
 participant "Upgrade auth" as Auth
 participant "ChatWebSocketAdapter" as WS
 participant "ManagedSessionTransport" as Transport
@@ -304,18 +305,18 @@ Auth -> Auth : reject URL token and business query\nvalidate identity and browse
 Auth --> Client : 101 Switching Protocols
 Auth -> WS : immutable auth context
 WS -> Transport : create per-connection transport
-Client -> WS : RequestFrame connect within 5 seconds
+Client -> WS : RequestFrame connect within 5 seconds\nmode, session_id, agent_id, model_id?
 WS -> WS : validate traceparent and closed Frame
 WS -> Transport : connect(command, invocation metadata)
-Transport -> Pool : resolve or create SessionKey\nand validate effective model
+Transport -> Pool : resolve SessionScope or create binding\nand validate effective model
 Pool -> Hub : atomic subscribe and snapshot
 Hub --> Transport : cursor, active_run, buffered publisher
 Transport --> WS : SessionConnectResult
-WS --> Client : ResponseFrame payload with model,\nfeatures, limits, active_run
+WS --> Client : ResponseFrame payload with connection_id,\nsession_id, agent_id, model, active_run
 WS -> Transport : subscribe to events()
 Hub --> Transport : events after cursor
 
-alt idle conversation
+alt idle session
   Client -> WS : RequestFrame chat.send\nwith idempotency_key and traceparent?
   WS -> Transport : request(ChatSend, metadata)
   Transport -> Pool : atomically create primary run
@@ -331,7 +332,7 @@ alt idle conversation
   Transport --> WS : run, message, and tool events
   WS -> WS : increment connection seq
   WS --> Client : EventFrames
-else active conversation
+else active session
   Client -> WS : RequestFrame chat.send
   WS -> Transport : request(ChatSend, metadata)
   Transport --> WS : RUN_ACTIVE
@@ -352,7 +353,7 @@ alt transport disconnects while run is active
   Auth --> Client : 101 Switching Protocols
   Auth -> WS : new immutable auth context
   WS -> Transport : create new transport
-  Client -> WS : RequestFrame connect for same SessionKey
+  Client -> WS : RequestFrame connect for same session_id
   WS -> Transport : connect(command, metadata)
   Transport -> Pool : resolve existing Session
   Pool -> Hub : atomic logical subscribe and snapshot
@@ -383,6 +384,13 @@ note over WS,Hub
 Event seq is connection-local.
 run_seq is continuous across reconnects.
 Snapshot response is sent before post-cursor deltas.
+end note
+
+note over Client,Session
+Core runtime identities:
+connection_id, session_id, agent_id,
+model_id, message_id, and run_id.
+Frame id and tool_call_id are local correlations.
 end note
 @enduml
 
@@ -489,7 +497,7 @@ Loop -> AiService : stream(model, Context, options)
 AiService -> Registry : getProvider(MODEL_MANAGER)
 Registry --> AiService : ModelManagerApiProvider
 AiService -> Provider : streamSimple(model, Context, metadata)
-Provider -> Provider : require immutable agent_id,\nconversation_id, and Trace Context
+Provider -> Provider : require immutable agent_id,\nsession_id, and Trace Context
 Provider -> ModelManager : invoke(agent_id, model.id,\nContext, mapped options)
 ModelManager -> ModelManager : revalidate Agent model binding
 
