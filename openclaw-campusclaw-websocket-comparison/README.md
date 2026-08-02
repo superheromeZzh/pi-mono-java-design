@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.2.0` |
+| 文档版本 | `1.3.0` |
 | 状态 | 目标设计对比，CampusClaw v2 尚未实现 |
 | 更新日期 | 2026-08-02 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.3.0` |
-| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.2.0`、协议号 `2` |
+| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.4.0` |
+| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.3.0`、协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -31,6 +31,8 @@ OpenClaw 和 CampusClaw 解决的是两个不同层级的问题：
 - CampusClaw v2 是 ToB Agent Runtime 的 **Session-scoped Chat 协议**。
   上层会话服务创建和管理 `session_id`；一条连接在 `connect` 成功后固定绑定
   该 Session 及其不可变 `agent_id`，后续命令不再携带 Session 路由键。
+  `session_id` 在 Runtime 部署范围内全局唯一，Runtime 不维护业务
+  `tenant_id/user_id`。
 - pi-mono-java v1 也是“一条连接操作一个 Session”，但它通过 Upgrade query
   参数选择 `conversation_id`，没有 Agent 维度、协议协商、统一 Frame、
   跨连接 run 所有权和可靠恢复语义。
@@ -105,8 +107,8 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 
 目标设计以以下仓库内制品为准：
 
-- [Manager 驱动的多 Agent 运行设计 1.3.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.2.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [Manager 驱动的多 Agent 运行设计 1.4.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.3.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -135,7 +137,8 @@ v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要�
 v1 建连时根据 `conversation_id` 得到 `AgentSession`，handler 在该连接生命周期
 内持有它。它看起来也是 Session-scoped，但缺少以下约束：
 
-- Session key 没有 `agent_id`，不能形成多 Agent 隔离键；
+- Session 记录没有不可变 `agent_id` 绑定，且所有 Session 共享 base cwd，无法
+  形成多 Agent 运行隔离；
 - `new_session` 可在同一连接内替换 Session，连接身份并非不可变；
 - 模型可在连接内改变，却没有 Manager 的 Agent-model 授权；
 - run 隶属于连接，断线会 abort；
@@ -146,7 +149,7 @@ v1 建连时根据 `conversation_id` 得到 `AgentSession`，handler 在该连�
 连接在 `connect` 成功后固定：
 
 ```text
-authenticated identity
+authenticated calling service
   + session_id supplied by the upstream service
   + agent_id
   + effective model_id
@@ -160,10 +163,11 @@ authenticated identity
 多个观察连接，但它们订阅同一个 `ManagedRunHub`。
 
 这是 ToB Agent Runtime 的产品约束和安全加固：Agent 权限、模型、Tool 权限、
-附件归属、thinking 披露和审计天然落在同一个固定边界内。上层服务负责用户
-会话列表、最多 50 个等产品规则以及业务删除；CampusClaw 负责 Runtime
-上下文、JSONL 和 run。代价是需要同时观察很多 Session 的客户端必须维护
-多个 WebSocket。
+thinking 披露和审计天然落在同一个固定边界内。上层服务负责用户鉴权、
+tenant/user 归属、会话列表、最多 50 个等产品规则、附件归属以及业务删除；
+CampusClaw 只认证调用服务，以全局唯一 `session_id` 作为 Session key，并负责
+Runtime 上下文、JSONL 和 run。代价是需要同时观察很多 Session 的调用服务
+必须维护多个 WebSocket。
 
 ## 5. 统一对比矩阵
 
@@ -171,15 +175,15 @@ authenticated identity
 |---|---|---|---|---|
 | 核心定位 | 通用 Gateway 控制平面和节点传输 | Chat 服务端模式 | Agent Runtime 的 Session-scoped Chat 协议 | 原因：收窄 ToB Runtime 边界；收益：降低跨 Agent 授权复杂度；代价：多会话客户端连接更多 |
 | 连接作用域 | 一条连接可调用多个 Session 和控制面能力 | 一条连接持有一个 `AgentSession`，但可 `new_session` | 一条连接固定调用方 `session_id` 及其 Agent 绑定 | 原因：固定审计和权限边界；收益：后续帧无需重新路由；代价：不具备 Gateway 式多路复用 |
-| Upgrade 输入 | 建立 WebSocket 后进行 challenge/connect | query `conversation_id`；AsyncAPI 还声明 query `token` | Upgrade 不收业务 query 和 URL token | 原因：URL 容易被中间层记录；收益：凭据不进入代理日志和浏览器历史；代价：浏览器和非浏览器要使用不同认证载体 |
-| 认证 | connect 内认证、设备签名/配对、role/scope | 基线路由没有实现文档所述 query token 校验 | 浏览器 Cookie + Origin；CLI/SDK Bearer；身份不一致拒绝 | 原因：复用企业身份入口；收益：不需要复制设备配对；代价：依赖认证适配器和严格 Origin 配置 |
+| Upgrade 输入 | 建立 WebSocket 后进行 challenge/connect | query `conversation_id`；AsyncAPI 还声明 query `token` | 内部服务 Upgrade 不收业务 query 和 URL token | 原因：业务标识只在首个封闭 Frame 中出现；收益：凭据和路由不进入代理 URL 日志；代价：浏览器必须经上层服务接入 |
+| 认证 | connect 内认证、设备签名/配对、role/scope | 基线路由没有实现文档所述 query token 校验 | 调用服务 Bearer，入口可叠加 mTLS；不接收 tenant/user 身份 | 原因：Runtime 只建立服务信任；收益：不重复上层用户体系；代价：上层服务成为用户授权责任边界 |
 | 握手 | `connect.challenge` → `connect` → `hello-ok` | 没有协议首帧，Upgrade 后直接处理命令 | Upgrade 认证后 5 秒内 `connect` → connect response | 原因：传输认证与业务协商分层；收益：可显式返回 Session 和能力；代价：服务端要维护首帧超时状态 |
 | 版本协商 | `minProtocol/maxProtocol`，基线协议 v4 | 无 | `min_protocol/max_protocol`，仅接受 v2 | 原因：管理破坏性变更；收益：不兼容时快速失败；代价：服务端和 SDK 要维护版本矩阵 |
 | capability 与 features | 客户端声明 caps；`hello-ok.features` 返回可用 methods/events/capabilities | 无 | 客户端必须支持 `structured_message_delta`；connect `payload.features` 返回按认证、Agent 和服务过滤后的稳定列表 | 原因：能力发现与逐请求授权分离；收益：客户端可适配服务能力，未知 capability 可前向兼容；代价：必须验证过滤、排序和降权 |
 | Frame | 封闭 `req/res/event`；成功 Response 使用 `payload` | 按命令 `type` 分发；支持可选 `id` 和 `response`，但没有统一 Frame | 封闭 `req/res/event`；成功 Response 使用 `payload`，错误使用 `error` | 原因：连接内存在并发命令和异步事件；收益：统一响应关联、超时、重试和 SDK 生成；代价：需要统一 dispatcher 和 schema validator |
 | 追踪上下文 | Request Frame 可带 `traceparent` | 无协议字段 | 可选 `traceparent` 通过 W3C 校验并传给 Model/Tool Manager，只用于遥测 | 原因：跨 Manager 调用需要关联追踪；收益：无需污染业务载荷；代价：必须隔离 Prompt、JSONL、事件和凭据日志 |
 | Agent 路由 | 请求/Session 数据可带 `agentId` | 无 `agent_id` | `mode=create` 必填 `agent_id` 并形成不可变绑定；resume 必须匹配 | 原因：Session 不能跨 Agent 重绑定；收益：防止串用；代价：建连必须访问 Agent Manager |
-| Session 路由 | Chat 请求和事件携带 `sessionKey` | Upgrade query 选择 `conversation_id` | 上层服务提供 `session_id`；connect create/resume 后不再传 | 原因：CampusClaw 消费而不拥有业务会话身份；收益：无二次 ID 映射且每帧不能改变目标；代价：调用方必须协调生命周期 |
+| Session 路由 | Chat 请求和事件携带 `sessionKey` | Upgrade query 选择 `conversation_id` | 上层服务提供全局唯一 `session_id`；connect create/resume 后不再传 | 原因：Runtime 只消费调用方会话身份；收益：唯一 key 无二次作用域映射且每帧不能改变目标；代价：调用方必须保证全局唯一和协调生命周期 |
 | Model 路由 | 由 Gateway/Session 配置体系决定 | `set_model` 直接作用于 Session | `mode=create` 必填 `model_id`；resume 可沿用，切换须 Manager 校验 | 原因：Agent-model allowlist 必须服务端权威；收益：避免未授权模型；代价：增加 Manager 延迟和可用性依赖 |
 | 发送 | `chat.send` + `idempotencyKey` | `prompt`，无请求幂等键 | `chat.send` + `idempotency_key`，返回 `run_id` | 原因：网络失败后的结果可能未知；收益：安全重试不重复创建 run；代价：服务端要保存幂等记录 |
 | steer | `chat.send.queueMode="steer"` 等队列模式 | 独立 `steer` | 独立 `chat.steer(run_id)` | 原因：显式限定当前 run；收益：命令意图和审计更清晰；代价：不提供 OpenClaw 的完整队列模式 |
@@ -196,9 +200,9 @@ authenticated identity
 | run 所有权 | Gateway 暴露 `inFlightRun` 并指导客户端恢复 | WebSocket close 时 abort | `ManagedSessionPool/ManagedRunHub` 持有，连接只订阅 | 原因：网络生命周期不应定义模型生命周期；收益：抖动不终止 run；代价：服务端回收和超时更复杂 |
 | 恢复 | 重新订阅、history、in-flight 状态、序列对账 | 仅可恢复已写历史，活动 run 已被 abort | 原子“订阅 + 快照”，再发送 cursor 后 delta；离线完成查 history | 原因：消除订阅与快照竞态；收益：不漏帧也不被旧快照覆盖；代价：Hub 必须提供原子 API 和缓冲 |
 | 帧与背压 | hello policy 给限制；广播有 slow-consumer 分支 | v1 无规范化上限和恢复契约 | 默认 1 MiB 帧、4 MiB 缓冲；1009/1013 | 原因：每连接资源必须有界；收益：防止慢连接拖垮服务；代价：大消息需拆分且客户端必须恢复 |
-| 心跳 | Gateway policy 和客户端协议支持连接保活 | 应用层 JSON `pong` | 原生 WebSocket Ping/Pong，默认 20 秒 | 原因：让协议栈和基础设施识别保活；收益：业务消息更纯粹；代价：浏览器业务 JS 不能直接控制 Pong |
-| 附件 | `chat.send.attachments` 可携带附件内容/描述 | v1 消息内附件 | REST 先上传，WS 只传当前身份下的 `attachment_id[]` | 原因：大对象和安全处理不属于流式控制面；收益：便于扫描、归属校验和审计；代价：多一个上传阶段 |
-| 权限与审计 | role/scope/capability + session visibility | 没有 Agent 维度的协议授权 | Upgrade 身份 + Agent/Model/Attachment Manager 校验，凭据不进事件/JSONL | 原因：企业多租户需要统一权威；收益：审计边界清晰；代价：Manager 成为关键依赖并增加调用开销 |
+| 心跳 | Gateway policy 和客户端协议支持连接保活 | 应用层 JSON `pong` | 原生 WebSocket Ping/Pong，默认 20 秒 | 原因：让协议栈和基础设施识别保活；收益：业务消息更纯粹；代价：调用服务必须正确处理 Pong 和重连 |
+| 附件 | `chat.send.attachments` 可携带附件内容/描述 | v1 消息内附件 | 上层 REST 完成用户授权，WS 只传绑定 session_id 的 `attachment_id[]` | 原因：用户归属和大对象处理不属于 Runtime；收益：边界清晰且便于扫描；代价：调用服务多一个上传阶段 |
+| 权限与审计 | role/scope/capability + session visibility | 没有 Agent 维度的协议授权 | 服务身份 + Agent/Model/Tool 校验；tenant/user 留在上层，凭据不进事件/JSONL | 原因：按所有权拆分授权；收益：Runtime 不复制用户体系；代价：服务间凭据和委托能力成为关键依赖 |
 | Transport 依赖方向 | SDK 客户端依赖 `OpenClawTransport`；服务端 handler 已抽象 `RespondFn`，但连接状态和广播仍直接依赖 WebSocket | `ChatWebSocketHandler` 直接拥有 Session、订阅和断线 abort | `ChatWebSocketAdapter` 依赖服务端 `SessionTransport`，`ManagedSessionTransport` 拥有业务状态机 | 原因：协议适配与 Session 生命周期分离；收益：可单测并保留未来 Adapter 扩展点；代价：需要严格定义连接与订阅状态机 |
 | 协议制品 | TypeBox → 运行时校验、类型和协议 Schema | AsyncAPI 1.0 文档与 Java 手写处理存在偏差 | AsyncAPI 3.1 规范制品，后续 Java 实现必须对齐 | 原因：先固定可评审契约；收益：可生成文档和契约测试；代价：实现前仍没有运行时校验，后续要建设生成链 |
 
@@ -206,7 +210,7 @@ authenticated identity
 
 ![WebSocket 握手与认证对比](websocket_handshake_comparison.svg)
 
-[PlantUML 源码：`websocket_handshake_comparison`](diagram.puml#L87)
+[PlantUML 源码：`websocket_handshake_comparison`](diagram.puml#L89)
 
 ### 6.1 OpenClaw 为什么使用 challenge 和设备身份
 
@@ -221,20 +225,22 @@ OpenClaw Gateway 面向范围广泛的客户端和节点。服务端发送 nonce
 这套体系是 Gateway 产品模型的组成部分，不是所有 WebSocket Chat 都必须复制
 的通用规范。
 
-### 6.2 CampusClaw 为什么在 Upgrade 认证
+### 6.2 CampusClaw 为什么在 Upgrade 认证调用服务
 
-CampusClaw v2 面向已有企业身份体系：
+CampusClaw v2 是内部 Agent Runtime，不直接承接最终用户或浏览器身份：
 
-- 浏览器使用 `HttpOnly + Secure + SameSite` Cookie，并校验 `Origin`；
-- CLI、SDK 和服务调用使用 `Authorization: Bearer`；
-- Cookie 与 Bearer 同时存在但身份不同，拒绝 Upgrade；
-- Cookie 身份由认证适配器换取短期 Manager-audience Bearer；
+- 浏览器先连接上层会话服务，由上层完成 Cookie、Origin 和用户授权；
+- 上层服务使用 `Authorization: Bearer` 调用 Runtime，部署可叠加 mTLS；
+- Runtime 校验 service principal、audience 和 scope，不接收业务
+  `tenant_id/user_id`；
+- Runtime 调用 Manager 时使用独立 audience 凭据或受控 token exchange；
 - 凭据不进入 Prompt、JSONL、WebSocket 事件或业务日志。
 
 完成 transport 认证后，客户端首个业务帧仍必须是 `connect`。它负责协议版本、
 客户端能力和 Session 绑定，而不是再次传递长期凭据。`session_id` 始终由
-上层会话服务提供：`mode=create` 必须同时提供 `session_id + agent_id +
-model_id`，相同绑定重试幂等；`mode=resume` 提供 `session_id + agent_id`，
+上层会话服务提供并保证在 Runtime 部署范围内全局唯一：`mode=create` 必须
+同时提供 `session_id + agent_id + model_id`，相同绑定重试幂等；
+`mode=resume` 提供 `session_id + agent_id`，
 `model_id` 可省略并沿用已保存值。显式切换模型要经过 Model Manager，活动
 run 存在时拒绝；缺失或已删除 Session 不得由 resume 隐式重建。
 
@@ -353,7 +359,7 @@ toolcall_start / toolcall_delta / toolcall_end
 
 ![WebSocket 流式输出与恢复对比](websocket_stream_recovery_comparison.svg)
 
-[PlantUML 源码：`websocket_stream_recovery_comparison`](diagram.puml#L156)
+[PlantUML 源码：`websocket_stream_recovery_comparison`](diagram.puml#L160)
 
 ### 9.1 OpenClaw：重新投影权威状态
 
@@ -448,14 +454,16 @@ CampusClaw v2 固定三级披露：
 
 - `hidden`：默认，只发送 thinking 开始/结束状态；
 - `summary`：只发送 Model Manager 明确提供的安全摘要，不从原始 thinking 合成；
-- `full`：同时满足 tenant、Agent、Model、用户 scope 和客户端 capability 才可用。
+- `full`：同时满足调用服务 scope、Agent、Model、可选委托披露上限和客户端
+  capability 才可用。
 
 `chat.send` 只能降低允许级别，不能提升；实时事件、重连快照和历史读取必须
-使用相同投影策略。这是安全加固，避免用户通过“换一个读取路径”获取本不该
+使用相同投影策略。这是安全加固，避免调用方通过“换一个读取路径”获取本不该
 披露的 thinking。
 
 OpenClaw 也有 thinking 输入和 capability-gated 事件，但它服务于 Gateway
-能力投影。CampusClaw 的额外约束来自多租户 ToB 的分层授权。
+能力投影。CampusClaw 的额外约束来自上层服务、Agent 与 Model 的分层授权，
+不要求 Runtime 建模 tenant 或 user。
 
 ### 11.2 Tool 生命周期
 
@@ -472,18 +480,19 @@ WebSocket 的 Tool 事件只是“向客户端披露执行状态”，不承担 
 OpenClaw `chat.send` Schema 允许携带附件 envelope。CampusClaw v2 改为：
 
 1. 通过 REST 上传；
-2. 上传服务完成大小限制、MIME/安全处理、tenant/user 归属记录；
-3. WebSocket `chat.send` 只提交 `attachment_id[]`；
-4. Chat 服务再次校验附件属于当前连接身份。
+2. 上层服务完成大小限制、MIME/安全处理、tenant/user 归属和业务授权；
+3. 上层服务把附件绑定到全局 `session_id`；
+4. WebSocket `chat.send` 只提交 `attachment_id[]`；
+5. Runtime 只校验附件存在、未过期、Session 绑定和 Agent 可用性。
 
 这是安全加固和架构改造。收益是 WebSocket 保持轻量、附件可复用且容易审计；
 代价是客户端多一个上传阶段，并要处理制品过期。
 
 ### 11.4 凭据和审计
 
-CampusClaw 的 Cookie、Bearer 和 Manager-audience 凭据都不能进入 Prompt、
-JSONL、WebSocket 事件或业务日志。审计事件使用稳定身份和资源 ID，敏感
-凭据只保留在不可变连接认证上下文或服务间调用上下文中。
+CampusClaw 的服务 Bearer、mTLS 身份和 Manager-audience 凭据都不能进入
+Prompt、JSONL、WebSocket 事件或业务日志。审计事件使用 service principal
+和稳定资源 ID，敏感凭据只保留在不可变连接认证上下文或服务间调用上下文中。
 
 ## 12. 协议制品差异
 
@@ -523,7 +532,7 @@ handler 也以手写 `type` 分支处理消息。因此 AsyncAPI 目前更接近
 
 ![WebSocket Transport 依赖倒置对比](websocket_transport_dependency_inversion_comparison.svg)
 
-[PlantUML 源码：`websocket_transport_dependency_inversion_comparison`](diagram.puml#L229)
+[PlantUML 源码：`websocket_transport_dependency_inversion_comparison`](diagram.puml#L233)
 
 OpenClaw 最新 SDK 已把客户端依赖倒置到
 `OpenClawTransport.request/events/close`，`GatewayClientTransport` 再封装
@@ -561,18 +570,18 @@ CampusClaw v2：
 
 ```text
 GET /api/ws/chat
-Cookie: session=***                  # browser
-Authorization: Bearer ***           # CLI/SDK/service
-Origin: https://console.example.com  # browser validation
+Authorization: Bearer ***           # calling session service
+# Deployment may additionally require mTLS.
 ```
 
 ```json
-{"type":"req","id":"connect-1","method":"connect","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"session-1","agent_id":"agent-a","model_id":"model-a","client":{"id":"campusclaw-web","version":"1.0.0","platform":"web"},"capabilities":["structured_message_delta","future_client_capability"]}}
-{"type":"res","id":"connect-1","ok":true,"payload":{"protocol":2,"connection_id":"conn-1","session_id":"session-1","agent_id":"agent-a","model":{"model_id":"model-a","name":"模型 A","reasoning":true},"session":{"state":"idle","thinking":"hidden"},"limits":{"max_frame_bytes":1048576,"max_connection_buffer_bytes":4194304,"heartbeat_seconds":20,"connect_timeout_seconds":5},"features":{"methods":["chat.send","chat.steer","chat.abort","chat.history","session.get","models.list","model.set","thinking.set","prompt_templates.list","skills.list"],"events":["run.started","message.started","message.updated","tool.started","tool.updated","tool.completed","message.completed","run.completed"],"capabilities":["structured_message_delta"]},"active_run":null}}
+{"type":"req","id":"connect-1","method":"connect","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent-a","model_id":"model-a","client":{"id":"campusclaw-session-service","version":"1.0.0","platform":"service"},"capabilities":["structured_message_delta","future_client_capability"]}}
+{"type":"res","id":"connect-1","ok":true,"payload":{"protocol":2,"connection_id":"conn-1","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent-a","model":{"model_id":"model-a","name":"模型 A","reasoning":true},"session":{"state":"idle","thinking":"hidden"},"limits":{"max_frame_bytes":1048576,"max_connection_buffer_bytes":4194304,"heartbeat_seconds":20,"connect_timeout_seconds":5},"features":{"methods":["chat.send","chat.steer","chat.abort","chat.history","session.get","models.list","model.set","thinking.set","prompt_templates.list","skills.list"],"events":["run.started","message.started","message.updated","tool.started","tool.updated","tool.completed","message.completed","run.completed"],"capabilities":["structured_message_delta"]},"active_run":null}}
 ```
 
 关键差异：OpenClaw challenge 证明设备请求的新鲜性并服务于配对体系；
-CampusClaw 已在 Upgrade 完成企业身份认证，connect 只做协议与 Session 绑定。
+CampusClaw 已在 Upgrade 完成调用服务认证，connect 只做协议与 Session 绑定。
+最终用户和浏览器身份留在上层会话服务。
 客户端的未知 capability 被忽略且不回显；`features` 是当前连接的有效发现列表，
 不代替后续逐请求授权。
 
@@ -607,8 +616,8 @@ OpenClaw：
 CampusClaw v2：
 
 ```json
-{"type":"event","event":"message.updated","seq":18,"payload":{"agent_id":"agent-a","session_id":"session-1","run_id":"run-1","message_id":"message-1","run_seq":7,"content_index":0,"timestamp":"2026-07-30T10:00:00Z","update":{"type":"text_delta","delta":"世界"}}}
-{"type":"event","event":"message.completed","seq":19,"payload":{"agent_id":"agent-a","session_id":"session-1","run_id":"run-1","message_id":"message-1","run_seq":8,"timestamp":"2026-07-30T10:00:01Z","message":{"message_id":"message-1","role":"assistant","status":"completed","content":[{"type":"text","text":"你好世界"}],"created_at":"2026-07-30T10:00:00Z"}}}
+{"type":"event","event":"message.updated","seq":18,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":7,"content_index":0,"timestamp":"2026-07-30T10:00:00Z","update":{"type":"text_delta","delta":"世界"}}}
+{"type":"event","event":"message.completed","seq":19,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":8,"timestamp":"2026-07-30T10:00:01Z","message":{"message_id":"message-1","role":"assistant","status":"completed","content":[{"type":"text","text":"你好世界"}],"created_at":"2026-07-30T10:00:00Z"}}}
 ```
 
 OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed delta
@@ -636,7 +645,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed 
 | 机制 | 不复制的原因 | CampusClaw 替代 |
 |---|---|---|
 | 一条连接路由多个 Session | ToB Runtime 要固定调用方 Session、Agent、模型和披露边界 | 每个 Session 一条 Session-scoped 连接 |
-| 设备配对和 challenge 签名体系 | 企业入口已有 Cookie/Bearer 身份和 Origin 策略 | Upgrade 认证 + connect 绑定 |
+| 设备配对和 challenge 签名体系 | Runtime 只信任上层调用服务，不直接认证设备或最终用户 | 服务 Bearer/mTLS Upgrade 认证 + connect 绑定 |
 | Node 和全局控制面方法 | `/api/ws/chat` 只服务对话 | 未来独立 `/api/ws/gateway` |
 | 多种 active-run queue mode | 当前产品需要可预测的单主 run | `RUN_ACTIVE` + 显式 steer/abort |
 | 慢消费者丢弃 Chat delta | 单 Session Chat 更重视输出连续性 | 1013 断开 + 原子快照恢复 |
@@ -647,8 +656,8 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed 
 
 | 变化 | 分类 | 原因 |
 |---|---|---|
-| `SessionScope(tenant_id, user_id, session_id)` Pool key，Agent 为固定绑定 | 架构改造 | 调用方 Session 身份与 Runtime Agent 绑定职责分离 |
-| Upgrade 认证和无 URL token | 安全加固 | 防泄漏、固定身份 |
+| 全局唯一 `session_id` Pool key，Agent 为固定绑定 | 架构改造 | 上层拥有用户归属，Runtime 只维护执行上下文 |
+| 服务 Bearer/mTLS Upgrade 认证和无 URL token | 安全加固 | 防泄漏并固定调用服务身份，不复制用户认证体系 |
 | `connect` 首帧 | 架构改造 | 协议、能力、Agent、Model 的显式协商 |
 | 封闭 Frame、`payload` 和 `traceparent` | 架构改造 | 契约校验、追踪传播和响应关联 |
 | `ChatWebSocketAdapter -> SessionTransport` | 架构改造 | 协议适配与 Session/run 生命周期解耦 |
@@ -678,20 +687,20 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 - `mode=create/resume` 的 `session_id/agent_id/model_id` 规则，以及上层提供
   `session_id`、删除后不复用的边界；
-- Cookie、Bearer、Origin 和身份冲突；
+- 服务 Bearer、可选 mTLS、audience、scope 和过期凭据；
 - 三类封闭 Frame 的判别、未知顶层字段拒绝和 `payload/error` 互斥；
 - `traceparent` 缺失、合法、非法和到 Model/Tool Manager 的只读传播；
 - 未知 capability 忽略、必需 capability 缺失拒绝、`full_thinking` 只能降权；
 - connect `features` 的稳定排序、去重和按连接授权过滤，且不替代逐请求授权；
-- 两个 Session 并发、不同 tenant/user 的同名 session ID 不串用、同一
-  Session 跨 Agent 重绑定被拒绝；
+- 两个 Session 并发、全局 session ID 重复被拒绝、同一 Session 跨 Agent
+  重绑定被拒绝；
 - 同一 Session 多观察连接共享一个 active run；
 - 重复 send、steer、abort 和模型切换的状态机；
 - 断线期间 run 继续、原子快照与后续 delta 无竞态；
 - 连接 `seq` 与 `run_seq` 缺口处理；
 - `hidden/summary/full` 在实时、快照和历史上的一致投影；
 - Tool 生命周期事件与终态 Message 对账；
-- 跨 tenant 附件、Manager 认证失败、帧超限和慢消费者恢复；
+- 未绑定当前 session_id 的附件、Manager 认证失败、帧超限和慢消费者恢复；
 - `SessionTransport` 状态机、单订阅、背压、幂等 close 和断线不终止 run；
 - Java DTO、validator、事件编码与 AsyncAPI example 的契约一致性。
 
@@ -712,6 +721,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.3.0` | 2026-08-02 | 同步 CampusClaw Manager 1.4.0 与 AsyncAPI 2.3.0；Runtime 改以全局唯一 session_id 为唯一隔离键，tenant/user 和浏览器认证留在上层会话服务，Upgrade 只认证调用服务 |
 | `1.2.0` | 2026-08-02 | 同步 CampusClaw Manager 1.3.0 与 AsyncAPI 2.2.0；明确上层服务拥有 session_id、CampusClaw 使用 SessionScope 和不可变 Agent 绑定，并统一六类核心 Runtime 标识 |
 | `1.1.0` | 2026-07-31 | OpenClaw 基线升级到 `b015925…` 和 Protocol v4；补充 Frame、`traceparent`、精确 Session 订阅、混合 delta、客户端 Transport 与服务端解耦边界，并同步 CampusClaw AsyncAPI 2.1.0 目标 |
 | `1.0.0` | 2026-07-30 | 首版；建立 OpenClaw 已实现、pi-mono-java v1 当前和 CampusClaw v2 目标三态对比 |

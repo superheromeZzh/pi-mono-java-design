@@ -14,6 +14,7 @@ title WebSocket Connection Scope Comparison
 ' Observed behavior: OpenClaw uses one Gateway connection for requests and events across sessions.
 ' Current Java behavior: one connection captures one AgentSession selected by a query parameter.
 ' Target design: one CampusClaw connection is bound to one caller-owned session and agent after connect.
+' Target design: globally unique session_id is the only Runtime session key; tenant and user stay upstream.
 ' Design reason: Session scope fixes authorization, model, disclosure, and audit boundaries.
 
 skinparam backgroundColor #FFFFFF
@@ -61,7 +62,7 @@ package "CampusClaw v2 - target only" as campus_v2 {
 
   cc_client --> cc_conn : connect once
   cc_observer --> cc_conn : another subscription
-  cc_conn --> cc_pool : tenant_id + user_id + session_id
+  cc_conn --> cc_pool : globally unique session_id
   cc_pool --> cc_session
   cc_session --> cc_hub : zero or one active run
 }
@@ -78,6 +79,7 @@ end note
 
 note bottom of campus_v2
   session_id is supplied and managed upstream.
+  Tenant and user identities stay upstream.
   Agent binding is immutable after create.
   The binding cannot change after connect.
   A new session_id uses a new connection.
@@ -98,7 +100,8 @@ title WebSocket Handshake and Authentication Comparison
 ' Observed behavior: OpenClaw emits a challenge before the first client connect Request Frame.
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
 ' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
-' Design reason: enterprise credentials stay in transport authentication and never enter chat payloads.
+' Target design: the Runtime authenticates only the calling service, not the end user.
+' Design reason: service credentials stay in transport authentication and never enter chat payloads.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -138,8 +141,8 @@ There is no connect protocol negotiation.
 end note
 
 == CampusClaw v2 target only ==
-CC -> EDGE : Upgrade /api/ws/chat\nCookie or Authorization Bearer
-EDGE -> EDGE : validate Origin and identity consistency
+CC -> EDGE : Upgrade /api/ws/chat\nservice Bearer or mTLS
+EDGE -> EDGE : validate service principal and scope
 EDGE -> V2 : immutable authenticated connection context
 CC -> V2 : req connect within 5 seconds\n{mode, session_id, agent_id,\nmodel_id?, traceparent?}
 V2 -> MGR : authorize agent and resolve model
@@ -147,6 +150,7 @@ MGR --> V2 : effective identity and model
 V2 --> CC : res payload {protocol, connection_id,\nsession, limits, features, active_run?}
 note over CC,V2
 No business query parameter and no URL token.
+Browser and end-user identity stay upstream.
 The connection cannot switch agent or session.
 Unknown capabilities are ignored and not echoed.
 Effective features do not replace request authorization.

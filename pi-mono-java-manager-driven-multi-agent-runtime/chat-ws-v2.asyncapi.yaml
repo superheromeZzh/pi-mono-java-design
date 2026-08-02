@@ -3,7 +3,7 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.2.0
+  version: 2.3.0
   description: |
     Manager 驱动的 CampusClaw Agent Runtime Session 协议规范。
 
@@ -13,7 +13,9 @@ info:
 
     `session_id` 由上层会话服务创建并管理，CampusClaw 将其作为不透明的
     持久上下文标识。上层服务负责用户会话列表、数量限制和业务删除；本协议
-    只定义 Runtime Session 的创建绑定、恢复和流式交互。
+    只定义 Runtime Session 的创建绑定、恢复和流式交互。`session_id` 必须在
+    一个 Runtime 部署范围内全局唯一且删除后不复用；Runtime 不接收或维护
+    tenant_id、user_id。
 
     版本 2 直接替换 `/api/ws/chat` 上的 v1 传输格式，使用
     request/response/event Frame 和结构化消息增量。协议不接受业务查询
@@ -30,12 +32,12 @@ servers:
     pathname: /api/ws/chat
     protocol: wss
     description: |
-      生产 WebSocket 端点。浏览器客户端使用安全的 HttpOnly、SameSite
-      Cookie 认证，并且必须提供允许的 Origin。CLI、SDK 和服务客户端使用
-      Authorization Bearer 请求头认证。服务端拒绝业务查询参数和 URL token。
+      生产环境内部服务端点。浏览器终端应连接上层会话服务，不直接连接本
+      Runtime。调用服务使用 Authorization Bearer，部署也可以在入口强制
+      mTLS。服务端拒绝业务查询参数和 URL token。
     security:
-      - $ref: '#/components/securitySchemes/sessionCookie'
       - $ref: '#/components/securitySchemes/bearerAuth'
+      - $ref: '#/components/securitySchemes/mutualTLS'
   local:
     host: localhost:3000
     pathname: /api/ws/chat
@@ -74,21 +76,19 @@ operations:
       - $ref: '#/channels/sessionChat/messages/ServerEventFrame'
 components:
   securitySchemes:
-    sessionCookie:
-      type: httpApiKey
-      in: cookie
-      name: campusclaw_session
-      description: |
-        浏览器 Session Cookie。部署时必须设置 HttpOnly、Secure 和合适的
-        SameSite 值，并在 Upgrade 前校验 Origin。
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
       description: |
-        CLI、SDK 和服务客户端使用的 Authorization 请求头。Cookie 和 Bearer
-        凭据同时存在时，二者必须解析为相同的租户和用户。凭据不得复制到
-        Prompt、JSONL、协议事件或应用日志。
+        调用服务使用的 Authorization 请求头。Token 必须具有 Runtime
+        audience 和所需 service scope。业务 tenant_id、user_id 不进入连接
+        上下文；凭据不得复制到 Prompt、JSONL、协议事件或应用日志。
+    mutualTLS:
+      type: X509
+      description: |
+        可选的服务间双向 TLS 身份。部署可单独使用 mTLS，或用它加强 Bearer
+        认证；证书身份只用于服务认证和审计，不参与 Session key。
   messages:
     ClientRequestFrame:
       name: ClientRequestFrame
@@ -107,13 +107,13 @@ components:
               mode: create
               min_protocol: 2
               max_protocol: 2
-              session_id: session-1
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               agent_id: agent-a
               model_id: model-a
               client:
-                id: campusclaw-web
+                id: campusclaw-session-service
                 version: 1.0.0
-                platform: web
+                platform: service
               capabilities:
                 - structured_message_delta
         - name: 恢复会话
@@ -126,7 +126,7 @@ components:
               min_protocol: 2
               max_protocol: 2
               agent_id: agent-a
-              session_id: session-1
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               client:
                 id: campusclaw-sdk
                 version: 1.0.0
@@ -162,7 +162,7 @@ components:
               protocol: 2
               connection_id: conn-01
               agent_id: agent-a
-              session_id: session-1
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               model:
                 model_id: model-a
                 name: 模型 A
@@ -232,7 +232,7 @@ components:
             seq: 7
             payload:
               agent_id: agent-a
-              session_id: session-1
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
               run_seq: 7
@@ -248,7 +248,7 @@ components:
             seq: 24
             payload:
               agent_id: agent-a
-              session_id: session-1
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               run_seq: 24
               timestamp: '2026-07-30T08:00:03Z'
@@ -274,8 +274,9 @@ components:
       allOf:
         - $ref: '#/components/schemas/Identifier'
       description: |
-        上层会话服务创建和管理的不透明持久上下文标识。在认证得到的 tenant
-        和 user 作用域内唯一；新会话使用新值，删除后不得复用。
+        上层会话服务创建和管理的不透明持久上下文标识。在一个 CampusClaw
+        Runtime 部署范围内全局唯一；新会话使用新值，删除后不得复用。推荐
+        使用 UUIDv7 或 ULID，不接受仅在某个 tenant 或 user 内唯一的短 ID。
     AgentId:
       allOf:
         - $ref: '#/components/schemas/Identifier'
@@ -348,7 +349,6 @@ components:
         platform:
           type: string
           enum:
-            - web
             - cli
             - sdk
             - service
@@ -379,9 +379,10 @@ components:
       type: object
       additionalProperties: false
       description: |
-        session_id 始终由上层会话服务提供。create 对相同身份、Agent 和 Model
-        的重试保持幂等；resume 不创建缺失或已删除的 Session。Agent 绑定创建后
-        不可改变，resume 中不同的 model_id 只在没有 active run 时表示切换。
+        session_id 始终由上层会话服务提供并保证全局唯一。create 对相同
+        session_id、Agent 和 Model 的重试保持幂等；resume 不创建缺失或已
+        删除的 Session。Agent 绑定创建后不可改变，resume 中不同的 model_id
+        只在没有 active run 时表示切换。
       required:
         - mode
         - min_protocol
@@ -810,7 +811,8 @@ components:
         const: structured_message_delta
       description: |
         客户端声明、服务端支持且当前授权共同允许的能力交集。full_thinking
-        只有在 tenant、Agent、Model、用户 scope 和客户端声明全部允许时出现。
+        只有在调用服务 scope、Agent、Model、可选委托披露上限和客户端声明
+        全部允许时出现。
       items:
         type: string
         enum:

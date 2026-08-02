@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.3.0 |
+| 文档版本 | 1.4.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-02 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -53,7 +53,7 @@ call_tool
                 └── references/
                     └── tools.json
 
-<user-agent-dir>/
+<runtime-data-root>/
 └── sessions/
     └── <agent-id>/
         └── <session-id>.jsonl
@@ -71,6 +71,12 @@ CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负�
 `session_id` 作为不透明的持久上下文标识，负责 Agent/Model 绑定、JSONL、
 消息、run 和流式恢复。本设计不再引入 `conversation_id` 或第二套
 `agent_session_id`。
+
+上层会话服务必须保证 `session_id` 在一个 CampusClaw Runtime 部署范围内
+全局唯一，推荐使用 UUIDv7 或 ULID，并且删除后不得复用。Runtime 不接收、
+不保存，也不使用业务 `tenant_id` 或 `user_id` 作为 Session 身份；调用方的
+最终用户鉴权、会话归属和配额判断必须在进入 Runtime 前完成。Runtime 只认证
+调用服务，`ManagedSessionPool` 的唯一 key 是 `session_id`。
 
 ## 2. 范围与设计分类
 
@@ -202,11 +208,11 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 | SessionTransportFactory | 不可变连接认证上下文 | 为每条物理连接创建独立的逻辑 Session 通道 |
 | ManagedSessionTransport | connect 状态、Session 绑定、强类型请求和事件订阅 | 实现 `connect/request/events/close`，隔离应用语义与网络实现 |
 | ChatWebSocketAdapter | WebSocket Frame、连接序列和网络流控 | 映射 Frame 与 Session 类型，处理首帧、Ping/Pong、1009 和 1013 |
-| ManagedSessionPool | `SessionScope(tenant_id, user_id, session_id)` 到 Session 和 active run 的映射 | 内存隔离、恢复、Agent 绑定、运行所有权和淘汰 |
+| ManagedSessionPool | 全局唯一 `session_id` 到 Session 和 active run 的映射 | 内存隔离、恢复、Agent 绑定、运行所有权和淘汰 |
 | ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于连接持续运行，并为订阅者生成原子恢复点 |
-| ConnectionAuthAdapter | Cookie/Bearer 身份与 Manager audience 凭据 | 固化连接身份、校验 Origin 并避免凭据进入 Agent 数据 |
-| Attachment service | REST 上传制品、所有权和租户范围 | WebSocket 只引用已上传的 `attachment_id` |
-| 用户级 Session Store | JSONL 消息和模型变更 | 持久化会话，不保存 Agent 定义 |
+| ConnectionAuthAdapter | 调用服务身份与 Manager audience 凭据 | 校验服务间 Bearer 或 mTLS 身份并避免凭据进入 Agent 数据 |
+| Attachment service | REST 上传制品、Session 绑定和短期访问能力 | WebSocket 只引用上层已授权的 `attachment_id` |
+| Runtime Session Store | JSONL 消息、Agent/Model 绑定和删除状态 | 按全局 `session_id` 持久化会话，不保存用户或租户身份 |
 
 运行目录是 Manager 数据的模型披露投影，不是授权数据库。目录中的
 `tool_id` 只告诉模型“可能使用什么”；Tool Manager 仍在每次发现和执行时
@@ -462,7 +468,7 @@ systemPrompt
   + 当前 Agent cwd
 
 messages
-  = 当前 SessionScope(tenant_id, user_id, session_id) JSONL 恢复的有效消息
+  = 当前 session_id 对应 JSONL 恢复的有效消息
 
 tools
   = [
@@ -502,8 +508,8 @@ Managed profile 不遍历全局或祖先上下文，不加载其他 Agent Skill�
 3. `ChatWebSocketAdapter` 校验 Request Frame 和 `traceparent`，把首帧
    connect 映射为 `SessionConnectCommand`；
 4. AgentDirectoryResolver 得到受控 `agentCwd`；
-5. ManagedSessionPool 使用认证上下文中的 tenant/user 与调用方提供的
-   `session_id` 组成 `SessionScope` 查找 Session；
+5. ManagedSessionPool 直接使用调用方提供的全局唯一 `session_id` 查找
+   Session；服务认证上下文只参与连接授权和审计，不参与 Session key；
 6. `mode=create` 校验上层提供的新 `session_id + agent_id + model_id` 并幂等
    建立绑定；`mode=resume` 校验已有 Session 的 Agent 和保存 Model；
 7. ManagedAgentSessionFactory 加载当前 Agent SYSTEM 和 Skill，注册三个
@@ -530,9 +536,12 @@ call_tool:
     parameters: object
 ```
 
-`agent_id`、`session_id`、用户和租户身份来自服务端 SessionContext；其中
+`agent_id`、`session_id` 和调用服务身份来自服务端 SessionContext；其中
 `session_id` 由 connect 接收后固化，Agent 与 Model 绑定来自已校验的
-Managed Session。模型不能在 Tool 参数中指定或覆盖这些值。
+Managed Session。模型不能在 Tool 参数中指定或覆盖这些值。Runtime 不在
+SessionContext 中建立 `tenant_id` 或 `user_id`；若 Tool Manager 需要调用方
+下放的业务授权，只传递不可由模型修改的短期委托凭据或能力句柄，并由
+Tool Manager 解释和执行。
 `InvocationContext` 还携带从 `SessionInvocationMetadata` 继承的已校验
 Trace Context，Tool Manager 调用创建子 span；该上下文不改变授权结果。
 
@@ -593,7 +602,7 @@ validation.
 
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
-[PlantUML 源码](diagram.puml#L179)
+[PlantUML 源码](diagram.puml#L181)
 
 Agent 直接工具路径：
 
@@ -620,7 +629,7 @@ Tool Manager 在 `get_tool_info` 和 `call_tool` 中都校验：
 2. tool_id 当前绑定到该 Agent 或其可用 Skill；
 3. Tool 存在且启用；
 4. Agent、Skill、Tool 权限允许当前操作；
-5. 当前用户、租户和环境满足执行策略；
+5. 调用服务及可选的短期委托能力满足执行策略；
 6. `call_tool` 参数符合当前 input schema；
 7. 执行结果符合 output schema。
 
@@ -700,7 +709,7 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 ```json
 {
   "agent_id": "agent-a",
-  "session_id": "session-1",
+  "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 }
 ```
@@ -714,7 +723,7 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L458)
+[PlantUML 源码](diagram.puml#L461)
 
 Model Manager 事件一对一映射为 Java `AssistantMessageEvent`：
 
@@ -740,7 +749,7 @@ Provider。
 ### 9.1 协议定位
 
 `/api/ws/chat` 直接提供版本 2，不为同一路由保留 v1 消息语义。它是一条
-连接绑定一个 `SessionScope + agent_id` 的 Session-scoped 协议：
+连接绑定一个 `session_id + agent_id` 的 Session-scoped 协议：
 
 ```text
 one WebSocket connection
@@ -751,9 +760,9 @@ one WebSocket connection
 ```
 
 不同 Session 通过不同连接并发。同一 Session 可有多个经过相同
-租户、用户及 Agent 授权的观察连接；它们订阅同一个 `ManagedRunHub`，但
+调用服务及 Agent 授权的观察连接；它们订阅同一个 `ManagedRunHub`，但
 不会复制 run。任何有写权限的观察连接都可以在空闲时发起 `chat.send`，
-或对指定 active `run_id` 执行 steer/abort。暂不设计租户级多路复用
+或对指定 active `run_id` 执行 steer/abort。暂不设计多 Session 复用
 Gateway，也不允许连接建立后切换 Agent 或 Session。
 
 规范性协议为
@@ -770,17 +779,14 @@ HTTP Upgrade 目标固定为：
 ```
 
 Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
-其他业务查询参数。认证方式：
+其他业务查询参数。该端点是内部服务接口，不直接接受浏览器终端连接；浏览器
+先连接上层会话服务，再由上层服务调用 Runtime。认证方式：
 
-- 浏览器使用 `HttpOnly + Secure + SameSite` Session Cookie，服务端必须
-  校验允许的 `Origin`；
-- CLI、SDK 和服务间调用使用 `Authorization: Bearer <token>`；
-- Cookie 和 Bearer 同时存在时必须解析为同一 tenant/user，否则在 Upgrade
-  阶段拒绝；
-- Bearer 固化在不可变 `ConnectionAuthContext`；Cookie 身份由认证适配器
-  换取短期、限定 Manager audience 的 Bearer；
-- 外部 Bearer 只有在 audience 被 Manager 接受时才可直接转发，否则执行
-  token exchange；
+- 调用服务使用 `Authorization: Bearer <token>`，部署也可以在入口增加 mTLS；
+- Bearer 或 mTLS 解析出的服务身份固化在不可变
+  `ConnectionAuthContext`，业务 `tenant_id/user_id` 不进入该上下文；
+- 外部 Bearer 只有在 Runtime audience 和 scope 均有效时才接受；调用
+  Model/Tool Manager 时使用独立的 Manager audience 凭据或 token exchange；
 - 凭据及其 hash 不进入 Prompt、JSONL、WebSocket 事件、异常详情或普通日志。
 
 客户端必须在 Upgrade 成功后 5 秒内发送首个 JSON 帧，且该帧只能是：
@@ -796,12 +802,12 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
     "min_protocol": 2,
     "max_protocol": 2,
     "agent_id": "agent-a",
-    "session_id": "session-1",
+    "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "model_id": "model-a",
     "client": {
-      "id": "campusclaw-web",
+      "id": "campusclaw-session-service",
       "version": "1.0.0",
-      "platform": "web"
+      "platform": "service"
     },
     "capabilities": ["structured_message_delta"]
   }
@@ -813,12 +819,13 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
 
 `capabilities` 必须包含 `structured_message_delta`。数组允许携带服务端尚不
 认识的能力名；未知值被忽略且不回显，避免客户端新增可选能力就无法连接。
-客户端声明不构成授权，`full_thinking` 仍需通过 tenant、Agent、Model 和
-用户 scope 的全部策略。
+客户端声明不构成授权，`full_thinking` 仍需通过调用服务 scope、Agent、
+Model 和可选委托披露上限的全部策略。
 
 `session_id` 始终由上层会话服务提供，CampusClaw 不生成第二套 Runtime
 Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
-服务端在认证作用域内幂等建立 Session，固定 Agent 绑定，经
+`session_id` 必须在 Runtime 部署范围内全局唯一。服务端幂等建立 Session，
+固定 Agent 绑定，经
 `AgentDirectoryResolver` 解析 cwd，并用 Model Manager 精确校验模型。
 `mode=resume` 必须提供 `session_id + agent_id`：
 
@@ -827,12 +834,12 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
 - 显式提供相同 `model_id` 是幂等操作；
 - 显式提供不同 `model_id` 表示切换模型；存在 active run 时返回
   `RUN_ACTIVE`，否则先校验再持久化 model change；
-- 保存的 Session 必须属于当前 tenant/user，且其固定 Agent 绑定必须与
-  `agent_id` 一致；不一致时以 `FORBIDDEN` 拒绝，避免泄露其他 Session。
+- 保存的 Session 固定 Agent 绑定必须与 `agent_id` 一致；不一致时以
+  `FORBIDDEN` 拒绝，避免泄露 Session 是否绑定到其他 Agent。
 
-`mode=create` 的重试对相同 tenant/user、`session_id`、`agent_id` 和
-`model_id` 保持幂等；同一 `session_id` 请求不同 Agent 绑定时拒绝。上层业务
-删除后，该 `session_id` 不得重新用于 `mode=create`。
+`mode=create` 的重试对相同 `session_id`、`agent_id` 和 `model_id` 保持
+幂等；同一 `session_id` 请求不同 Agent 绑定时拒绝。上层业务删除后，Runtime
+记录删除状态，该 `session_id` 不得重新用于 `mode=create`。
 
 成功的 connect Response 返回：
 
@@ -845,7 +852,7 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
     "protocol": 2,
     "connection_id": "conn-01",
     "agent_id": "agent-a",
-    "session_id": "session-1",
+    "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "model": {"model_id": "model-a", "name": "Model A"},
     "session": {"state": "idle", "thinking": "hidden"},
     "limits": {
@@ -884,7 +891,7 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
 }
 ```
 
-`features.methods/events/capabilities` 是客户端声明、服务能力、粗粒度身份和
+`features.methods/events/capabilities` 是客户端声明、服务能力、调用服务授权和
 Agent 配置共同过滤后的稳定有序列表。它用于发现和降级，不构成调用授权；
 动态 active-run 状态、附件归属以及 Model/Tool 权限仍在每次请求或执行时
 校验。
@@ -926,7 +933,7 @@ CampusClaw 的六类核心标识固定为：
 | 标识 | 所有者 | 生命周期与职责 |
 |---|---|---|
 | `connection_id` | ChatWebSocketAdapter | 当前物理连接；重连后变化，不持有 Session 或 run |
-| `session_id` | 上层会话服务 | 持久上下文；跨连接和多个 run 保持，删除后不复用 |
+| `session_id` | 上层会话服务 | Runtime 部署内全局唯一的持久上下文；跨连接和多个 run 保持，删除后不复用 |
 | `agent_id` | Agent Manager | Session 创建时固定绑定，恢复时必须一致 |
 | `model_id` | Model Manager | Session 保存当前值，每个 run 固化实际使用值 |
 | `message_id` | CampusClaw | 一条持久化消息；完整 Message 统一使用该字段，不使用裸 `id` |
@@ -935,7 +942,7 @@ CampusClaw 的六类核心标识固定为：
 路由关系为：
 
 ```text
-SessionScope(tenant_id, user_id, session_id)
+session_id
   -> immutable agent_id
   -> current model_id
   -> messages identified by message_id
@@ -963,12 +970,14 @@ SessionScope(tenant_id, user_id, session_id)
 | `skills.list` | 无 | 返回当前 Agent 已物化 Skill 的 name、description、location |
 
 协议不提供连接内 `new_session`。`idempotency_key` 在当前
-tenant/user/Session/command 范围内判重；同 key 同负载返回原
+session_id/command 范围内判重；同 key 同负载返回原
 结果，同 key 不同负载返回 `INVALID_REQUEST`。
 
-附件必须先经 REST 上传。WebSocket 只接受 `attachment_ids`，Session 服务
-在接受 `chat.send` 前校验附件属于当前 tenant/user、未过期且可供当前
-Agent 使用；客户端路径、URL 和二进制内容不能替代 ID。
+附件必须先经上层服务的 REST 接口上传。上层服务完成 tenant/user 归属、
+扫描和业务授权，再把绑定当前 `session_id` 的 `attachment_ids` 交给 Runtime。
+Runtime 在接受 `chat.send` 前只校验附件存在、未过期、与当前 `session_id`
+绑定且可供当前 Agent 使用，不解析 tenant/user；客户端路径、URL 和二进制
+内容不能替代 ID。
 
 ### 9.4 服务端 SessionTransport
 
@@ -1023,7 +1032,7 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 
 ![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
 
-[PlantUML 源码](diagram.puml#L397)
+[PlantUML 源码](diagram.puml#L400)
 
 ### 9.5 流式事件和 Message 投影
 
@@ -1071,8 +1080,8 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
   原始 thinking 或摘要正文；
 - `summary` 只发送 Model Manager 明确标记为安全的
   `thinking_summary`，不得由 CampusClaw 从原始 thinking 合成；
-- `full` 必须同时满足 tenant 策略、Agent 策略、Model 能力、用户 scope 和
-  客户端 `full_thinking` capability；
+- `full` 必须同时满足调用服务 scope、Agent 策略、Model 能力、可选委托披露
+  上限和客户端 `full_thinking` capability；
 - `chat.send.thinking` 只能把当前 Session 允许级别调低，不能临时提升；
 - 实时事件、connect 恢复快照、`session.get` 和 `chat.history` 使用同一个
   `ThinkingProjectionPolicy`，避免从恢复或历史旁路泄露。
@@ -1084,7 +1093,7 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 
 `ManagedSessionPool` 持有 AgentSession 和 active run；WebSocket 只持有
 订阅。连接关闭时取消订阅，不调用 `AgentSession.abort()`。run 只在以下
-情况终止：正常完成、显式 `chat.abort`、Agent/租户策略撤销、服务端有界
+情况终止：正常完成、显式 `chat.abort`、Agent 或调用服务授权撤销、服务端有界
 运行超时或进程故障。
 
 `ManagedRunHub` 持续维护：
@@ -1155,27 +1164,30 @@ Manager 认证失败不得把上游凭据或响应正文写入 `details`。`retr
 ManagedSessionPool 的 key 为：
 
 ```text
-SessionScope(tenant_id, user_id, session_id)
+session_id
 ```
 
-`agent_id` 是 Session 创建后不可变的绑定属性，不是第二个 Session 主键。
-同一认证作用域内，一个 `session_id` 不能重新绑定另一个 Agent；不同用户或
-租户可以使用相同的上层 `session_id` 而不串用：
+`session_id` 由上层服务生成，在一个 Runtime 部署范围内全局唯一且删除后
+不复用。`agent_id` 是 Session 创建后不可变的绑定属性，不是第二个 Session
+主键：
 
 ```text
-(tenant-a, user-a, session-1) -> agent-a
-(tenant-a, user-b, session-1) -> agent-b
+01ARZ3NDEKTSV4RRFFQ69G5FAV -> agent-a
+01BX5ZZKBKACTAV9WEVGEMMVRZ -> agent-b
 ```
 
 它们对应不同 AgentSession、Agent、cwd、Prompt、Skill、Model 和 Tool
-调用上下文。
+调用上下文。Runtime 不接受仅在某个 tenant 或 user 内唯一的短 ID；服务身份
+仍用于连接授权和审计，但不参与 Session key。若多个互不信任的上层服务共享
+Runtime，应在入口或独立授权服务校验 `service_principal + session_id` 访问权，
+而不是把业务 tenant/user 放回 SessionPool key。
 
 ### 9.10 JSONL 路径
 
-用户级 Session 存储：
+Runtime Session 存储：
 
 ```text
-<user-agent-dir>/
+<runtime-data-root>/
 └── sessions/
     └── <agent-id>/
         └── <session-id>.jsonl
@@ -1184,12 +1196,13 @@ SessionScope(tenant_id, user_id, session_id)
 默认：
 
 ```text
-<user-agent-dir> = ~/.campusclaw/agent
+<runtime-data-root> = ~/.campusclaw/agent
 ```
 
 Session header 中的 cwd 写入当前 `agentCwd`。路径解析对 `agent_id` 和
-`session_id` 使用相同的单路径段约束；文件归属还必须由认证得到的用户级
-根目录限定，不能仅凭文件名完成授权。
+`session_id` 使用相同的单路径段约束。`<agent-id>` 子目录只用于物理组织和
+cwd 隔离，不参与 Session 主键；Session Store 必须按全局 `session_id` 查找
+并校验保存的不可变 `agent_id`，不能通过遍历调用方提供的路径完成路由。
 
 持久化至少覆盖：
 
@@ -1205,17 +1218,17 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 ![Managed WebSocket Session 协议](managed_websocket_session_protocol.svg)
 
-[PlantUML 源码](diagram.puml#L257)
+[PlantUML 源码](diagram.puml#L259)
 
 ## 10. pi-mono-java 目标适配点
 
 | 当前位置 | 目标改造 | 分类 |
 |---|---|---|
-| WebSocket Upgrade route | 不解析业务 query；校验 Cookie/Bearer/Origin，创建不可变 ConnectionAuthContext | 安全加固 |
+| WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.2.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
-| `SessionPool` | 增加 Managed 路径；使用认证作用域 + session_id、固定 Agent 绑定、按 Agent JSONL 路径、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.3.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
 | `AgentSession.initialize()` | Managed 路径使用精确 cwd、三个通用 Tool、Manager Model 和 Managed Prompt profile | 架构改造 |
@@ -1225,7 +1238,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | `Agent` stream options | 合并不可变 agent_id、session_id 和解析后的 Trace Context metadata | 架构改造 |
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
 | Web 前端 `useChatWs` | 按 message_id/content_index 合并 delta；序列缺口时重连并应用快照 | 架构改造 |
-| REST attachment service | 上传后返回租户和用户范围的 attachment_id，供 chat.send 引用 | 安全加固 |
+| REST attachment service | 由上层服务完成用户归属和扫描，返回绑定 session_id 的 attachment_id 供 chat.send 引用 | 安全加固 |
 | Legacy CLI | 保持原来的本地 Provider、Tool、Settings 和资源发现路径 | 兼容要求 |
 
 Managed 路径不得修改共享 `SettingsManager.workingDir` 来表示当前 Agent。
@@ -1253,12 +1266,12 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 以下情况在 connect 阶段返回明确错误，不创建部分 Session：
 
-- Upgrade 身份无效、Cookie 与 Bearer 身份冲突或浏览器 Origin 不允许；
+- Upgrade 调用服务身份无效、Bearer audience/scope 不允许或 mTLS 校验失败；
 - 首帧不是 connect、超时或协议版本不兼容；
 - agent_id 非法或 Agent 目录不存在；
 - SYSTEM 或 Skill 目录不可读；
 - `mode=create` 缺少上层分配的 session_id、agent_id 或 model_id；
-- `mode=resume` 的 Session 不存在、已删除或不属于当前 tenant/user；
+- `mode=resume` 的 Session 不存在或已删除；
 - model_id 不属于当前 Agent；
 - session_id 路径非法；
 - Session 已绑定其他 Agent；
@@ -1279,15 +1292,17 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 ### 11.4 信任边界
 
 - connect 只能提供 session_id、agent_id 和 model_id，不能提供 cwd；
-- session_id 由上层会话服务管理，但其 tenant/user 作用域和已有 Agent 绑定由
-  CampusClaw 根据认证上下文重新校验；
+- session_id 由上层会话服务管理，必须在 Runtime 部署范围内全局唯一且删除后
+  不复用；CampusClaw 只校验已有 Agent 绑定，不维护 tenant/user 归属；
 - Agent 目录由部署程序写入，运行账号只读；
 - read 限制在当前 Agent cwd 允许范围；
 - Prompt 中的 tool_id 不构成授权；
-- agent_id、session_id、tenant 和 user 均由服务端注入 Manager 请求；
+- agent_id、session_id 和调用服务身份均由服务端注入 Manager 请求；可选业务
+  委托授权以不可变短期凭据传递，不能由模型参数提供；
 - Upgrade URL、Prompt、JSONL、事件和日志均不保存认证凭据；
 - 实时、快照和历史共用 ThinkingProjectionPolicy；
-- attachment_id 必须在接受 run 前校验 tenant/user 所有权；
+- attachment_id 的 tenant/user 所有权由上层服务校验；Runtime 只校验其
+  session_id 绑定、状态和 Agent 可用性；
 - Tool Manager 和 Model Manager 是每次调用的最终权限执行点。
 
 ## 12. 测试与验收
@@ -1316,7 +1331,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 - Agent 直接 tool_id 可发现和执行；
 - Skill tool_id 在读取 Skill 资源后可发现和执行；
-- 跨 Agent tool_id、未绑定、禁用、deny 和无用户权限调用被拒绝；
+- 跨 Agent tool_id、未绑定、禁用、deny 和委托能力不足的调用被拒绝；
 - 过期或错误 parameters 被当前 Schema 拒绝；
 - Tool Descriptor 缓存不绕过执行时重新鉴权；
 - Manager 输出不符合 output schema 时返回稳定错误。
@@ -1333,8 +1348,9 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ### 12.5 多 Agent
 
-- 同一 tenant/user 的 `session_id` 只能绑定一个 Agent，跨 Agent 重绑定被拒绝；
-- 不同 tenant/user 使用相同 `session_id` 时内存 Session 不冲突；
+- `session_id` 在 Runtime 部署范围内全局唯一，重复 ID 不会因调用服务或业务
+  用户不同而创建第二个 Session；
+- 同一 `session_id` 只能绑定一个 Agent，跨 Agent 重绑定被拒绝；
 - 两个 Agent 的 JSONL 路径不同；
 - SYSTEM、Skill、cwd、Model 和 Tool 请求不串用；
 - 并发创建 Session 不修改共享 workingDir；
@@ -1356,8 +1372,8 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
   `SESSION_NOT_FOUND`，并重新校验保存模型；
 - Upgrade URL 中的业务 query 和 token 被拒绝，首帧 connect 的 5 秒约束
   生效；
-- Cookie + 合法 Origin、Bearer 以及 Cookie/Bearer 同身份组合成功，不同
-  身份组合失败；
+- 合法服务 Bearer 或 mTLS 成功，无效 audience/scope、过期凭据和直接浏览器
+  访问失败；
 - 两个 Session 使用两个连接并发执行；同一 Session 多个观察连接
   只共享一个 active run；
 - active run 期间重复 `chat.send`、`model.set`、`thinking.set` 返回
@@ -1378,8 +1394,8 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - run 在断线期间结束后，`chat.history` 返回持久化终态；
 - hidden、summary、full 在实时、快照和历史中保持同一披露结果，未经 Manager
   标记的摘要不会输出；
-- 跨租户、跨用户、过期或不存在的 attachment_id 返回
-  `INVALID_ATTACHMENT`；
+- 未绑定当前 session_id、过期或不存在的 attachment_id 返回
+  `INVALID_ATTACHMENT`；用户归属测试在上层会话服务完成；
 - 客户端检测 `seq` 或 `run_seq` 缺口后重连恢复，不拼接未知缺口；
 - 1 MiB frame、4 MiB 缓冲、1009、1013 和 Ping/Pong 行为可重复验证；
 - Manager 身份交换失败和 Manager 不可用分别返回稳定错误，且错误中无凭据。
@@ -1393,8 +1409,9 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - 模型实际可执行工具固定为三个；
 - 通用工具 description 完整表达发现和执行协议；
 - Model 和 Tool Manager 分别是调用权威；
-- Session 使用 `SessionScope(tenant_id, user_id, session_id)` 隔离，
-  `agent_id` 是不可变绑定属性；
+- Session 使用全局唯一 `session_id` 隔离，`agent_id` 是不可变绑定属性；
+- Runtime 不维护 tenant_id/user_id；调用服务负责最终用户鉴权、Session 归属、
+  配额和业务删除，服务身份不参与 Session key；
 - 核心标识限定为 connection/session/agent/model/message/run 六类，并明确
   Request Frame `id`、`tool_call_id` 只是局部关联标识；
 - WebSocket 首帧固定 Session，所有命令和事件使用封闭 Frame，成功响应使用
@@ -1405,7 +1422,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - run 生命周期独立于连接，重连通过原子快照和 run_seq 恢复；
 - 同一披露策略覆盖实时、快照和历史；
 - 认证凭据不进入 Agent 数据和协议事件；
-- 用户级 JSONL 路径包含 agent_id；
+- Runtime JSONL 路径包含 agent_id，但物理目录不改变 session_id 唯一主键；
 - Managed 和 Legacy 路径职责明确；
 - 所有 Java 目标差异均标记为产品约束、安全加固或架构改造。
 
@@ -1413,6 +1430,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.0 | 2026-08-02 | 收紧 Agent Runtime 边界：删除 tenant_id/user_id SessionScope 和直接浏览器认证，以全局唯一 session_id 作为唯一隔离键；调用服务负责用户归属与配额，Runtime 只做服务认证、Agent 绑定和 Session 执行；同步 AsyncAPI 2.3.0 |
 | 1.3.0 | 2026-08-02 | 明确 CampusClaw 的 Agent Runtime 边界；以调用方管理的 session_id 替代目标协议中的 conversation_id，定义 create/resume、SessionScope 和 connection/session/agent/model/message/run 六类核心标识；同步 AsyncAPI 2.2.0 |
 | 1.2.0 | 2026-07-31 | 以 OpenClaw Protocol v4 最新基线优化 WebSocket v2；统一 Frame/payload、增加 traceparent 与有效 features，并定义服务端 SessionTransport 依赖倒置 |
 | 1.1.0 | 2026-07-30 | 定义 Session-scoped WebSocket v2、首帧 connect、Cookie/Bearer 认证、结构化 delta、run 独立生命周期、原子重连快照、thinking 披露、流控和规范性 AsyncAPI |
