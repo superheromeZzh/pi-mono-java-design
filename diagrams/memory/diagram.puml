@@ -43,8 +43,10 @@ sql --> db
 
 note right of db
 Tables and columns match SQLite.
-Only WITHOUT ROWID is removed.
-Sequence INTEGER becomes BIGINT.
+Only SQLite WITHOUT ROWID syntax is removed.
+Native semantic types are used.
+Strings use VARCHAR, sequences use BIGINT,
+timestamps use TIMESTAMPTZ(3), and JSON uses JSONB.
 end note
 
 note bottom of sql
@@ -125,71 +127,74 @@ skinparam classBackgroundColor #F7F9FC
 ' - packages/storage/sqlite-node/src/sqlite/migrations.ts: ensureMigrationsTable
 ' - packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql: lines 1-59
 ' - packages/storage/sqlite-node/src/sqlite/migrations/002_branch_tips.sql: lines 1-12
+' - packages/agent/src/harness/session/repository.ts: createTimestamp
+' - packages/storage/sqlite-node/src/sqlite/storage/session-entries.ts: encodeEntry
+' - packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts: serializeSummary
 ' Observed behavior: the final SQLite core schema has exactly eight logical tables.
 ' Target adaptation: preserve names, columns, nullability, keys, and indexes.
-' Type adaptation: four sequence INTEGER columns become BIGINT; every TEXT column remains TEXT.
+' Type adaptation: strings use VARCHAR, sequences use BIGINT, timestamps use TIMESTAMPTZ(3), and JSON documents use JSONB.
 ' Design reason: omit SQLite WITHOUT ROWID and add no other database structure.
 
 class "migrations" as migrations <<table>> {
-  id : text [PK]
+  id : varchar [PK]
   --
-  applied_at : text
+  applied_at : timestamptz(3)
 }
 
 class "sessions" as sessions <<table>> {
-  id : text [PK]
+  id : varchar [PK]
   --
-  created_at : text
-  cwd : text
-  parent_session_id : text [nullable]
-  metadata : text [nullable]
-  active_leaf_id : text [nullable]
+  created_at : timestamptz(3)
+  cwd : varchar
+  parent_session_id : varchar [nullable]
+  metadata : jsonb [nullable]
+  active_leaf_id : varchar [nullable]
 }
 
 class "session_entries" as session_entries <<table>> {
-  session_id : text [PK]
-  id : text [PK]
+  session_id : varchar [PK]
+  id : varchar [PK]
   --
   entry_seq : bigint [UQ]
-  parent_id : text [nullable]
-  type : text
-  timestamp : text
-  payload : text
+  parent_id : varchar [nullable]
+  type : varchar
+  timestamp : timestamptz(3)
+  payload : jsonb
 }
 
 class "session_sequences" as session_sequences <<table>> {
-  session_id : text [PK]
+  session_id : varchar [PK]
   --
   next_seq : bigint
 }
 
 class "branch_entries" as branch_entries <<cache>> {
-  session_id : text [PK]
-  branch_id : text [PK]
-  entry_id : text [PK]
+  session_id : varchar [PK]
+  branch_id : varchar [PK]
+  entry_id : varchar [PK]
   --
   entry_seq : bigint
 }
 
 class "branch_tips" as branch_tips <<cache>> {
-  session_id : text [PK]
-  tip_id : text [PK]
+  session_id : varchar [PK]
+  tip_id : varchar [PK]
   --
-  branch_id : text [UQ]
+  branch_id : varchar [UQ]
 }
 
 class "session_materialized" as session_materialized <<projection>> {
-  session_id : text [PK]
+  session_id : varchar [PK]
   --
-  payload : text
+  payload : jsonb
 }
 
 class "entry_materialized" as entry_materialized <<projection>> {
-  session_id : text [PK]
+  session_id : varchar [PK]
   entry_seq : bigint [PK]
-  type : text [PK]
+  type : varchar [PK]
   --
-  payload : text
+  payload : jsonb
 }
 
 sessions .. session_entries : logical session ownership
@@ -204,7 +209,7 @@ branch_tips .. branch_entries : logical branch identity
 note bottom of session_entries
 There are no physical foreign keys or checks.
 parent_id is the authoritative tree relation.
-Payload and timestamp remain text.
+Payload uses JSONB and timestamp uses TIMESTAMPTZ(3).
 end note
 
 note bottom of branch_entries
