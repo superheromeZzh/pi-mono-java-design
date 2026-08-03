@@ -13,8 +13,10 @@ title WebSocket Connection Scope Comparison
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw uses one Gateway connection for requests and events across sessions.
 ' Current Java behavior: one connection captures one AgentSession selected by a query parameter.
-' Target design: one CampusClaw connection is bound to one caller-owned session and agent after connect.
+' Target design: one CampusAgent connection is bound to one caller-owned session and agent after connect.
 ' Target design: globally unique session_id is the only Runtime session key; tenant and user stay upstream.
+' Target design: one Pod permits one active read/write connection per session; resume replaces the old generation.
+' Target design: RuntimeSessionStore persists authority in a database; active runs remain Pod-local.
 ' Design reason: Session scope fixes authorization, model, disclosure, and audit boundaries.
 
 skinparam backgroundColor #FFFFFF
@@ -52,21 +54,23 @@ package "pi-mono-java v1 - current" as java_v1 {
   java_pool --> java_session
 }
 
-package "CampusClaw v2 - target only" as campus_v2 {
-  actor "Calling session service" as cc_client
-  component "Session-scoped connection A" as cc_conn
-  component "Observer connection B" as cc_observer_conn
+package "CampusAgent v2 - target only" as campus_v2 {
+  actor "mate-service or server SDK" as cc_client
+  component "Trusted gateway\nuser-IP affinity" as cc_edge
+  component "Current connection\ngeneration N" as cc_conn
+  component "Replaced connection\ngeneration N-1" as cc_old_conn
   component "ManagedSessionPool" as cc_pool
   component "ManagedRunHub" as cc_hub
   database "Session 1 / immutable Agent A" as cc_session
-  actor "Observer client" as cc_observer
+  database "RuntimeSessionStore\ndatabase authority" as cc_store
 
-  cc_client --> cc_conn : connect once
-  cc_observer --> cc_observer_conn : separate physical connection
+  cc_client --> cc_edge : wss service call
+  cc_edge --> cc_conn : full path, same Pod
   cc_conn --> cc_pool : globally unique session_id
-  cc_observer_conn --> cc_pool : same session_id
+  cc_pool --> cc_old_conn : close 4409 SESSION_REPLACED
   cc_pool --> cc_session
   cc_session --> cc_hub : zero or one active run
+  cc_pool --> cc_store : persist session and history
 }
 
 note bottom of openclaw
@@ -83,8 +87,9 @@ note bottom of campus_v2
   session_id is supplied and managed upstream.
   Tenant and user identities stay upstream.
   Agent binding is immutable after create.
-  The binding cannot change after connect.
-  A new session_id uses a new connection.
+  One Pod has one active read/write connection.
+  There is no observer connection or Redis owner.
+  IP changes and Pod restart break active-run continuity.
 end note
 @enduml
 
@@ -101,8 +106,11 @@ title WebSocket Handshake and Authentication Comparison
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw emits a challenge before the first client connect Request Frame.
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
-' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
-' Target design: the Runtime authenticates the calling service with configured Bearer or mTLS, not the end user.
+' Target design: CampusAgent authenticates the Upgrade and then requires connect within five seconds.
+' Target design: the trusted internal gateway validates existing private-key/JWT service authentication.
+' Target design: private keys never travel; inbound credentials are not forwarded to Managers.
+' Target design: /agent-service/v1/ws/chat is the full gateway and service path.
+' Target design: URL v1 is the service API version; connect protocol 2 is the Frame version.
 ' Target design: a wss URI starts establishment; the WebSocket exists only after HTTP 101.
 ' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
 ' Target design: typed structured delta is intrinsic to protocol v2; only full_thinking is optional.
@@ -119,9 +127,9 @@ participant "OpenClaw Gateway" as OG
 actor "Java v1 client" as JV1C
 participant "ServerMode" as SM
 participant "ChatWebSocketHandler" as CWH
-actor "Calling session service" as CC
-participant "HTTP auth edge" as EDGE
-participant "Chat v2 endpoint" as V2
+actor "mate-service or server SDK" as CC
+participant "Trusted internal gateway" as EDGE
+participant "agent-service Chat endpoint" as V2
 participant "Agent and Model Managers" as MGR
 
 == OpenClaw implemented ==
@@ -145,25 +153,29 @@ The baseline route shown here extracts only conversation_id.
 There is no connect protocol negotiation.
 end note
 
-== CampusClaw v2 target: HTTP opening handshake ==
+== CampusAgent v2 target: HTTP opening handshake ==
 CC -> CC : call WebSocket library\nconnect(wss URI)
-CC -> EDGE : open one TCP connection\nthen TLS or mTLS\nthen HTTP/1.1 GET /api/ws/chat\nUpgrade headers; Bearer if configured
-EDGE -> EDGE : validate Bearer or mTLS identity\nand validate Upgrade
+CC -> EDGE : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/v1/ws/chat\nexisting signed-JWT integration
+EDGE -> EDGE : validate service JWT and Upgrade\nprivate key never travels
+EDGE -> V2 : preserve full path, principal, and Upgrade
+V2 --> EDGE : accept WebSocket Upgrade
 EDGE --> CC : HTTP/1.1 101 Switching Protocols
 
-== CampusClaw v2 target: application handshake ==
-EDGE -> V2 : immutable authenticated connection context
+== CampusAgent v2 target: application handshake ==
 CC -> V2 : WebSocket Text Frame within 5 seconds\nreq connect {mode, session_id, agent_id,\nmodel_id?, traceparent?}
-V2 -> MGR : authorize agent and resolve model
+V2 -> MGR : target-audience access token\nauthorize agent and resolve model
 MGR --> V2 : effective identity and model
-V2 --> CC : res payload {protocol, connection_id,\nsession, limits, features, active_run?}
+V2 --> CC : res payload {protocol=2, connection_id,\ngeneration, session, limits, features, active_run?}
 note over CC,V2
 No business query parameter and no URL token.
-Browser and end-user identity stay upstream.
+Browsers cannot call this endpoint directly.
+End-user identity stays in mate-service.
 The wss URI requests establishment; it is not an open WebSocket.
 The HTTPS form is a handshake target, not a REST API.
 HTTP 101 creates transport; connect binds the session.
 The connection cannot switch agent or session.
+URL v1 and Frame protocol 2 are independent versions.
+Inbound JWT is never forwarded to a Manager.
 Unknown capabilities are ignored and not echoed.
 Typed structured delta is not a capability.
 full_thinking is optional and policy-gated.
@@ -185,8 +197,10 @@ title Stream and Recovery Comparison
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw clients recover from sequence gaps by reconnecting and reloading authoritative state.
 ' Current Java behavior: message_update sends the accumulated message and disconnect aborts streaming.
-' Target design: Pool retains the active-run reference; AgentSession executes; Hub maintains recovery state.
-' Design reason: network connection lifetime must not define model run lifetime.
+' Target design: Pool and Hub retain active-run state only inside one Pod; RuntimeSessionStore is database authority.
+' Target design: same-Pod resume replaces the connection generation and captures an atomic snapshot.
+' Target design: Pod restart rebuilds the session and records interrupted history; it does not continue the active run.
+' Design reason: network disconnect must not abort a local run, but v1 does not claim cross-Pod continuation.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -200,10 +214,12 @@ participant "Chat history" as OCH
 actor "Java v1 client" as JVC
 participant "ChatWebSocketHandler" as JWH
 participant "AgentSession" as JAS
-actor "CampusClaw client" as CCC
-participant "Chat v2 connection" as CCW
+actor "mate-service" as CCC
+participant "Trusted gateway" as CCG
+participant "agent-service Pod A" as CCW
 participant "ManagedRunHub" as MRH
-participant "Session history" as CCH
+database "RuntimeSessionStore" as CCH
+participant "agent-service Pod B" as CCB
 
 == OpenClaw implemented ==
 OC -> OGB : sessions.messages.subscribe(sessionKey)
@@ -228,23 +244,42 @@ The wire format does not expose the fine-grained event.
 There is no active-run snapshot protocol.
 end note
 
-== CampusClaw v2 target only ==
+== CampusAgent v2 target only ==
 MRH --> CCW : message.updated {run_seq, typed delta}
 CCW --> CCC : current delta only
 CCC -x CCW : connection closes
 note over MRH
-The run continues without a WebSocket subscriber.
+The run continues inside Pod A without a subscriber.
 end note
-CCC -> CCW : reconnect and req connect
-CCW -> MRH : atomically subscribe and capture cursor
-MRH --> CCW : active_run snapshot at run_seq=N\nand history_seq=H
-CCW --> CCC : connect response with frozen model/thinking,\npartial message or null, open contents, and tools
-CCC -> CCH : chat.history(runId, through H)
-CCH --> CCC : prior messages and tool results
-MRH --> CCW : deltas after N
-CCW --> CCC : ordered message.updated events
-CCC -> CCH : chat.history if the run ended while offline
-CCH --> CCC : authoritative messages and RunRecord
+
+alt Same-Pod resume by user-IP affinity
+  CCC -> CCG : reconnect and req connect mode=resume
+  CCG -> CCW : route full path to Pod A
+  CCW -> MRH : increment generation, replace old subscription,\nand atomically capture cursor
+  MRH --> CCW : active_run snapshot at run_seq=N\nand history_seq=H
+  CCW --> CCC : connect response with generation, frozen config,\npartial message or null, open contents, and tools
+  CCC -> CCW : chat.history(runId, through H)
+  CCW -> CCH : read database history through H
+  CCH --> CCW : prior messages and tool results
+  CCW --> CCC : authoritative history
+  MRH --> CCW : deltas after N
+  CCW --> CCC : ordered message.updated events
+else Pod restart or routing to another Pod
+  CCC -> CCG : reconnect after Pod A is unavailable
+  CCG -> CCB : route to available Pod B
+  CCB -> CCH : rebuild Session and Agent
+  CCH --> CCB : persisted complete content blocks\nand active RunRecord
+  CCB -> CCH : persist Message.status=interrupted\nand RunRecord.outcome=interrupted
+  CCB --> CCC : connect response with active_run=null
+  CCC -> CCB : chat.history
+  CCB -> CCH : read authoritative history
+  CCH --> CCB : interrupted Message and RunRecord
+  CCB --> CCC : interrupted history
+end
+note over CCG,CCB
+No Redis, Session Header, cross-Pod forwarding,\nor distributed run owner exists in v1.
+Unclosed tail content is not guaranteed after restart.
+end note
 @enduml
 
 @startuml websocket_transport_dependency_inversion_comparison
@@ -262,7 +297,8 @@ title WebSocket Transport Dependency Inversion Comparison
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (SessionTransport)
 ' Observed behavior: OpenClaw SDK clients depend on OpenClawTransport, while server broadcast still operates on WebSocket clients.
 ' Current Java behavior: ChatWebSocketHandler directly owns session subscription and aborts the run on disconnect.
-' Target design: ChatWebSocketAdapter depends on SessionTransport and ManagedSessionTransport owns session semantics.
+' Target design: ChatWebSocketAdapter depends on SessionTransport and ManagedSessionTransport owns generation and session semantics.
+' Target design: RuntimeSessionStore is the database authority; Pool and Hub remain Pod-local.
 ' Design reason: protocol adapters must not own session or active-run lifetime.
 
 skinparam backgroundColor #FFFFFF
@@ -300,12 +336,13 @@ package "pi-mono-java v1 - current" as java_v1_pkg {
   java_handler --> java_agent : subscribe / prompt / abort
 }
 
-package "CampusClaw v2 server - target only" as cc_target_pkg {
+package "CampusAgent v2 server - target only" as cc_target_pkg {
   component "ChatWebSocketAdapter" as cc_adapter
   interface "SessionTransport\nconnect / request / events / close" as cc_transport
   component "ManagedSessionTransport" as cc_managed
   component "ManagedSessionPool" as cc_pool
   component "ManagedRunHub" as cc_hub
+  database "RuntimeSessionStore" as cc_store
   component "Future HTTP and SSE adapter" as cc_sse
 
   cc_adapter --> cc_transport
@@ -313,6 +350,7 @@ package "CampusClaw v2 server - target only" as cc_target_pkg {
   cc_managed ..|> cc_transport
   cc_managed --> cc_pool
   cc_managed --> cc_hub
+  cc_managed --> cc_store
 }
 
 note bottom of oc_client_pkg
@@ -326,6 +364,8 @@ end note
 
 note bottom of cc_target_pkg
   Adapter maps closed Frames and network backpressure.
-  Managed transport owns snapshot, cursor, and subscription state.
+  Managed transport owns generation, snapshot, and subscription.
+  One Pod has one active read/write connection per session.
+  Database history survives restart; active runs do not.
 end note
 @enduml

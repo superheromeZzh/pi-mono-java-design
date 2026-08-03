@@ -9,9 +9,12 @@
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/state/AgentState.java fields
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java constructor and invokeModel
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
-' Target-only architecture: AgentRuntimeTemplate, CacheEntry, TemplateLease, AgentRunContext, and stateless AgentRunner are not implemented in either baseline.
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/context/ContextFileLoader.java loadSystemPrompt reads .campusclaw/SYSTEM.md.
+' Observed behavior: current Java project context and Skill loading use .campusclaw.
+' Java divergence: the target Managed Template Loader reads .campusagent only; Legacy keeps .campusclaw without dual-read or migration behavior.
+' Target-only architecture: CampusAgent Runtime, AgentRuntimeTemplate, CacheEntry, TemplateLease, RuntimeSessionStore, SessionConnection, AgentRunContext, and stateless AgentRunner are not implemented in either baseline.
 ' Observed behavior: both baselines keep messages, queues, listeners, and active execution state in or around a stateful Agent.
-' Design reason: share immutable Agent definition data while keeping Session and Run state isolated.
+' Design reason: share immutable Agent definition data per agent-service Pod while keeping database Session state, connections, and Run state isolated.
 !theme plain
 left to right direction
 skinparam backgroundColor white
@@ -45,7 +48,7 @@ package "Shared immutable per revision" as SharedTemplate {
     +bundleRevision: String
   }
 
-  class LoadedTemplateKey <<JVM cache key>> {
+  class LoadedTemplateKey <<Pod JVM cache key>> {
     +ref: AgentRuntimeTemplateRef
     +runnerAbi: int
   }
@@ -80,7 +83,7 @@ package "Shared immutable per revision" as SharedTemplate {
   class TemplateCompatibility
 }
 
-package "Shared runtime per JVM" as SharedRuntime {
+package "Shared runtime per agent-service Pod" as SharedRuntime {
   interface AgentRuntimeTemplateRegistry {
     +acquireCurrent(agentId): TemplateLease
     +acquire(ref): TemplateLease
@@ -116,6 +119,7 @@ package "Mutable per session" as SessionScope {
     +sessionId: String
     +lifecycleState: SessionLifecycleState
     +generation: long
+    +connectionGeneration: long
     +selectedModelId: String
     +thinkingLevel: ThinkingLevel
     +messages: List<Message>
@@ -142,6 +146,15 @@ package "Mutable per session" as SessionScope {
   }
 }
 
+package "Mutable per connection" as ConnectionScope {
+  class SessionConnection {
+    +connectionId: String
+    +connectionGeneration: long
+    +state: ACTIVE | REPLACED | CLOSED
+    +sendBuffer: BoundedBuffer
+  }
+}
+
 package "Mutable per run" as RunScope {
   class AgentRun {
     +runId: String
@@ -160,6 +173,15 @@ package "Mutable per run" as RunScope {
   }
 }
 
+class RuntimeSessionStore <<database>> {
+  +Session
+  +Message
+  +RunRecord
+  +HistorySequence
+  +IdempotencyResult
+  +AttachmentClaim
+}
+
 AgentRuntimeTemplate *-- AgentRuntimeTemplateRef
 LoadedTemplateKey *-- AgentRuntimeTemplateRef
 AgentRuntimeTemplate *-- PromptPlan
@@ -176,6 +198,7 @@ AgentRuntimeTemplateRegistry ..> TemplateLease : issues atomically
 TemplateLease --> CacheEntry : pins ACTIVE entry
 AgentSession *-- TemplateLease : pins exact revision
 AgentSession "1" *-- "0..1" AgentRun : primary run
+AgentSession "1" o-- "0..1" SessionConnection : latest generation only
 AgentRun *-- AgentRunContext
 AgentSession *-- PerSessionAgent : phase 1 only
 AgentSession ..> SessionSnapshot : creates at run start
@@ -185,11 +208,13 @@ AgentRunner --> AgentRunContext : explicit Run input
 AgentRunner --> RuntimeToolExecutor
 AgentRunner --> ModelManagerClient
 RuntimeToolExecutor --> ToolManagerClient
+AgentSession --> RuntimeSessionStore : persists RunRecord and complete blocks
 
 note bottom of AgentRuntimeTemplate
   No session id, messages, selected model,
   credential, permission result, listener,
   queue, active run, cancellation, or trace.
+  Managed paths use .campusagent only.
 end note
 
 note bottom of PerSessionAgent
@@ -201,6 +226,18 @@ note bottom of AgentRunner
   The long-term Runner has no current
   Session or current Run instance field.
 end note
+
+note bottom of SessionConnection
+  A newer resume increments the per-Pod generation.
+  The previous connection closes with 4409 SESSION_REPLACED.
+  Disconnect does not own or abort an active Run.
+end note
+
+note bottom of RuntimeSessionStore
+  Database-backed logical persistence boundary.
+  No target Session JSONL is generated.
+  Only completed content blocks are recoverable.
+end note
 @enduml
 
 @startuml agent_runtime_template_publish_and_pin
@@ -211,9 +248,9 @@ end note
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize loads tools, skills, context, templates, and prompt.
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence.
 ' Observed behavior: current Java Session creation performs synchronous restore and resource initialization for every cold Session.
-' Java divergence: the target atomically opens current, loads each immutable bundle revision once, and pins each Session to an exact revision.
-' Target-only architecture: immutable revision directories, activation records, publish events, exact-key single-flight, Template leases, and transactional Session metadata are new.
-' Design reason: remove repeated cold initialization without sharing mutable Agent state or weakening dynamic Manager authorization.
+' Java divergence: each target agent-service Pod atomically opens current, loads each immutable bundle revision once, and pins each resident Session to an exact revision.
+' Target-only architecture: .campusagent revisions, activation records, RuntimeSessionStore, per-Pod connection generations, publish events, exact-key single-flight, and Template leases are new.
+' Design reason: remove repeated cold initialization while persisting authoritative Session state in a database and keeping active Run ownership inside one IP-affined Pod.
 !theme plain
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
@@ -228,14 +265,15 @@ skinparam sequenceGroupBackgroundColor #F8FAFC
 title Template Publish, Preload, and Session Pinning
 
 actor "Metadata publisher" as Publisher
-actor "Session caller" as SessionCaller
+actor "mate-service" as SessionCaller
+participant "Trusted gateway\nuser-IP affinity" as Gateway
 participant "Bundle compiler" as Compiler
 database "Immutable bundle repository" as BundleRepo
 queue "Publish event bus" as EventBus
-participant "Template registry" as Registry
+participant "Per-Pod template registry" as Registry
 participant "Periodic reconciler" as Reconciler
-participant "Managed session pool" as SessionPool
-database "Transactional session metadata store" as SessionStore
+participant "Per-Pod managed session pool" as SessionPool
+database "RuntimeSessionStore\ndatabase" as SessionStore
 participant "Managed session factory" as SessionFactory
 participant "Agent Runner or per-Session Agent" as Runner
 participant "Model Manager" as ModelManager
@@ -269,12 +307,13 @@ opt hot-set and weight policy admit prewarm
 end
 
 == New Session ==
-SessionCaller -> SessionPool: create(session id, agent id, model id, options)
+SessionCaller -> Gateway: open /agent-service/v1/ws/chat; create(session, agent, model)
+Gateway -> SessionPool: route by verified end-user IP
 SessionPool -> SessionPool: acquire admission and install intent fingerprint slot
 SessionPool -> SessionStore: strongly consistent lookup(session id)
-SessionStore --> SessionPool: ABSENT or persisted Session header
+SessionStore --> SessionPool: ABSENT or persisted Session record
 alt persisted EXISTING_CREATING with same fingerprint
-  SessionPool -> Registry: acquire header exact revision without current
+  SessionPool -> Registry: acquire record exact revision without current
   Registry --> SessionPool: saved TemplateLease
   SessionPool -> SessionStore: CAS claim CREATING(N) as owner N + 1
   SessionPool -> ModelManager: revalidate saved model
@@ -308,13 +347,19 @@ else ABSENT
     SessionPool -> SessionPool: process persisted winner without current
   end
 end
-SessionPool --> SessionCaller: same Session ready or stable conflict
+SessionPool --> Gateway: same Session ready or stable conflict
+Gateway --> SessionCaller: connect response
 
 == Resume after eviction or restart ==
-SessionCaller -> SessionPool: resume(session id, immutable binding)
+SessionCaller -> Gateway: open /agent-service/v1/ws/chat; resume(session id)
+Gateway -> SessionPool: route by verified end-user IP
 SessionPool -> SessionPool: acquire admission and install or join RESTORING slot
-SessionPool -> SessionStore: load READY header, generation, and messages
+SessionPool -> SessionStore: load READY record, generation, and completed blocks
 SessionStore --> SessionPool: agent id, exact revision, template ABI, model id, generation
+opt prior Pod left an active RunRecord
+  SessionPool -> SessionStore: mark RunRecord and Message interrupted
+  SessionStore --> SessionPool: RUN_INTERRUPTED terminal state committed
+end
 SessionPool -> Registry: acquire(saved agent id, exact revision)
 Registry --> SessionPool: TemplateLease or revision unavailable
 SessionPool -> ModelManager: revalidate saved model
@@ -327,6 +372,10 @@ group lifecycle slot owner section excludes delete
   SessionStore --> SessionPool: valid or conflict
   SessionPool -> SessionPool: check delete intent and publish READY_IDLE or clean up
 end
+SessionPool -> SessionPool: increment connection generation
+SessionPool --> Gateway: connect success before causal events
+Gateway --> SessionCaller: connect response
+SessionPool -> SessionPool: close prior generation with 4409 SESSION_REPLACED
 
 == Missed event repair ==
 Reconciler -> BundleRepo: inspect activation records and sequences
@@ -353,11 +402,18 @@ note over SessionPool,SessionStore
   A committed CREATING record pins its original revision.
   Retry requires the same fingerprint and a newer owner generation.
   Delete, eviction, and resume compete through one lifecycle slot.
+  Only completed content blocks are durable.
 end note
 
 note over SessionStore,ToolManager
   Resume never falls back to current.
   Dynamic authorization never comes from the Template.
+end note
+
+note over Gateway,SessionPool
+  v1 relies on trusted gateway user-IP affinity.
+  There is no Redis owner, routing header, cross-Pod forwarding,
+  or distributed active-Run lease. Pod restart cannot continue a Run.
 end note
 @enduml
 
@@ -365,8 +421,8 @@ end note
 ' Source baseline: pi-mono-java commit 1f7a5423219edfa4519d8719f1cc8a188ed72873
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution serializes one active execution per Agent.
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate currently uses check-then-create.
-' Target-only architecture: the cache, revision artifact, and Session lifecycle state machines are normative target behavior and are not implemented in the baseline.
-' Design reason: make acquire versus eviction, publish or open versus GC, and resume versus delete linearizable under concurrency.
+' Target-only architecture: the per-Pod cache, revision artifact, Session, connection-generation, and durable RunRecord state machines are normative target behavior and are not implemented in the baseline.
+' Design reason: make same-Pod acquire, eviction, Session mutation, and connection takeover linearizable while making Pod loss explicit as interrupted instead of pretending a cross-Pod Run continuation.
 !theme plain
 left to right direction
 skinparam backgroundColor white
@@ -376,7 +432,7 @@ skinparam ArrowColor #3D8DFF
 skinparam stateBorderColor #B8BCC4
 skinparam stateBackgroundColor #F7F8FA
 
-title Template Cache, Revision Artifact, and Session Lifecycles
+title Per-Pod Template, Session, Connection, and Durable Run Lifecycles
 
 state "Template CacheEntry" as TemplateCache {
   [*] --> TC_LOADING : install Future and loader admission
@@ -431,6 +487,34 @@ state "Session" as SessionLife {
   SS_DELETED --> [*]
 }
 
+state "Per-Pod Session Connection" as ConnectionLife {
+  [*] --> SC_ACTIVE : connect or resume; generation++
+  state "ACTIVE" as SC_ACTIVE
+  state "REPLACED" as SC_REPLACED
+  state "CLOSED" as SC_CLOSED
+  SC_ACTIVE --> SC_REPLACED : newer generation takes write ownership\nclose 4409 SESSION_REPLACED
+  SC_ACTIVE --> SC_CLOSED : ordinary disconnect\nunsubscribe without Run abort
+  SC_REPLACED --> [*]
+  SC_CLOSED --> [*]
+}
+
+state "Durable RunRecord" as RunRecordLife {
+  [*] --> RR_ACTIVE : run accepted
+  state "ACTIVE" as RR_ACTIVE
+  state "DONE" as RR_DONE
+  state "ABORTED" as RR_ABORTED
+  state "ERROR" as RR_ERROR
+  state "INTERRUPTED" as RR_INTERRUPTED
+  RR_ACTIVE --> RR_DONE : terminal complete-block commit
+  RR_ACTIVE --> RR_ABORTED : explicit abort and durable terminal
+  RR_ACTIVE --> RR_ERROR : durable execution error
+  RR_ACTIVE --> RR_INTERRUPTED : recovery observes prior Pod loss\nRUN_INTERRUPTED
+  RR_DONE --> [*]
+  RR_ABORTED --> [*]
+  RR_ERROR --> [*]
+  RR_INTERRUPTED --> [*]
+}
+
 note bottom of TemplateCache
   ACTIVE lease acquisition and eviction use one atomic protocol.
   A Session TemplateLease pins an ACTIVE entry.
@@ -445,9 +529,21 @@ note bottom of ArtifactLife
 end note
 
 note bottom of SessionLife
-  Run, mailbox work, and Store flush pin the Session.
+  Run, mailbox work, and RuntimeSessionStore flush pin the Session.
   Delete persists DELETING before irreversible cleanup.
   Resume and delete share one lifecycle slot.
   Concurrent cleanup callers join one owner Future.
+  The lifecycle slot is local to one agent-service Pod.
+end note
+
+note bottom of ConnectionLife
+  One active read-write connection exists per Session per Pod.
+  Connection generation is not a cross-Pod ownership token.
+end note
+
+note bottom of RunRecordLife
+  RuntimeSessionStore is database-backed.
+  Only text_end, thinking_end, toolcall_end, or equivalent
+  completed block boundaries are recoverable after Pod loss.
 end note
 @enduml

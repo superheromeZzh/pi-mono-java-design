@@ -1,75 +1,82 @@
 asyncapi: 3.1.0
-id: urn:campusclaw:chat-websocket:v2
+id: urn:campusagent:chat-websocket:v2
 x-locale: zh-CN
 info:
-  title: CampusClaw 会话 WebSocket API
-  version: 2.5.0
+  title: CampusAgent 会话 WebSocket API
+  version: 2.6.0
   description: |
-    调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
+    调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
+    安全 WebSocket。
     客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换
     协议；服务端返回 101 后，WebSocket 才正式建立。
 
     调用方必须在 101 后五秒内发送首个 `connect` RequestFrame。服务端根据
-    `mode` 创建或恢复 `session_id` 对应的 Runtime Session，并校验
+    `mode` 创建或恢复 `session_id` 对应的 CampusAgent Runtime Session，并校验
     `agent_id`、`model_id` 和可选 capabilities；成功后，这条连接在整个生命周期
     内固定绑定到对应的 `(agent_id, session_id)`。
 
-    连接随后承载 RequestFrame、ResponseFrame 和 EventFrame。active run 由
-    ManagedSessionPool 持有，因此连接断开只取消事件订阅，不终止正在进行的
-    模型调用或工具执行。
+    连接随后承载 RequestFrame、ResponseFrame 和 EventFrame。同一 Pod 内的
+    active run 由 ManagedSessionPool 持有，因此普通断线只取消连接订阅，
+    不终止模型调用或工具执行。同一 Pod 内每个 Session 只允许一个
+    活动读写连接；新的 `resume` 原子递增 connection generation 并接管
+    Session，旧连接使用私有关闭码 `4409 SESSION_REPLACED` 结束。
 
     上层会话服务负责创建和管理 `session_id`，以及用户会话列表、数量限制和
-    业务删除。CampusClaw 将 `session_id` 作为不透明的 Runtime Session 标识，
+    业务删除。CampusAgent 将 `session_id` 作为不透明的 Runtime Session 标识，
     不接收或维护 tenant_id、user_id。调用方提供的 `session_id` 必须在一个
-    Runtime 部署范围内全局唯一，删除后不得复用。
+    CampusAgent Runtime 部署范围内全局唯一，删除后不得复用。
 
-    文件内容由上层 Attachment Service 通过 HTTP 或 Object Storage 接收、
+    文件内容由 `mate-service` 承载的 Attachment Service 通过 HTTP 或
+    Object Storage 接收、
     扫描并绑定到 `session_id`；WebSocket `chat.send` 只传
     `attachment_ids`。附件引用是协议 2 的标准可选字段，不是 capability。
-    Runtime 只使用调用服务身份和已绑定 Session 解析不可变附件版本，不接受
+    CampusAgent Runtime 只使用调用服务身份和已绑定 Session 解析不可变附件
+    版本，不接受
     客户端 URL、MIME、文件名、Base64 或 tenant/user 字段。
 
-    协议版本 2 固定使用 request/response/event Frame 和结构化消息增量，
-    不通过 capability 协商其他累计 Message 格式，并直接替换 `/api/ws/chat`
-    的 v1 格式。调用方不得通过业务查询参数或 URL token 传递身份及 Session
+    URL 中的 `/v1` 是 `agent-service` 对外服务 API 版本；首帧协商的
+    `protocol: 2` 是 WebSocket Frame 协议版本，二者独立演进。协议 2 固定
+    使用 request/response/event Frame 和结构化消息增量，不通过 capability
+    协商累计 Message 格式。它是 CampusAgent 的目标协议；当前
+    pi-mono-java v1 使用 `/api/ws/chat`。调用方不得通过业务查询参数
+    或 URL token 传递身份及 Session
     信息，也不能在已绑定的连接内创建另一个 Session。
 
     实现调用方、请求关联、消息归并、断线恢复和错误处理时，先阅读同目录的
     `chat-ws-v2-client-integration.md`；字段和取值仍以本文件为规范来源。
 
-    `https://api.example.com/api/ws/chat` 只是同一 host、port 和 path 的 HTTP
-    握手视角，不是 RESTful API，也不表示第二条连接。
+    `https://api.example.com/agent-service/v1/ws/chat` 只是同一 host、port 和
+    path 的 HTTP 握手视角，不是 RESTful API，也不表示第二条连接。
   contact:
-    name: CampusClaw
-    url: https://github.com/superheromeZzh/pi-mono-java
+    name: CampusAgent
   license:
     name: MIT
 defaultContentType: application/json
 servers:
   production:
     host: api.example.com
-    pathname: /api/ws/chat
+    pathname: /agent-service
     protocol: wss
     description: |
-      调用服务按部署配置使用 Bearer 或 mTLS 建立服务身份。使用 Bearer 时，
-      客户端库在 HTTP opening handshake 中发送 Authorization；使用 mTLS 时，
-      客户端在此前的 TLS 握手中出示证书。服务端在返回 101 前完成认证，并
-      拒绝业务查询参数、URL token 或缺少合法 Upgrade headers 的普通 HTTP
-      请求。浏览器终端应连接上层会话服务，不直接连接本 Runtime。
-    security:
-      - $ref: '#/components/securitySchemes/bearerAuth'
-      - $ref: '#/components/securitySchemes/mutualTLS'
+      本通道只供 `mate-service`、其他获授权服务端调用方和服务端 SDK
+      连接。调用方按现有内部网关认证能力在 HTTP opening handshake 中
+      建立服务身份；本公开规范不复制私有 Header、claim 或密钥格式。
+      私钥原文不得在 HTTP 或 WebSocket 中传输。
+      服务端在返回 101 前完成认证，并拒绝业务查询参数、URL token 或
+      缺少合法 Upgrade headers 的普通 HTTP 请求。浏览器到
+      `mate-service` 的协议另行定义，不直接连接 CampusAgent Runtime。
   local:
     host: localhost:3000
-    pathname: /api/ws/chat
+    pathname: /agent-service
     protocol: ws
     description: |
-      开发客户端使用 `ws://localhost:3000/api/ws/chat` 建立连接。服务端只有在
-      显式启用开发配置时才允许跳过认证；HTTP opening handshake、首帧
-      `connect` 和后续 Frame 协议保持不变。
+      开发客户端使用 `ws://localhost:3000/agent-service/v1/ws/chat` 建立连接。
+      开发部署也必须按该环境现有内部网关和服务认证配置完成身份校验；
+      只有 URL 使用 `ws`，HTTP opening handshake、首帧 `connect` 和后续 Frame
+      协议边界不变。
 channels:
   sessionChat:
-    address: /api/ws/chat
+    address: /v1/ws/chat
     title: 会话范围的对话通道
     description: |
       调用方完成 HTTP opening handshake 并收到 101 后，才可以在这条连接上
@@ -89,36 +96,18 @@ operations:
     action: receive
     channel:
       $ref: '#/channels/sessionChat'
-    summary: CampusClaw 服务端先接收 connect RequestFrame；绑定成功后接收当前 Session 的命令请求。
+    summary: CampusAgent 服务端先接收 connect RequestFrame；绑定成功后接收当前 Session 的命令请求。
     messages:
       - $ref: '#/channels/sessionChat/messages/ClientRequestFrame'
   sendResponseOrEvent:
     action: send
     channel:
       $ref: '#/channels/sessionChat'
-    summary: CampusClaw 服务端为命令发送同 id 的 ResponseFrame，并按 seq 发送当前 Session 的有序事件。
+    summary: CampusAgent 服务端为命令发送同 id 的 ResponseFrame，并按 seq 发送当前 Session 的有序事件。
     messages:
       - $ref: '#/channels/sessionChat/messages/ServerResponseFrame'
       - $ref: '#/channels/sessionChat/messages/ServerEventFrame'
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: |
-        调用服务选择 Bearer 认证时，在 HTTP opening handshake 的
-        Authorization 请求头中发送 Token。服务端在返回 101 前校验 Runtime
-        audience 和所需 service scope；校验失败时拒绝 Upgrade。认证信息只
-        用于建立连接认证上下文，不得复制到 Prompt、JSONL、协议事件或应用
-        日志。Runtime 不从 Token 中建立或维护业务 tenant_id、user_id。
-    mutualTLS:
-      type: X509
-      description: |
-        部署启用 mTLS 时，调用服务在 TLS 握手阶段出示客户端证书；服务端验证
-        证书后才处理 HTTP WebSocket opening handshake。mTLS 可以单独使用，
-        也可以加强 Bearer 认证。证书身份只用于服务认证和审计，不参与
-        Session key。
   messages:
     ClientRequestFrame:
       name: ClientRequestFrame
@@ -142,7 +131,7 @@ components:
               agent_id: agent-a
               model_id: model-a
               client:
-                id: campusclaw-session-service
+                id: mate-service
                 version: 1.0.0
                 platform: service
         - name: 恢复会话
@@ -157,12 +146,21 @@ components:
               agent_id: agent-a
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               client:
-                id: campusclaw-sdk
+                id: campusagent-sdk
                 version: 1.0.0
                 platform: sdk
               capabilities:
                 - full_thinking
-        - name: 发送用户消息
+        - name: 发送纯文本用户消息
+          payload:
+            type: req
+            id: send-text-1
+            method: chat.send
+            params:
+              message: 查询订单 20260730001
+              idempotency_key: b27da7cc-98e8-42c9-bc4c-1a0fc694956e
+              thinking: hidden
+        - name: 发送文本和附件用户消息
           payload:
             type: req
             id: send-1
@@ -174,6 +172,15 @@ components:
                 - attachment-01
               idempotency_key: 6f46bc26-8a14-4d63-b7b1-8f1f933a0d50
               thinking: hidden
+        - name: 仅使用附件发送用户消息
+          payload:
+            type: req
+            id: send-attachment-1
+            method: chat.send
+            params:
+              attachment_ids:
+                - attachment-01
+              idempotency_key: b38b138f-e992-4ed5-b74f-0155ba0acd10
     ServerResponseFrame:
       name: ServerResponseFrame
       title: 关联命令响应
@@ -191,6 +198,7 @@ components:
             payload:
               protocol: 2
               connection_id: conn-01
+              connection_generation: 3
               agent_id: agent-a
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               model:
@@ -229,8 +237,6 @@ components:
                   - models.list
                   - model.set
                   - thinking.set
-                  - prompt_templates.list
-                  - skills.list
                 events:
                   - run.started
                   - message.started
@@ -313,6 +319,52 @@ components:
                     run_id: run-01
                     outcome: done
                     completed_at: '2026-07-30T08:00:03Z'
+                - type: message
+                  history_seq: 23
+                  run_id: run-02
+                  message:
+                    message_id: message-user-02
+                    role: user
+                    status: completed
+                    content:
+                      - type: attachment
+                        attachment_id: attachment-02
+                        content_version: version-02
+                        filename: image.png
+                        media_type: image/png
+                        size_bytes: 48372
+                        sha256: 4c1bcf6f2f7bfaca3ec682e417612c7d8ac3f6412cbb9fece749e3f0062e4f31
+                    created_at: '2026-07-30T08:00:04Z'
+                    completed_at: '2026-07-30T08:00:04Z'
+              has_more: false
+        - name: Pod 重启后读取 interrupted 终态
+          payload:
+            type: res
+            id: history-interrupted-1
+            ok: true
+            payload:
+              items:
+                - type: message
+                  history_seq: 30
+                  run_id: run-interrupted-01
+                  message:
+                    message_id: message-interrupted-01
+                    role: assistant
+                    status: interrupted
+                    content:
+                      - type: text
+                        text: 已完成并持久化的内容块
+                    created_at: '2026-07-30T08:10:00Z'
+                    completed_at: '2026-07-30T08:10:03Z'
+                - type: run
+                  history_seq: 31
+                  run:
+                    run_id: run-interrupted-01
+                    outcome: interrupted
+                    completed_at: '2026-07-30T08:10:03Z'
+                    error:
+                      code: RUN_INTERRUPTED
+                      message: CampusAgent Runtime 重启后无法继续原 active run。
               has_more: false
         - name: active run 冲突
           payload:
@@ -459,6 +511,42 @@ components:
                 input_tokens: 230
                 output_tokens: 48
                 total_tokens: 278
+        - name: Tool 开始事件携带完整脱敏 parameters
+          payload:
+            type: event
+            event: tool.started
+            seq: 100
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-tool-01
+              run_seq: 3
+              timestamp: '2026-07-30T08:20:00Z'
+              tool_call_id: tool-call-01
+              tool_id: order-query
+              parameters:
+                truncated: false
+                value:
+                  order_id: '20260730001'
+        - name: Tool 完成事件携带截断结果引用
+          payload:
+            type: event
+            event: tool.completed
+            seq: 101
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-tool-01
+              run_seq: 4
+              timestamp: '2026-07-30T08:20:01Z'
+              tool_call_id: tool-call-01
+              tool_id: order-query
+              status: done
+              result:
+                truncated: true
+                preview: '{"orders":[...]}'
+                original_size_bytes: 2097152
+                result_ref: tool-result-opaque-01
   schemas:
     Identifier:
       type: string
@@ -477,7 +565,8 @@ components:
         - $ref: '#/components/schemas/Identifier'
       description: |
         调用方在 connect 中提供上层会话服务生成的 session_id。服务端用它创建
-        或恢复 Runtime Session。该值必须在 Runtime 部署范围内全局唯一，删除
+        或恢复 CampusAgent Runtime Session。该值必须在 CampusAgent Runtime
+        部署范围内全局唯一，删除
         后不得复用；推荐使用 UUIDv7 或 ULID，不接受仅在某个 tenant 或 user
         内唯一的短 ID。
     AgentId:
@@ -485,7 +574,7 @@ components:
         - $ref: '#/components/schemas/Identifier'
       description: |
         调用方在 connect 中提供 agent_id。服务端通过 Agent Manager 校验，并在
-        创建 Runtime Session 时固定绑定；恢复时，不一致的值导致请求失败。
+        创建 CampusAgent Runtime Session 时固定绑定；恢复时，不一致的值导致请求失败。
     ModelId:
       allOf:
         - $ref: '#/components/schemas/Identifier'
@@ -508,14 +597,16 @@ components:
       allOf:
         - $ref: '#/components/schemas/Identifier'
       description: |
-        模型或 Runtime 为一个 run 内的工具调用提供 tool_call_id。服务端用它
+        模型或 CampusAgent Runtime 为一个 run 内的工具调用提供 tool_call_id。
+        服务端用它
         关联 toolcall 内容和 Tool Manager 事件；它不参与 Session 路由。
     AttachmentId:
       allOf:
         - $ref: '#/components/schemas/Identifier'
       description: |
-        上层 Attachment Service 生成的不透明资源 ID。它不是 Bearer capability，
-        也不扩展 Runtime Session 路由；每次首次接受的新 chat.send 都必须结合
+        上层 Attachment Service 生成的不透明资源 ID。它不是授权凭据，
+        也不扩展 CampusAgent Runtime Session 路由；每次首次接受的新 chat.send
+        都必须结合
         不可变调用服务身份和当前 session_id 解析。已接受幂等重试直接读取冻结
         结果，不重新解析。调用方不能用 URL、路径或对象存储 key
         替代该值。READY 后 ID 不得重新指向其他内容，删除后不得复用；接受时
@@ -553,7 +644,7 @@ components:
         调用方可以在 RequestFrame 中提供 W3C traceparent。服务端收到请求后先
         执行 Schema 预检，再使用标准解析器校验完整规则；非法值返回
         INVALID_REQUEST。合法值只传播到遥测、Model Manager、Tool Manager 和
-        Attachment Service 调用，不写入 Prompt、JSONL 或业务事件。
+        Attachment Service 调用，不写入 Prompt、RuntimeSessionStore 或业务事件。
     IdempotencyKey:
       type: string
       minLength: 8
@@ -580,6 +671,10 @@ components:
     ClientInfo:
       type: object
       additionalProperties: false
+      description: |
+        只用于可观测和协议兼容判断，不构成授权。本通道的调用方必须是
+        mate-service、其他获授权服务端调用方或服务端 SDK；浏览器不得
+        通过修改本字段直连 agent-service。
       required:
         - id
         - version
@@ -596,10 +691,8 @@ components:
         platform:
           type: string
           enum:
-            - cli
             - sdk
             - service
-            - other
     ClientCapabilities:
       type: array
       uniqueItems: true
@@ -622,8 +715,9 @@ components:
         - create
         - resume
       description: |
-        调用方使用 create 请求幂等建立上层已经分配 session_id 的 Runtime
-        Session；使用 resume 只能恢复已有 Session，目标不存在时服务端返回
+        调用方使用 create 请求幂等建立上层已经分配 session_id 的
+        CampusAgent Runtime Session；使用 resume 只能恢复已有 Session，目标不存在时
+        服务端返回
         SESSION_NOT_FOUND。
     ConnectParams:
       type: object
@@ -634,7 +728,9 @@ components:
         model_id；服务端
         对相同 Session、Agent 和 Model 的重试保持幂等。使用 resume 时服务端
         不创建缺失或已删除的 Session；只有不存在 active run 时，显式不同的
-        model_id 才表示切换。min_protocol 必须小于或等于 max_protocol；服务端
+        model_id 才表示切换。同一 Pod 内已有活动连接时，新的
+        resume 仍可以成功：服务端原子递增 connection generation、将读写权
+        接管给新连接，再关闭旧连接。min_protocol 必须小于或等于 max_protocol；服务端
         选择双方共同支持的最高版本，本制品只支持 2。没有交集时返回
         UNSUPPORTED_PROTOCOL。create 请求的响应丢失时，调用方必须在新连接上
         使用完全相同的 session_id + agent_id + model_id 重试 mode=create；不得直接
@@ -703,22 +799,27 @@ components:
       additionalProperties: false
       description: |
         幂等负载由 message、attachment_ids 的顺序和值以及 thinking 是否省略和
-        具体值共同决定；RequestFrame.id 和 traceparent 不参与。相同 key 携带
+        具体值共同决定；message 省略与空字符串规范化为同一值，
+        attachment_ids 省略与空数组也规范化为同一值。RequestFrame.id 和
+        traceparent 不参与。相同 key 携带
         不同幂等负载返回 INVALID_REQUEST。服务端先返回已经接受的同 key 结果，
         再处理 RUN_ACTIVE 或重新解析附件；首次请求只有在全部附件原子解析为
         不可变版本、取得 Session 保留引用和当前 run 受控读取句柄，并验证
         “有效历史附件 + 本次新附件”的完整 AttachmentContextPlan 符合模型输入
         策略、持久化用户消息后，才可以提交 accepted=true。
+        message 可以省略或为空字符串，但此时 attachment_ids 必须非空；
+        服务端不得为仅附件消息合成隐藏的默认 Prompt。message 非空且
+        附件非空时，持久化的用户 Message 必须先保存文本，再按请求顺序
+        保存附件快照。
       required:
-        - message
         - idempotency_key
       properties:
         message:
           type: string
-          minLength: 1
           maxLength: 262144
           description: |
-            用户文本。字符上限不是线上的最终大小判断；调用方还必须确保完整
+            可选用户文本。省略或空字符串仅在 attachment_ids 非空时合法。
+            字符上限不是线上的最终大小判断；调用方还必须确保完整
             JSON Text Message 的 UTF-8 字节数不超过 connect 返回的
             max_message_bytes。
         attachment_ids:
@@ -731,6 +832,8 @@ components:
             省略或为空表示没有附件。协议 2 对附件引用不要求 capability；32 是
             线协议硬上限，当前 ModelSummary.input 可能给出更低的有效数量和
             字节限制。调用方不得同时提交 URL、MIME、文件名或 Base64。
+            服务端必须保留数组顺序，并按同一顺序写入用户 Message 的
+            AttachmentContent。
           items:
             $ref: '#/components/schemas/AttachmentId'
         idempotency_key:
@@ -740,6 +843,17 @@ components:
           description: |
             省略时使用当前连接看到的 Session 默认级别。显式值只能低于或等于
             该默认级别；请求更高值返回 FORBIDDEN，不执行静默降级。
+      anyOf:
+        - required:
+            - message
+          properties:
+            message:
+              minLength: 1
+        - required:
+            - attachment_ids
+          properties:
+            attachment_ids:
+              minItems: 1
     ChatSendRequest:
       type: object
       additionalProperties: false
@@ -762,6 +876,9 @@ components:
     ChatSteerParams:
       type: object
       additionalProperties: false
+      description: |
+        v1 服务 API 的 steering 只接受非空文本，不接受 attachment_ids。
+        需要增加附件时，调用方必须等当前 run 结束后发起新的 chat.send。
       required:
         - run_id
         - message
@@ -828,19 +945,6 @@ components:
           const: chat.abort
         params:
           $ref: '#/components/schemas/ChatAbortParams'
-    CursorPageParams:
-      type: object
-      additionalProperties: false
-      properties:
-        cursor:
-          type: string
-          minLength: 1
-          maxLength: 1024
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 200
-          default: 50
     ChatHistoryFirstPageParams:
       type: object
       additionalProperties: false
@@ -998,40 +1102,6 @@ components:
           const: thinking.set
         params:
           $ref: '#/components/schemas/ThinkingSetParams'
-    PromptTemplatesListRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - type
-        - id
-        - method
-      properties:
-        type:
-          const: req
-        id:
-          $ref: '#/components/schemas/RequestId'
-        traceparent:
-          $ref: '#/components/schemas/TraceParent'
-        method:
-          const: prompt_templates.list
-        params:
-          $ref: '#/components/schemas/CursorPageParams'
-    SkillsListRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - type
-        - id
-        - method
-      properties:
-        type:
-          const: req
-        id:
-          $ref: '#/components/schemas/RequestId'
-        traceparent:
-          $ref: '#/components/schemas/TraceParent'
-        method:
-          const: skills.list
     AnyRequestFrame:
       oneOf:
         - $ref: '#/components/schemas/ConnectRequest'
@@ -1043,14 +1113,12 @@ components:
         - $ref: '#/components/schemas/ModelsListRequest'
         - $ref: '#/components/schemas/ModelSetRequest'
         - $ref: '#/components/schemas/ThinkingSetRequest'
-        - $ref: '#/components/schemas/PromptTemplatesListRequest'
-        - $ref: '#/components/schemas/SkillsListRequest'
     ModelInputPolicy:
       type: object
       additionalProperties: false
       description: |
         Model Manager 返回的当前 Agent 与 Model 的有效输入策略。调用方用它在
-        上传和 chat.send 前完成 UI 预检；Runtime 仍以 Attachment Service
+        上传和 chat.send 前完成 UI 预检；CampusAgent Runtime 仍以 Attachment Service
         返回的可信大小和 MIME 重新校验。数量和字节限制作用于下一次模型调用
         的完整 AttachmentContextPlan，包括当前有效 transcript 中仍保留的历史
         附件与本次新附件，而不只是 attachment_ids。max_attachments=0 表示该模型只接受
@@ -1074,7 +1142,10 @@ components:
               - text
               - image
               - document
-          description: 当前有效 Model 能消费的规范化输入模态；chat.send 始终包含 text。
+          description: |
+            当前有效 Model 能消费的规范化输入模态。CampusAgent 的对话模型必须
+            支持 text，但单次 chat.send 可以只包含附件；CampusAgent Runtime
+            不为此类请求合成隐藏文本。
         attachment_media_types:
           type: array
           maxItems: 128
@@ -1218,6 +1289,9 @@ components:
         请求重新执行状态和权限校验。chat.history 是快照恢复的必备方法，
         每个成功 connect 的列表都必须包含；调用服务无权读取投影历史时，
         服务端必须拒绝 connect，不得返回无法恢复的连接。
+        协议 2 不提供 prompt_templates.list 或 skills.list。`/skill:name`
+        作为 chat.send.message 的普通文本由 AgentSession 展开；Skill 和模板的
+        展示信息由 mate-service 或元数据 REST API 提供。
       items:
         type: string
         enum:
@@ -1229,8 +1303,6 @@ components:
           - models.list
           - model.set
           - thinking.set
-          - prompt_templates.list
-          - skills.list
     NegotiatedEvents:
       type: array
       minItems: 8
@@ -1288,6 +1360,7 @@ components:
           const: text
         text:
           type: string
+          minLength: 1
     ThinkingContent:
       type: object
       additionalProperties: false
@@ -1299,6 +1372,7 @@ components:
           const: thinking
         text:
           type: string
+          minLength: 1
         disclosure:
           type: string
           enum:
@@ -1319,9 +1393,7 @@ components:
         - if:
             properties:
               disclosure:
-                enum:
-                  - summary
-                  - full
+                const: full
             required:
               - disclosure
           then:
@@ -1329,8 +1401,83 @@ components:
               - text
       description: |
         Thinking 内容块始终占用原 content_index，因此 hidden 投影也保留
-        一个不含 text 的占位块，后续可见块的索引不会前移。disclosure=full
-        只允许出现在有效 capability 包含 full_thinking 的连接投影中。
+        一个不含 text 的占位块，后续可见块的索引不会前移。disclosure=summary
+        时 text 可选：只有 Model Manager 明确提供非空安全摘要时才携带；没有
+        安全摘要时省略 text，不从原始 thinking 合成文字或伪造占位文案。
+        disclosure=full 只允许出现在有效 capability 包含 full_thinking 的连接投影中。
+    ToolResultRef:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: |
+        agent-service 为已持久的完整脱敏工具值生成的不透明引用。
+        调用方不得解析或将它当作 URL、存储 key 或授权凭据；服务 API v1
+        不提供通过 result_ref 读取完整值的公开接口。
+    CompleteToolValueProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - truncated
+        - value
+      properties:
+        truncated:
+          const: false
+        value: {}
+      description: |
+        脱敏后的完整业务 parameters 或 result。服务端必须先移除凭据、
+        内部 Header、执行器秘密和不允许披露的字段，再计算规范化 JSON
+        UTF-8 字节数。value 最多 524288 字节，且只有完整 Frame 不超过
+        协商上限时才使用此形态。
+      x-maxValueSerializedBytes: 524288
+    TruncatedToolValueProjection:
+      type: object
+      additionalProperties: false
+      required:
+        - truncated
+        - preview
+        - original_size_bytes
+        - result_ref
+      properties:
+        truncated:
+          const: true
+        preview:
+          type: string
+          maxLength: 65536
+          description: 对完整脱敏值生成的有界文本预览；不保证本身是可解析 JSON。
+          x-maxUtf8Bytes: 65536
+        original_size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+          description: 完整脱敏值的规范化 JSON UTF-8 字节数。
+        result_ref:
+          $ref: '#/components/schemas/ToolResultRef'
+      description: |
+        完整脱敏值会导致 Frame 超限时的有界投影。agent-service 先将
+        完整脱敏值保存到 RuntimeSessionStore，再在 WebSocket 事件和历史中
+        返回本对象。
+    ToolValueProjection:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteToolValueProjection'
+        - $ref: '#/components/schemas/TruncatedToolValueProjection'
+      description: |
+        工具业务值的唯一对外投影。`truncated=false` 时 value 是完整脱敏值；
+        `truncated=true` 时只返回预览和不透明引用。两种形态都不得包含凭据、
+        内部 Header 或执行器秘密。
+    CompleteToolParametersProjection:
+      allOf:
+        - $ref: '#/components/schemas/CompleteToolValueProjection'
+        - type: object
+          properties:
+            value:
+              type: object
+              additionalProperties: true
+      description: 完整脱敏 parameters；value 必须是 JSON object。
+    ToolParametersProjection:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteToolParametersProjection'
+        - $ref: '#/components/schemas/TruncatedToolValueProjection'
+      description: 工具 parameters 的完整脱敏投影或超限引用投影。
     ToolCallContent:
       type: object
       additionalProperties: false
@@ -1351,8 +1498,7 @@ components:
           minLength: 1
           maxLength: 256
         arguments:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/ToolParametersProjection'
     ToolResultContent:
       type: object
       additionalProperties: false
@@ -1371,7 +1517,8 @@ components:
             - done
             - error
             - aborted
-        result: {}
+        result:
+          $ref: '#/components/schemas/ToolValueProjection'
         error:
           $ref: '#/components/schemas/Error'
       allOf:
@@ -1416,10 +1563,12 @@ components:
       type: object
       additionalProperties: false
       description: |
-        已接受用户消息中的稳定附件快照，用于 JSONL、chat.history 和 UI 恢复。
+        已接受用户消息中的稳定附件快照，用于 RuntimeSessionStore、
+        chat.history 和 UI 恢复。
         字段来自 Attachment Service 的可信描述，不来自 chat.send。它只允许
-        出现在 role=user 的持久化 Message；不包含 URL、读取句柄、Bearer、
-        对象存储 key 或 Base64。filename 仅用于转义后的 UI 显示，不能解释为路径。
+        出现在 role=user 的持久化 Message；不包含 URL、读取句柄、认证凭据、
+        对象存储 key、Base64 或任何运行时凭据。filename 仅用于转义后的 UI
+        显示，不能解释为路径。
       required:
         - type
         - attachment_id
@@ -1453,9 +1602,12 @@ components:
       type: object
       additionalProperties: false
       description: |
-        Runtime 对客户端和历史返回的权威 Message。AttachmentContent 只允许出现
+        CampusAgent Runtime 对客户端和历史返回的权威 Message。AttachmentContent
+        只允许出现
         在 role=user 的 content 中，并表示 chat.send 接受时冻结的不可变版本；
-        assistant/tool Message 不得生成附件引用。
+        assistant/tool Message 不得生成附件引用。status=interrupted 只用于
+        CampusAgent Runtime 重启对账；content 只包含已到达 text_end、thinking_end、
+        toolcall_end 或工具终态边界且已持久化的完整块。
       required:
         - message_id
         - role
@@ -1478,6 +1630,7 @@ components:
             - completed
             - aborted
             - error
+            - interrupted
         content:
           type: array
           items:
@@ -1500,14 +1653,31 @@ components:
               - role
           then:
             properties:
+              status:
+                const: completed
               content:
-                type: array
-                minItems: 1
-                maxItems: 33
-                items:
-                  - $ref: '#/components/schemas/TextContent'
-                additionalItems:
-                  $ref: '#/components/schemas/AttachmentContent'
+                oneOf:
+                  - type: array
+                    minItems: 1
+                    maxItems: 1
+                    items:
+                      - $ref: '#/components/schemas/TextContent'
+                    additionalItems: false
+                    description: 仅文本。
+                  - type: array
+                    minItems: 1
+                    maxItems: 32
+                    items:
+                      $ref: '#/components/schemas/AttachmentContent'
+                    description: 仅附件；服务端不插入隐藏默认文本。
+                  - type: array
+                    minItems: 2
+                    maxItems: 33
+                    items:
+                      - $ref: '#/components/schemas/TextContent'
+                    additionalItems:
+                      $ref: '#/components/schemas/AttachmentContent'
+                    description: 文本固定在第一项，附件保持 chat.send 的顺序。
         - if:
             properties:
               role:
@@ -1526,6 +1696,8 @@ components:
       allOf:
         - $ref: '#/components/schemas/ProjectedMessage'
         - type: object
+          required:
+            - completed_at
           properties:
             status:
               type: string
@@ -1533,7 +1705,11 @@ components:
                 - completed
                 - aborted
                 - error
-      description: message.completed 和 chat.history 使用的终态 Message；status 不得为 streaming。
+                - interrupted
+      description: |
+        message.completed 和 chat.history 使用的终态 Message；status 不得为
+        streaming。interrupted Message 的 completed_at 是 CampusAgent Runtime 将旧
+        running 记录对账为中断终态的时间。
     StreamingProjectedMessage:
       allOf:
         - $ref: '#/components/schemas/ProjectedMessage'
@@ -1585,6 +1761,7 @@ components:
           maxLength: 256
         arguments_delta:
           type: string
+          maxLength: 262144
           description: 已累计但可能仍不是合法 JSON 的参数文本；最终以 toolcall_end.arguments 为准。
     OpenContentState:
       oneOf:
@@ -1598,6 +1775,7 @@ components:
         - tool_call_id
         - tool_id
         - status
+        - parameters
       properties:
         tool_call_id:
           $ref: '#/components/schemas/ToolCallId'
@@ -1605,14 +1783,15 @@ components:
           $ref: '#/components/schemas/Identifier'
         name:
           type: string
+          maxLength: 256
         status:
           type: string
           enum:
             - starting
             - running
-        input:
-          type: object
-          additionalProperties: true
+        parameters:
+          $ref: '#/components/schemas/ToolParametersProjection'
+          description: 开始执行前已经完成脱敏和大小投影的业务 parameters。
     ActiveRunSnapshot:
       type: object
       additionalProperties: false
@@ -1685,6 +1864,7 @@ components:
       required:
         - protocol
         - connection_id
+        - connection_generation
         - agent_id
         - session_id
         - model
@@ -1697,6 +1877,14 @@ components:
           const: 2
         connection_id:
           $ref: '#/components/schemas/ConnectionId'
+        connection_generation:
+          type: integer
+          minimum: 1
+          description: |
+            服务端在同一 Pod 内为每次成功 create/resume 分配的单调代次。
+            新 resume 先原子接管读写权并递增此值，再用
+            `4409 SESSION_REPLACED` 关闭旧连接。它不是跨 Pod owner 或
+            分布式 fencing token。
         agent_id:
           $ref: '#/components/schemas/AgentId'
         session_id:
@@ -1716,15 +1904,17 @@ components:
       description: |
         session.state=running 当且仅当 active_run 非 null；session.state=idle 当且
         仅当 active_run 为 null。connect Response 必须先于新连接上的任何
-        EventFrame 写出。
+        EventFrame 写出。resume 成功时，返回的 connection_generation 已经是
+        接管后的权威代次。
     ChatSendResult:
       type: object
       additionalProperties: false
       description: |
         accepted=true 表示用户消息已持久化、run_id 已分配且 active-run 占位已
-        原子提交；随后即使连接断开，run 仍继续。服务端必须先向发起连接写出
-        本 ResponseFrame，再向该连接写出该 run 的 run.started；其他观察连接
-        不受这一局部排序约束。同一 idempotency_key 的等价重试优先返回原结果，
+        原子提交；随后即使连接断开，持有该 run 的同一 Pod 仍继续执行。
+        这不承诺 Pod 重启或跨 Pod 路由后继续。服务端必须先向发起连接写出
+        本 ResponseFrame，再向该连接写出该 run 的 run.started。同一
+        idempotency_key 的等价重试优先返回原结果，
         不因原 run 已处于 active 状态或附件后来过期而返回 RUN_ACTIVE 或重新
         校验失败。存在附件时，accepted=true 还表示用户消息已经保存可信附件
         快照、Session 保留引用和本 run 的受控读取句柄；读取句柄本身不持久化，
@@ -1791,6 +1981,7 @@ components:
             - done
             - aborted
             - error
+            - interrupted
         completed_at:
           $ref: '#/components/schemas/Timestamp'
         usage:
@@ -1799,7 +1990,7 @@ components:
           type: string
           maxLength: 256
         error:
-          $ref: '#/components/schemas/Error'
+          $ref: '#/components/schemas/RunTerminalError'
       allOf:
         - if:
             properties:
@@ -1810,6 +2001,21 @@ components:
           then:
             required:
               - error
+            properties:
+              error:
+                $ref: '#/components/schemas/Error'
+        - if:
+            properties:
+              outcome:
+                const: interrupted
+            required:
+              - outcome
+          then:
+            required:
+              - error
+            properties:
+              error:
+                $ref: '#/components/schemas/RunInterruptedError'
         - if:
             properties:
               outcome:
@@ -1823,8 +2029,11 @@ components:
               required:
                 - error
       description: |
-        run.completed 的持久化投影。outcome=error 时必须携带 error；outcome=done
-        或 aborted 时不得携带 error。调用方按 run_id 与实时状态对账。
+        run.completed 的持久化投影。outcome=error 或 interrupted 时必须携带
+        error；outcome=done 或 aborted 时不得携带 error。Pod 重启后，
+        RuntimeSessionStore 中仍标记为 running 但无法继续的旧 run 必须对账为
+        interrupted，并使用 RUN_INTERRUPTED 结构化错误。调用方按 run_id 与
+        实时状态对账。
     HistoryMessageItem:
       type: object
       additionalProperties: false
@@ -1956,69 +2165,6 @@ components:
       properties:
         thinking:
           $ref: '#/components/schemas/ThinkingLevel'
-    PromptTemplateSummary:
-      type: object
-      additionalProperties: false
-      required:
-        - id
-        - name
-        - description
-      properties:
-        id:
-          $ref: '#/components/schemas/Identifier'
-        name:
-          type: string
-          minLength: 1
-          maxLength: 256
-        description:
-          type: string
-          maxLength: 2048
-    PromptTemplatesListResult:
-      type: object
-      additionalProperties: false
-      required:
-        - templates
-        - has_more
-      properties:
-        templates:
-          type: array
-          items:
-            $ref: '#/components/schemas/PromptTemplateSummary'
-        next_cursor:
-          type: string
-          minLength: 1
-          maxLength: 1024
-        has_more:
-          type: boolean
-    SkillSummary:
-      type: object
-      additionalProperties: false
-      required:
-        - name
-        - description
-        - location
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 128
-        description:
-          type: string
-          maxLength: 2048
-        location:
-          type: string
-          minLength: 1
-          maxLength: 2048
-    SkillsListResult:
-      type: object
-      additionalProperties: false
-      required:
-        - skills
-      properties:
-        skills:
-          type: array
-          items:
-            $ref: '#/components/schemas/SkillSummary'
     SuccessPayload:
       oneOf:
         - $ref: '#/components/schemas/ConnectResult'
@@ -2030,8 +2176,6 @@ components:
         - $ref: '#/components/schemas/ModelsListResult'
         - $ref: '#/components/schemas/ModelSetResult'
         - $ref: '#/components/schemas/ThinkingSetResult'
-        - $ref: '#/components/schemas/PromptTemplatesListResult'
-        - $ref: '#/components/schemas/SkillsListResult'
     ErrorCode:
       type: string
       minLength: 1
@@ -2043,6 +2187,9 @@ components:
         资源枚举；ATTACHMENT_NOT_READY 只在调用服务与 Session 授权通过后返回，
         通常 retryable=true；ATTACHMENT_NOT_SUPPORTED 表示可信类型、数量或
         字节数不符合当前有效 ModelInputPolicy，调用方应更换模型或附件。
+        RUN_INTERRUPTED 不是请求错误码，只能出现在 RunInterruptedError。
+      not:
+        const: RUN_INTERRUPTED
       x-known-values:
         - INVALID_REQUEST
         - UNAUTHENTICATED
@@ -2059,6 +2206,43 @@ components:
         - ATTACHMENT_NOT_SUPPORTED
         - MANAGER_AUTH_FAILED
         - MANAGER_UNAVAILABLE
+    SafeErrorDetailScalar:
+      oneOf:
+        - type: string
+          maxLength: 4096
+          x-maxUtf8Bytes: 4096
+        - type: number
+        - type: boolean
+        - type: 'null'
+    SafeErrorDetailValue:
+      oneOf:
+        - $ref: '#/components/schemas/SafeErrorDetailScalar'
+        - type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/SafeErrorDetailScalar'
+        - type: object
+          maxProperties: 32
+          propertyNames:
+            maxLength: 128
+          additionalProperties:
+            $ref: '#/components/schemas/SafeErrorDetailScalar'
+      description: 最多一层容器的有界诊断值；容器内不允许继续嵌套。
+      x-maxDepth: 2
+    SafeErrorDetails:
+      type: object
+      maxProperties: 32
+      propertyNames:
+        maxLength: 128
+      additionalProperties:
+        $ref: '#/components/schemas/SafeErrorDetailValue'
+      description: |
+        只允许有界、脱敏、可操作的诊断字段。规范化 JSON 的 UTF-8 大小
+        不得超过 16384 字节；不得包含凭据、内部 Header、私有 claim、
+        堆栈、Prompt、原始 thinking 或执行器秘密。无法安全投影时应省略。
+      x-maxSerializedBytes: 16384
+      x-maxDepth: 2
+      x-maxStringUtf8Bytes: 4096
     Error:
       type: object
       additionalProperties: false
@@ -2073,8 +2257,7 @@ components:
           minLength: 1
           maxLength: 2048
         details:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/SafeErrorDetails'
         retryable:
           type: boolean
           default: false
@@ -2121,6 +2304,30 @@ components:
             not:
               required:
                 - retry_after_ms
+    RunInterruptedError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+      properties:
+        code:
+          const: RUN_INTERRUPTED
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        details:
+          $ref: '#/components/schemas/SafeErrorDetails'
+      description: |
+        RuntimeSessionStore 在确认 Pod 重启导致旧 active run 无法继续时生成的
+        持久化终态原因。它不是 ErrorResponseFrame 的请求错误，也不允许
+        retryable/retry_after_ms；调用方不应对原 run_id 重试，可发起新的
+        chat.send。
+    RunTerminalError:
+      oneOf:
+        - $ref: '#/components/schemas/Error'
+        - $ref: '#/components/schemas/RunInterruptedError'
     SuccessResponseFrame:
       type: object
       additionalProperties: false
@@ -2282,9 +2489,12 @@ components:
       type: object
       additionalProperties: false
       description: |
-        只在 disclosure=summary 的投影中发送，每个 thinking 块最多一次。summary
-        是当前块的完整安全摘要，客户端以它替换当前摘要，不做字符串追加。
-        full/hidden 连接在同一 run_seq 位置收到 thinking_redacted。
+        只在 disclosure=summary 且 Model Manager 明确提供非空安全摘要时
+        发送，每个 thinking 块最多一次。summary 是当前块的完整安全
+        摘要，客户端以它替换当前摘要，不做字符串追加。如果没有安全
+        摘要，summary 投影在 canonical summary 序列位置也收到
+        thinking_redacted，终态 ThinkingContent 保留 disclosure=summary 但省略 text。
+        full/hidden 投影在同一 run_seq 位置收到 thinking_redacted。
       required:
         - type
         - summary
@@ -2310,8 +2520,8 @@ components:
             - summary
       description: |
         不含 thinking 内容的序列占位。服务端对每个被当前连接投影策略抑制的
-        canonical thinking_delta 或 thinking_summary 发送一条，使所有观察
-        连接看到相同的 run_seq 域。客户端只推进序列，不创建可见正文。
+        canonical thinking_delta 或 thinking_summary 发送一条，使同一 run
+        在断线前后保持连续的 run_seq 域。客户端只推进序列，不创建可见正文。
     ThinkingEndUpdate:
       type: object
       additionalProperties: false
@@ -2353,9 +2563,11 @@ components:
         delta:
           type: string
           minLength: 1
+          maxLength: 262144
           description: |
             Tool arguments 的 JSON 文本片段，本次片段可能不是合法 JSON。客户端只
-            追加保存，不逐帧解析；toolcall_end.arguments 是权威完整对象。
+            追加保存，不逐帧解析；toolcall_end.arguments 是权威的
+            ToolValueProjection。truncated=false 时 value 才是完整脱敏对象。
     ToolCallEndUpdate:
       type: object
       additionalProperties: false
@@ -2369,8 +2581,7 @@ components:
         tool_call_id:
           $ref: '#/components/schemas/ToolCallId'
         arguments:
-          type: object
-          additionalProperties: true
+          $ref: '#/components/schemas/ToolParametersProjection'
     AssistantMessageUpdate:
       oneOf:
         - $ref: '#/components/schemas/TextStartUpdate'
@@ -2432,6 +2643,7 @@ components:
         - timestamp
         - tool_call_id
         - tool_id
+        - parameters
       properties:
         agent_id:
           $ref: '#/components/schemas/AgentId'
@@ -2450,9 +2662,13 @@ components:
           $ref: '#/components/schemas/Identifier'
         name:
           type: string
-        input:
-          type: object
-          additionalProperties: true
+          maxLength: 256
+        parameters:
+          $ref: '#/components/schemas/ToolParametersProjection'
+          description: |
+            Tool Manager 实际执行的业务 parameters 经脱敏和有界投影后的值。
+            这不包含 agent-service 向执行器注入的 access-token、内部 Header
+            或其他运行时秘密。
     ToolUpdatedPayload:
       type: object
       additionalProperties: false
@@ -2495,7 +2711,14 @@ components:
           type: number
           minimum: 0
           maximum: 1
-        data: {}
+        data:
+          $ref: '#/components/schemas/ToolValueProjection'
+      description: |
+        progress 是脱敏后的有界状态投影。message 最多 4096 字符；data
+        必须使用 ToolValueProjection，因此完整脱敏值上限为 524288 字节；
+        超限时使用 preview、original_size_bytes、truncated=true 和 result_ref。
+        服务端必须在发送或持久化前移除凭据、内部 Header、执行器秘密和
+        不允许披露的字段。
     ToolCompletedPayload:
       type: object
       additionalProperties: false
@@ -2530,7 +2753,8 @@ components:
             - done
             - error
             - aborted
-        result: {}
+        result:
+          $ref: '#/components/schemas/ToolValueProjection'
         error:
           $ref: '#/components/schemas/Error'
       allOf:
@@ -2622,9 +2846,10 @@ components:
       type: object
       additionalProperties: false
       description: |
-        每个 run_id 恰好发送一次，是该 run 的最后一个事件。outcome=error 时
-        必须携带 error；outcome=done 或 aborted 时不得携带 error。它之后不得再出现相同
-        run_id 的 EventFrame。
+        每个 run_id 恰好发送一次，是该 run 的最后一个事件。outcome=error
+        或 interrupted 时必须携带 error；outcome=done 或 aborted 时不得携带
+        error。它之后不得再出现相同 run_id 的 EventFrame。Pod 重启期间无
+        活动连接可消费事件时，interrupted 终态可以只通过 chat.history 恢复。
       required:
         - agent_id
         - session_id
@@ -2650,13 +2875,14 @@ components:
             - done
             - aborted
             - error
+            - interrupted
         usage:
           $ref: '#/components/schemas/Usage'
         stop_reason:
           type: string
           maxLength: 256
         error:
-          $ref: '#/components/schemas/Error'
+          $ref: '#/components/schemas/RunTerminalError'
       allOf:
         - if:
             properties:
@@ -2667,6 +2893,21 @@ components:
           then:
             required:
               - error
+            properties:
+              error:
+                $ref: '#/components/schemas/Error'
+        - if:
+            properties:
+              outcome:
+                const: interrupted
+            required:
+              - outcome
+          then:
+            required:
+              - error
+            properties:
+              error:
+                $ref: '#/components/schemas/RunInterruptedError'
         - if:
             properties:
               outcome:
@@ -2827,22 +3068,26 @@ components:
       description: |
         同一连接的第一条 EventFrame.seq 为 1，之后每成功写出一条事件恰好加 1；
         ResponseFrame 不占用 seq，重连后从 1 重新开始。run_seq 从 run.started
-        的 1 开始，对同一 run 的全部 Message 和 Tool 事件恰好加 1，并跨重连
-        连续。重复、倒退或跳号都不能继续猜测归并：客户端停止应用当前流并
+        的 1 开始，对同一 run 的全部 Message 和 Tool 事件恰好加 1，并在
+        同一 Pod 成功恢复 active run 时跨重连连续。重复、倒退或跳号都不能
+        继续猜测归并：客户端停止应用当前流并
         通过 mode=resume 取得新快照。
 
-        生命周期约束为 run.started 最先、run.completed 最后。一个 run 可以
+        活跃 Pod 正常产生的实时生命周期中，run.started 最先、run.completed
+        最后。一个 run 可以
         包含多个 Message 和 Tool 周期；message.started 必须早于同一 message_id
         的 updated/completed，tool.started 必须早于同一 tool_call_id 的
         updated/completed。已经 start 的 Message 即使因 abort/error 结束，也要
         在 run.completed 前发送一次终态 message.completed。每个已发送
         tool.started 的 tool_call_id 也必须在 run.completed 前恰好发送一次
-        tool.completed；run abort 时尚未结束的 Tool 使用 status=aborted。
+        tool.completed；run abort 时尚未结束的 Tool 使用 status=aborted。Pod 突然
+        重启时无法补发实时终态事件；此时以 RuntimeSessionStore 中的
+        interrupted Message/RunRecord 为准。
 
         run_seq 属于 canonical run 事件域，不因连接的 thinking 投影而变化。
-        当 canonical thinking delta 或 summary 不允许向某连接披露时，该连接
-        仍在相同 run_seq 位置收到不含内容的 thinking_redacted，因此多观察者
-        和重连前后的 run_seq 都连续且可比较。
+        当 canonical thinking delta 或 summary 不允许向当前连接披露时，该连接
+        仍在相同 run_seq 位置收到不含内容的 thinking_redacted，因此
+        断线恢复前后的 run_seq 连续且可比较。
       oneOf:
         - $ref: '#/components/schemas/RunStartedEvent'
         - $ref: '#/components/schemas/MessageStartedEvent'
@@ -2857,7 +3102,7 @@ x-method-contracts:
     RequestFrame.id 关联到下列 method 和成功 payload。调用方应在 pending map 中
     保存该映射，而不是根据 payload 形状猜测响应类型。连接成功后允许多个普通
     请求并发 in-flight，ResponseFrame 可以乱序并与 EventFrame 交错。
-    这是 CampusClaw 的规范性扩展；通用 AsyncAPI 生成器只能看到泛化 Frame
+    这是 CampusAgent 的规范性扩展；通用 AsyncAPI 生成器只能看到泛化 Frame
     oneOf。生成强类型 SDK 时必须使用理解本扩展的模板，或在 SDK 中手工保留
     下列 method -> payload decoder 映射；本文不声称零配置的通用代码生成。
   connect:
@@ -2896,14 +3141,6 @@ x-method-contracts:
     requestSchema: '#/components/schemas/ThinkingSetRequest'
     successPayloadSchema: '#/components/schemas/ThinkingSetResult'
     errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE]
-  prompt_templates.list:
-    requestSchema: '#/components/schemas/PromptTemplatesListRequest'
-    successPayloadSchema: '#/components/schemas/PromptTemplatesListResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, MANAGER_UNAVAILABLE]
-  skills.list:
-    requestSchema: '#/components/schemas/SkillsListRequest'
-    successPayloadSchema: '#/components/schemas/SkillsListResult'
-    errors: [INVALID_REQUEST, FORBIDDEN]
 x-websocket:
   dataMessages:
     acceptedType: text
@@ -2913,17 +3150,15 @@ x-websocket:
     binaryMessageCloseCode: 1003
     invalidUtf8OrJsonCloseCode: 1007
   handshake:
-    clientUri: wss://api.example.com/api/ws/chat
-    conceptualHttpTarget: https://api.example.com/api/ws/chat
+    clientUri: wss://api.example.com/agent-service/v1/ws/chat
+    conceptualHttpTarget: https://api.example.com/agent-service/v1/ws/chat
     http11Method: GET
     requiredHttp11Headers:
       - 'Connection: Upgrade'
       - 'Upgrade: websocket'
       - 'Sec-WebSocket-Version: 13'
       - 'Sec-WebSocket-Key: <random-base64-key>'
-    serviceAuthentication:
-      - 'Authorization: Bearer <token>, or'
-      - mTLS before the HTTP request
+    serviceAuthentication: existing private gateway authentication, completed before HTTP 101; private headers, claims and key formats are intentionally not specified here
     successStatus: 101
     websocketEstablishedAt: HTTP 101 response accepted
     preUpgradeFailureStatuses:
@@ -2935,27 +3170,33 @@ x-websocket:
     connectionSequence:
       - parse wss URI
       - resolve DNS and open one TCP connection to port 443
-      - complete TLS or mTLS
+      - complete TLS
       - send HTTP WebSocket Upgrade on the same connection
       - accept HTTP 101 Switching Protocols
       - exchange WebSocket Frames on the same TCP/TLS connection
     description: |
-      调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
+      调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
+      安全 WebSocket。
       客户端库先建立 TCP/TLS 连接，再通过 HTTP WebSocket opening handshake
       协商切换协议；服务端返回 101 后，WebSocket 才正式建立。
 
-      客户端库先解析 DNS 并建立一条 TCP 连接，再在该连接上完成 TLS 或 mTLS、
+      客户端库先解析 DNS 并建立一条 TCP 连接，再在该连接上完成 TLS、
       HTTP Upgrade 和后续 WebSocket Frame 传输。https 形式只用于说明 opening
       handshake 的 HTTP 视角，不定义 RESTful API，也不要求建立第二条连接。
 
       服务端在 101 之前使用 HTTP status 表达认证、请求或 Upgrade 失败；101
       之后使用 ResponseFrame、EventFrame 或 WebSocket close code 表达协议和
       应用结果。HTTP Upgrade 只建立 WebSocket 传输，调用方随后发送的首个
-      connect RequestFrame 才创建或恢复 Runtime Session 并绑定当前连接。
+      connect RequestFrame 才创建或恢复 CampusAgent Runtime Session 并绑定当前连接。
 
       该握手方式使调用方和服务端复用 443、TLS、HTTP 路由、代理、防火墙和
       认证设施，同时在同一条连接上明确完成从 HTTP 到 WebSocket Frame 的
-      切换。
+      切换。公开 Gateway 和 agent-service 都使用完整路径
+      `/agent-service/v1/ws/chat`，本协议不定义前缀剔除。入站凭据只形成
+      不可变连接认证上下文，不得原样传给 Model Manager 或 Tool Manager；
+      agent-service 调用内部服务时按现有能力生成面向目标服务的新
+      access-token。任何凭据都不得进入 Prompt、RuntimeSessionStore、Frame
+      或应用日志。
   firstFrameTimeoutSeconds: 5
   pingPongIntervalSeconds: 20
   pongTimeoutSeconds: 10
@@ -2967,20 +3208,61 @@ x-websocket:
     concurrentRequestsAfterConnect: true
     responsesMayBeOutOfOrder: true
     responsesAndEventsMayInterleave: true
-    originChatSendResponseBeforeRunEvents: true
+    stateChangingSuccessResponseBeforeCausalEvents: true
+    description: |
+      任何改变 Session 或 run 状态的命令都必须先向当前连接成功写出
+      ResponseFrame，再写出由该变更引起的 EventFrame。这包括 chat.send
+      的 run.started、chat.steer 触发的后续 Message 更新和 chat.abort 触发的
+      终态事件。响应写出失败不回滚已持久的幂等结果，调用方重连后
+      通过原 idempotency_key 或 chat.history 对账。
+  sessionConnection:
+    activeReadWriteConnectionsPerSessionPerPod: 1
+    resumeTakesOverExistingConnection: true
+    connectionGeneration: monotonically increases within the owning Pod
+    replacedConnectionCloseCode: 4409
+    replacedConnectionReason: SESSION_REPLACED
+    description: |
+      mode=create 首次成功时建立初始 connection_generation，但不具有主动
+      替换现有活动连接的语义；网络丢失响应后仍按 ConnectParams 的规则幂等
+      重试 create。只有新的 mode=resume 可以原子递增 generation、接管
+      同一 Pod 内的 Session 读写权并关闭旧连接。接管后，只有新连接可以
+      读写该 Session，旧连接不得再接收事件或执行请求。此代次只解决
+      同 Pod 并发，不是跨 Pod 分布式所有权。
+  deploymentRouting:
+    strategy: trusted gateway user-IP affinity
+    distributedOwner: false
+    redisCoordination: false
+    crossPodForwarding: false
+    sessionRoutingHeader: false
+    description: |
+      多副本服务 API v1 依赖可信网关按有效用户 IP 将同一调用方稳定路由到
+      同一 Pod。本规范不定义私有路由 Header，也不使用 Redis、分布式
+      owner 或跨 Pod 转发。如果网关只能看到 mate-service/NAT IP、用户 IP
+      改变、粘性失效或 Pod 重启，active run 就无法在另一 Pod 继续。
+      这是 v1 的明确可用性限制，不得在客户端文档中表述为跨 Pod 无缝恢复。
   recovery:
     clientCursorInConnect: false
     description: |
-      调用方不提交旧连接 seq 或 run_seq。服务端在 resume connect 中原子生成
-      active_run 快照和 cursor，先写出 ResponseFrame，再发送 run_seq 大于快照
-      值的 EventFrame。客户端先缓冲这些 EventFrame，使用快照的 run_id 和
-      history_seq 读完当前 run 已持久化的历史，再应用 partial Message、
-      open contents 与 active tools，最后按 run_seq 释放缓冲事件。
+      调用方不提交旧连接 seq 或 run_seq。只有重连仍路由到持有 active
+      run 的同一 Pod 时，服务端才在 resume connect 中原子接管连接、
+      生成 active_run 快照和 cursor，先写出 ResponseFrame，再发送 run_seq
+      大于快照值的 EventFrame。客户端先缓冲这些 EventFrame，使用快照的
+      run_id 和 history_seq 读完当前 run 已持久化的历史，再应用 partial
+      Message、open contents 与 active tools，最后按 run_seq 释放缓冲事件。
 
       canonical thinking 事件如果被当前连接投影抑制，服务端仍发送
       thinking_redacted 占位，所以 run_seq 不会因 full/summary/hidden 而出现缺口。
       调用方观察到 seq/run_seq 缺口、1001、1006、1011 或 1013 时，使用带抖动的
-      指数退避重新连接并执行 mode=resume。
+      指数退避重新连接并执行 mode=resume。如果请求被路由到不持有原
+      run 的其他 Pod，该 Pod 不能返回 active_run 快照，也不得仅因本地缺少
+      run 就将数据库终态改为 interrupted；它可以使用 1013 关闭尚未绑定的
+      连接，要求调用方按部署粘性策略退避后重试。MANAGER_UNAVAILABLE 只表示
+      真实的 Manager 依赖故障，不得用作错 Pod 路由信号。只在确认 Pod 已重启且
+      原进程无法继续 run 时，服务端
+      才从 RuntimeSessionStore 重建 AgentSession/Agent，将旧 run 和已经到达完整
+      内容块边界的消息标记为 interrupted；未到 text_end、thinking_end 或
+      toolcall_end 的尾部不承诺持久化或恢复。调用方通过 chat.history
+      读取权威 interrupted 终态。
   closeCodes:
     '1000': 正常关闭；默认不自动恢复，关闭前若要终止 run 必须先调用 chat.abort
     '1001': 服务端关闭或 Ping/Pong 超时；退避后 resume
@@ -2990,13 +3272,37 @@ x-websocket:
     '1008': connect 超时或违反连接策略
     '1009': 重组并解压后的 WebSocket Message 超过协商上限
     '1011': 服务端暂时性内部错误；退避后 resume
-    '1013': 消费端过慢；需要重连并通过快照恢复
+    '1013': 消费端过慢，或未绑定连接未路由到持有 active run 的 Pod；退避后按部署粘性策略 resume
     '1006': 仅为调用方观察到的异常断开，不能在线上 Close Frame 中发送；退避后 resume
+    '4409': SESSION_REPLACED；同一 Pod 内新 resume 已接管 Session，旧连接必须停止读写
+x-runtime-persistence:
+  store: RuntimeSessionStore
+  medium: database
+  sessionFilePersistence: false
+  physicalSchema: separately designed
+  logicalRecords:
+    - Session
+    - Message
+    - RunRecord
+    - history sequence
+    - idempotency result
+    - Agent revision
+    - Model revision
+    - runtime bundle revision
+    - attachment retention claim
+    - complete redacted oversized tool value
+  description: |
+    目标设计的 Session 权威状态完全保存在数据库中，不生成 Session
+    文件。RuntimeSessionStore 是逻辑端口；物理表、索引、事务和
+    保留策略另行设计。凭据、短期读取句柄、内部 Header 和执行器秘密
+    不得持久化。每个状态变更的幂等结果必须与对应 Session
+    状态在同一原子提交中对外可见。
 x-attachments:
   transport: reference-only
   websocketField: chat.send.params.attachment_ids
   websocketCapabilityRequired: false
-  uploadOwner: upstream Attachment Service over HTTP or Object Storage
+  uploadOwner: mate-service Attachment Service over HTTP or Object Storage
+  agentServiceUploadEndpoint: false
   runtimePort: AttachmentResolver
   contentAdapter: AttachmentInputAssembler
   acceptedStates:
@@ -3011,13 +3317,15 @@ x-attachments:
     - DELETED
   description: |
     附件引用是协议 2 的标准可选字段，不通过 capability 开启。浏览器或上层
-    调用方先在上层 Attachment Service 创建上传意图；直接上传 Object Storage
+    调用方先在 `mate-service` 承载的 Attachment Service 创建上传意图；
+    agent-service 不提供附件上传端点。直接上传 Object Storage
     时，预签名写入必须限制对象 key、大小、校验和和有效期。只有服务端完成
     内容嗅探、完整性验证、安全扫描和 session_id 绑定并进入 READY 后，调用方
     才提交 attachment_id。
 
-    Runtime 不维护 tenant_id/user_id，也不把 attachment_id 当作 Bearer
-    capability。AttachmentResolver 使用 Upgrade 固化的调用服务身份以及当前
+    CampusAgent Runtime 不维护 tenant_id/user_id，也不把 attachment_id
+    当作授权凭据。
+    AttachmentResolver 使用 Upgrade 固化的调用服务身份以及当前
     Session 的 session_id、agent_id、model_id 批量解析全部 ID。Attachment
     Service 在自身权威数据中完成最终用户归属判断；调用方不能在 Frame 中自报
     tenant/user。未知、越权、未绑定、删除或过期统一返回 INVALID_ATTACHMENT。
@@ -3036,15 +3344,16 @@ x-attachments:
     序列化的受控读取句柄。只有句柄可以打开绑定固定 content_version 的单消费
     read lease，不能再次凭裸 attachment_id 查询，从而避免校验与读取之间的
     替换竞态。lease 支持取消、背压、超时和字节上限，并在成功、失败或取消后
-    幂等关闭。读取句柄、lease、预签名 URL 和凭据不进入 JSONL、Prompt、Frame
-    或日志。Session Store 对客户端只投影 AttachmentContent，同时保存不公开的
+    幂等关闭。读取句柄、lease、预签名 URL 和凭据不进入
+    RuntimeSessionStore、Prompt、Frame 或日志。RuntimeSessionStore 对客户端
+    只投影 AttachmentContent，同时保存不公开的
     retention record，或能以 session_id + message_id + attachment_id +
     content_version 确定性重建 claim ID。进程恢复或后续 turn 只能用该内部
     retention record 重开精确 content_version 的 read handle，不能按裸 ID
     选择“当前版本”。
 
-    Attachment Service 保留快照所指的原始不可变版本，至少直到 Runtime
-    Session 删除；可额外缓存派生制品，但派生制品必须使用独立的内部
+    Attachment Service 保留快照所指的原始不可变版本，至少直到 CampusAgent
+    Runtime Session 删除；可额外缓存派生制品，但派生制品必须使用独立的内部
     artifact_version、MIME、size 和 digest，不能替代或冒充公开 source sha256。
     删除控制面先写 DELETING tombstone、阻止新请求并
     处理 active run，再通过 durable outbox 幂等 release claim；归档或可恢复
