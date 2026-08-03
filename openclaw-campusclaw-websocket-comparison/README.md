@@ -242,9 +242,13 @@ CampusClaw v2 是内部 Agent Runtime，不直接承接最终用户或浏览器�
 wss://api.example.com/api/ws/chat
 ```
 
-调用 `connect("wss://...")` 只是请求客户端库开始建连，不表示 WebSocket 已经
-建立。不存在“先建立 wss/WebSocket，再使用 HTTP Upgrade 升级”的过程。客户端
-库自动执行：
+调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
+客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换协议；
+服务端返回 `101` 后，WebSocket 才正式建立。
+
+调用 `connect("wss://...")` 只是请求客户端库开始上述过程，不表示 WebSocket
+已经建立。不存在“先建立 wss/WebSocket，再使用 HTTP Upgrade 升级”的过程。
+客户端库自动执行：
 
 ```text
 parse wss URI

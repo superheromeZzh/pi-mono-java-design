@@ -778,9 +778,13 @@ Gateway，也不允许连接建立后切换 Agent 或 Session。
 wss://api.example.com/api/ws/chat
 ```
 
-这里的 `connect("wss://...")` 是“请求客户端库建立安全 WebSocket”的高层
-调用，不表示 WebSocket 已经建立，也不存在“先建立 WebSocket，再使用 HTTP
-Upgrade 升级”的阶段。`wss` URI 向客户端库声明：目标 host 是
+调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
+客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换协议；
+服务端返回 `101` 后，WebSocket 才正式建立。
+
+这里的 `connect("wss://...")` 是请求客户端库开始上述建连过程，不表示
+WebSocket 已经建立，也不存在“先建立 WebSocket，再使用 HTTP Upgrade 升级”
+的阶段。`wss` URI 向客户端库声明：目标 host 是
 `api.example.com`、默认端口是 `443`、需要 TLS、握手 path 是
 `/api/ws/chat`、最终目标协议是 WebSocket。
 
