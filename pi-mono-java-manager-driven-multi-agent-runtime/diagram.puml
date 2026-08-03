@@ -89,6 +89,7 @@ title Managed Multi-Agent Session and Context Assembly
 ' Java divergence: v2 authenticates Upgrade and maps closed Frames to a server-side SessionTransport.
 ' Architecture change: ManagedSessionTransport owns logical connection state; WebSocket is an adapter.
 ' Target design: globally unique session_id is the only SessionPool key; tenant and user stay upstream.
+' Target design: HTTP Upgrade and the first connect RequestFrame are separate protocol phases.
 ' Design reason: isolate prompt, model, tool, persistence, and run recovery across Agents.
 
 skinparam backgroundColor #FFFFFF
@@ -122,12 +123,13 @@ participant "AgentLoop" as Loop
 participant "ManagedRunHub" as Hub
 database "Runtime session store" as Store
 
-Client -> Auth : Upgrade /api/ws/chat\nservice Bearer or mTLS
-Auth -> Auth : validate service principal and scope
+Client -> Auth : HTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
+Auth -> Auth : complete TLS or mTLS\nvalidate service principal and Upgrade
+Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth --> WS : immutable connection auth context
 WS -> TransportFactory : open(auth context)
 TransportFactory --> WS : per-connection transport
-Client -> WS : RequestFrame connect\nmode, session_id, agent_id, model_id?
+Client -> WS : WebSocket Text Frame\nRequestFrame connect\nmode, session_id, agent_id, model_id?
 WS -> WS : validate closed Frame\nand optional traceparent
 WS -> Transport : connect(command, invocation metadata)
 Transport -> Resolver : resolve(agent_id)
@@ -274,6 +276,7 @@ title Managed WebSocket Session Protocol
 ' Java divergence: v2 maps Frame payloads to typed SessionTransport requests and events.
 ' Architecture change: one connection is scoped to one caller-owned session and Agent, unlike OpenClaw Gateway multiplexing.
 ' Target design: the Runtime authenticates a calling service and does not model tenant or user identity.
+' Target design: HTTP 101 establishes transport; connect RequestFrame binds the Runtime Session.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
 
 skinparam backgroundColor #FFFFFF
@@ -303,12 +306,12 @@ participant "AgentSession" as Session
 participant "Thinking projection" as Projection
 database "Session JSONL" as Store
 
-Client -> Auth : Upgrade /api/ws/chat\nservice Bearer or mTLS
-Auth -> Auth : reject URL token and business query\nvalidate service principal and scope
-Auth --> Client : 101 Switching Protocols
+Client -> Auth : HTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
+Auth -> Auth : complete TLS or mTLS\nreject URL token and business query\nvalidate service principal and Upgrade
+Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth -> WS : immutable auth context
 WS -> Transport : create per-connection transport
-Client -> WS : RequestFrame connect within 5 seconds\nmode, session_id, agent_id, model_id?
+Client -> WS : WebSocket Text Frame within 5 seconds\nRequestFrame connect\nmode, session_id, agent_id, model_id?
 WS -> WS : validate traceparent and closed Frame
 WS -> Transport : connect(command, invocation metadata)
 Transport -> Pool : resolve session_id or create binding\nand validate effective model
@@ -387,6 +390,12 @@ note over WS,Hub
 Event seq is connection-local.
 run_seq is continuous across reconnects.
 Snapshot response is sent before post-cursor deltas.
+end note
+
+note over Client,WS
+Before HTTP 101, failures use HTTP status.
+After HTTP 101, messages are WebSocket Frames.
+HTTP Upgrade does not create a Runtime Session.
 end note
 
 note over Client,Session

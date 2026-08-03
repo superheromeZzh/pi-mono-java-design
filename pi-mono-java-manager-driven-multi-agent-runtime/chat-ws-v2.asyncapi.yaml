@@ -3,7 +3,7 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.3.0
+  version: 2.3.1
   description: |
     Manager 驱动的 CampusClaw Agent Runtime Session 协议规范。
 
@@ -20,6 +20,13 @@ info:
     版本 2 直接替换 `/api/ws/chat` 上的 v1 传输格式，使用
     request/response/event Frame 和结构化消息增量。协议不接受业务查询
     参数或 URL token，也不提供连接内新建会话命令。
+
+    客户端配置 `wss://api.example.com/api/ws/chat`。WebSocket 库先对相同
+    host、port 和 path 发起 HTTP opening handshake；概念上的 HTTP/TLS 目标
+    是 `https://api.example.com/api/ws/chat`，但该地址不是 RESTful 资源。
+    HTTP/1.1 请求必须携带合法 Upgrade headers，成功返回 101 后才开始传输
+    WebSocket Frame。第一个 `connect` RequestFrame 是 101 之后的应用握手，
+    不等同于 HTTP Upgrade。
   contact:
     name: CampusClaw
     url: https://github.com/superheromeZzh/pi-mono-java
@@ -34,7 +41,9 @@ servers:
     description: |
       生产环境内部服务端点。浏览器终端应连接上层会话服务，不直接连接本
       Runtime。调用服务使用 Authorization Bearer，部署也可以在入口强制
-      mTLS。服务端拒绝业务查询参数和 URL token。
+      mTLS。客户端配置 wss URI，由 WebSocket 库生成 HTTP Upgrade；服务端
+      拒绝业务查询参数、URL token 和缺少合法 Upgrade headers 的普通 HTTP
+      请求。
     security:
       - $ref: '#/components/securitySchemes/bearerAuth'
       - $ref: '#/components/securitySchemes/mutualTLS'
@@ -49,8 +58,11 @@ channels:
     address: /api/ws/chat
     title: 会话范围的对话通道
     description: |
-      双向 JSON 通道。客户端必须在五秒内发送 `connect` 首帧。connect 成功后，
-      Agent 和 Session 在该连接的整个生命周期内不可更换。
+      HTTP opening handshake 成功后才存在此双向 JSON 通道。HTTP/1.1 的
+      成功边界是 101 Switching Protocols；在此之前的失败使用 HTTP status，
+      不发送本通道的 Frame。客户端必须在 101 之后五秒内发送 `connect`
+      RequestFrame；connect 成功后，Agent 和 Session 在该连接的整个生命周期
+      内不可更换。
     messages:
       ClientRequestFrame:
         $ref: '#/components/messages/ClientRequestFrame'
@@ -1821,6 +1833,31 @@ components:
         - $ref: '#/components/schemas/MessageCompletedEvent'
         - $ref: '#/components/schemas/RunCompletedEvent'
 x-websocket:
+  handshake:
+    clientUri: wss://api.example.com/api/ws/chat
+    conceptualHttpTarget: https://api.example.com/api/ws/chat
+    http11Method: GET
+    requiredHttp11Headers:
+      - 'Connection: Upgrade'
+      - 'Upgrade: websocket'
+      - 'Sec-WebSocket-Version: 13'
+      - 'Sec-WebSocket-Key: <random-base64-key>'
+    serviceAuthentication:
+      - 'Authorization: Bearer <token>'
+      - optional mTLS before the HTTP request
+    successStatus: 101
+    preUpgradeFailureStatuses:
+      - 400
+      - 401
+      - 403
+      - 426
+    firstApplicationFrame: connect RequestFrame
+    description: |
+      wss 是客户端 URI；https 形式只说明同一 host、port 和 path 上承载
+      opening handshake 的 HTTP/TLS 视角，不定义 RESTful API。101 之前不能
+      发送 ResponseFrame 或 WebSocket close code；101 之后不再使用 HTTP
+      status 表达应用错误。HTTP Upgrade 只建立传输，connect RequestFrame
+      才绑定 Runtime Session。
   firstFrameTimeoutSeconds: 5
   pingPongIntervalSeconds: 20
   defaultMaxFrameBytes: 1048576

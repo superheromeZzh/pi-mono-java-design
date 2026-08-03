@@ -2,9 +2,9 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.0 |
+| 文档版本 | 1.4.1 |
 | 状态 | 目标设计，尚未实施 |
-| 更新日期 | 2026-08-02 |
+| 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8` |
@@ -602,7 +602,7 @@ validation.
 
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
-[PlantUML 源码](diagram.puml#L181)
+[PlantUML 源码](diagram.puml#L183)
 
 Agent 直接工具路径：
 
@@ -723,7 +723,7 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L461)
+[PlantUML 源码](diagram.puml#L470)
 
 Model Manager 事件一对一映射为 Java `AssistantMessageEvent`：
 
@@ -770,13 +770,72 @@ Gateway，也不允许连接建立后切换 Agent 或 Session。
 取舍；字段约束、Schema 和示例以该文件为准。后续实施 Java 改造时，以该
 文件替换 pi-mono-java 的 `docs/asyncapi/chat-ws.yaml`。
 
-### 9.2 Upgrade、认证和首帧
+### 9.2 HTTP Upgrade、服务认证和首帧
 
-HTTP Upgrade 目标固定为：
+客户端配置的 WebSocket URI 固定为：
 
 ```text
-/api/ws/chat
+wss://api.example.com/api/ws/chat
 ```
+
+`wss` 表示“在 TLS 上运行 WebSocket”。建立连接时，WebSocket 客户端先连接
+`api.example.com:443`，完成 TLS 或 mTLS，再对同一 host、port 和 path 发送
+HTTP WebSocket opening handshake。因此可把握手目标理解为：
+
+```text
+https://api.example.com/api/ws/chat
+```
+
+但这只是同一地址的 HTTP/TLS 握手视角，不是一个可用普通 GET/POST 调用的
+RESTful 资源。调用方仍应把 `wss://...` 交给 WebSocket 客户端库，由库生成
+HTTP/1.1 Upgrade 请求；不能先调用一个 REST API，再另外“升级”该响应。
+
+规范性的 HTTP/1.1 握手请求示例：
+
+```http
+GET /api/ws/chat HTTP/1.1
+Host: api.example.com
+Authorization: Bearer ***
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: <random-base64-key>
+```
+
+其中 `Connection`、`Upgrade`、`Sec-WebSocket-Version` 和
+`Sec-WebSocket-Key` 属于 WebSocket opening handshake；`Authorization`
+属于 CampusClaw 服务认证。mTLS 在发送这些 HTTP headers 之前的 TLS 握手中
+完成。普通 HTTP GET 即使 host 和 path 相同，只要没有合法 Upgrade headers，
+也不得创建 Runtime Session。
+
+Upgrade 成功时服务端返回：
+
+```http
+HTTP/1.1 101 Switching Protocols
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Accept: <derived-value>
+```
+
+`101` 是协议边界：在它之前，通信仍是 HTTP，认证、路由或 Upgrade 校验失败
+分别使用 `400`、`401`、`403` 或 `426` 等 HTTP 状态，不发送
+`ResponseFrame` 或 WebSocket close code；在它之后，同一 TCP/TLS 连接只传输
+WebSocket Text/Binary/Ping/Pong/Close Frames，业务失败使用
+`ResponseFrame.error`，连接级失败使用 WebSocket close code。
+
+三个阶段不能混淆：
+
+| 阶段 | 线协议 | 负责内容 | 成功结果 |
+|---|---|---|---|
+| 传输握手 | TLS + HTTP WebSocket Upgrade | mTLS/Bearer、路由、Upgrade headers | HTTP `101` |
+| 应用握手 | 第一个 WebSocket Text Frame：`connect` RequestFrame | 协议版本、capability、session_id、Agent、Model | `connect` ResponseFrame |
+| Session 交互 | 后续 WebSocket Frames | `chat.send`、事件、恢复和流控 | ResponseFrame/EventFrame |
+
+所以 HTTP `Connection: Upgrade` 与 CampusClaw `method: "connect"` 没有字段或
+生命周期上的继承关系：前者建立 WebSocket 传输，后者在已经建立的传输上绑定
+Runtime Session。本文示例以常见的 HTTP/1.1 Upgrade 为规范表达；若入口使用
+HTTP/2 extended CONNECT 并在代理层桥接，外部握手形式可以不同，但传输建立
+后的 WebSocket Frame 和 CampusClaw 应用协议语义不得改变。
 
 Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
 其他业务查询参数。该端点是内部服务接口，不直接接受浏览器终端连接；浏览器
@@ -789,7 +848,8 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
   Model/Tool Manager 时使用独立的 Manager audience 凭据或 token exchange；
 - 凭据及其 hash 不进入 Prompt、JSONL、WebSocket 事件、异常详情或普通日志。
 
-客户端必须在 Upgrade 成功后 5 秒内发送首个 JSON 帧，且该帧只能是：
+客户端必须在收到 `101`、WebSocket 协议生效后的 5 秒内发送首个 JSON Text
+Frame，且该 Frame 只能是：
 
 ```json
 {
@@ -814,8 +874,9 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
 }
 ```
 
-首帧超时或首帧不是 `connect` 时使用 1008 关闭。协议区间不包含版本 2 时，
-先返回 `UNSUPPORTED_PROTOCOL`，再使用 1002 关闭。
+这些错误发生在 `101` 之后，因此首帧超时或首帧不是 `connect` 时使用 1008
+关闭。协议区间不包含版本 2 时，先返回 `UNSUPPORTED_PROTOCOL`，再使用
+1002 关闭。
 
 `capabilities` 必须包含 `structured_message_delta`。数组允许携带服务端尚不
 认识的能力名；未知值被忽略且不回显，避免客户端新增可选能力就无法连接。
@@ -1032,7 +1093,7 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 
 ![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
 
-[PlantUML 源码](diagram.puml#L400)
+[PlantUML 源码](diagram.puml#L409)
 
 ### 9.5 流式事件和 Message 投影
 
@@ -1218,7 +1279,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 ![Managed WebSocket Session 协议](managed_websocket_session_protocol.svg)
 
-[PlantUML 源码](diagram.puml#L259)
+[PlantUML 源码](diagram.puml#L261)
 
 ## 10. pi-mono-java 目标适配点
 
@@ -1227,7 +1288,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.3.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.3.1 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1358,6 +1419,12 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ### 12.6 WebSocket v2
 
+- `wss://api.example.com/api/ws/chat` 经 HTTP/1.1 Upgrade 到同一 host/path，
+  合法请求返回 `101`；缺少 Upgrade headers 的普通 HTTP GET 不创建 Session；
+- `101` 前的认证或握手失败只返回 HTTP 状态，`101` 后的协议错误只返回 Frame
+  error 或 WebSocket close code，二者不混用；
+- HTTP Upgrade 成功不等于 CampusClaw connect 成功；服务端在收到首个
+  `connect` RequestFrame 前不得创建或恢复 Runtime Session；
 - `RequestFrame/ResponseFrame/EventFrame` 拒绝未知顶层字段，成功响应只允许
   `payload`，错误响应只允许 `error`；
 - 缺失 `traceparent` 时创建新 trace；合法值传播到 Model/Tool Manager，
@@ -1430,6 +1497,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.1 | 2026-08-03 | 明确 wss URI、HTTP/TLS 握手目标、HTTP/1.1 Upgrade headers、101 协议边界和首个 connect RequestFrame 的分层关系；同步 AsyncAPI 2.3.1 |
 | 1.4.0 | 2026-08-02 | 收紧 Agent Runtime 边界：删除 tenant_id/user_id SessionScope 和直接浏览器认证，以全局唯一 session_id 作为唯一隔离键；调用服务负责用户归属与配额，Runtime 只做服务认证、Agent 绑定和 Session 执行；同步 AsyncAPI 2.3.0 |
 | 1.3.0 | 2026-08-02 | 明确 CampusClaw 的 Agent Runtime 边界；以调用方管理的 session_id 替代目标协议中的 conversation_id，定义 create/resume、SessionScope 和 connection/session/agent/model/message/run 六类核心标识；同步 AsyncAPI 2.2.0 |
 | 1.2.0 | 2026-07-31 | 以 OpenClaw Protocol v4 最新基线优化 WebSocket v2；统一 Frame/payload、增加 traceparent 与有效 features，并定义服务端 SessionTransport 依赖倒置 |

@@ -101,6 +101,7 @@ title WebSocket Handshake and Authentication Comparison
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
 ' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
 ' Target design: the Runtime authenticates only the calling service, not the end user.
+' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
 ' Design reason: service credentials stay in transport authentication and never enter chat payloads.
 
 skinparam backgroundColor #FFFFFF
@@ -140,17 +141,22 @@ The baseline route shown here extracts only conversation_id.
 There is no connect protocol negotiation.
 end note
 
-== CampusClaw v2 target only ==
-CC -> EDGE : Upgrade /api/ws/chat\nservice Bearer or mTLS
-EDGE -> EDGE : validate service principal and scope
+== CampusClaw v2 target: HTTP opening handshake ==
+CC -> EDGE : HTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
+EDGE -> EDGE : complete TLS or mTLS\nvalidate service principal and Upgrade
+EDGE --> CC : HTTP/1.1 101 Switching Protocols
+
+== CampusClaw v2 target: application handshake ==
 EDGE -> V2 : immutable authenticated connection context
-CC -> V2 : req connect within 5 seconds\n{mode, session_id, agent_id,\nmodel_id?, traceparent?}
+CC -> V2 : WebSocket Text Frame within 5 seconds\nreq connect {mode, session_id, agent_id,\nmodel_id?, traceparent?}
 V2 -> MGR : authorize agent and resolve model
 MGR --> V2 : effective identity and model
 V2 --> CC : res payload {protocol, connection_id,\nsession, limits, features, active_run?}
 note over CC,V2
 No business query parameter and no URL token.
 Browser and end-user identity stay upstream.
+The HTTPS form is a handshake target, not a REST API.
+HTTP 101 creates transport; connect binds the session.
 The connection cannot switch agent or session.
 Unknown capabilities are ignored and not echoed.
 Effective features do not replace request authorization.
