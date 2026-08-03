@@ -1,10 +1,11 @@
 # pi-mono Java 集中式 GaussDB 会话存储 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.9
+> 版本：v0.10
 > 日期：2026-08-03
 > 状态：设计评审稿
 > pi 源码基线：[`f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`](https://github.com/badlogic/pi-mono/tree/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee)
+> 字符长度参考基线：本仓库 `ecf31bc55ca1923dd1c7f90d50ee6763963b7da9`；[`agent-metadata-gaussdb-design/schema.sql`](./agent-metadata-gaussdb-design/schema.sql) 和 [`chat-ws-v2.asyncapi.yaml`](./pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
 > Java 源码基线：无；本文 Java/GaussDB 内容均为 target-only design
 > 数据库约束：集中式 GaussDB
 > JDBC 约束：openGauss JDBC `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`
@@ -19,11 +20,11 @@ GaussDB Schema 以 pi-mono 当前 SQLite Schema 为唯一基线，执行物理�
 - 列名、可空性、主键、唯一索引、普通索引和 migration 顺序完全一致。
 - `sessions`、`session_entries`、`session_sequences`、`branch_entries`、`branch_tips`、`session_materialized`、`entry_materialized` 和 `migrations` 均一对一保留。
 - 只删除 SQLite 专属的 `WITHOUT ROWID`；sequence 使用 `BIGINT`，时间使用 `TIMESTAMPTZ(3)`，JSON document 使用 `JSONB`。
-- ID、parent、branch、tip、type 和 cwd 使用不带长度的 GaussDB `VARCHAR`；不把任意字符串 ID 强行收窄为 UUID，也不引入 SQLite 没有的长度约束。
+- migration、session、entry、branch 和 tip 标识及引用使用 `VARCHAR(128)`，entry type 使用 `VARCHAR(64)`，`cwd` 使用 `VARCHAR(512)`；不把字符串 ID 强行改为 UUID。
 - 不增加 revision、operation、request hash、expected leaf、幂等表、额外搜索表、外键、CHECK、触发器或其他 GaussDB 专属结构。
 - 事务内的 SQL 顺序、active leaf、materialized projection 和 branch cache 行为与 SQLite 一致。
 
-这意味着 GaussDB 保持 SQLite Schema 的表、列和约束模型，只把列声明适配为 GaussDB 原生语义类型。类型适配会把时间对齐口径从原始字符串改为同一时间点，把 JSON 对齐口径从原文字节改为解码后的结构。
+这意味着 GaussDB 保持 SQLite Schema 的表、列和键模型，只调整列类型并应用已批准的显式字符长度。类型适配会把时间对齐口径从原始字符串改为同一时间点，把 JSON 对齐口径从原文字节改为解码后的结构。
 
 ![SQLite-aligned GaussDB architecture](./diagrams/memory/memory-architecture.svg)
 
@@ -55,6 +56,8 @@ SQLite backend 使用一个进程内 `SerialOperationQueue` 串行化数据库�
 如果未来需要多个服务实例并发写同一 session，必须另立设计版本；不能在本版本中隐式增加 revision、行锁协议或幂等表。
 
 数据库兼容模式必须保留空字符串，不得把空字符串转换为 NULL；数据库编码使用 UTF-8，文本比较和索引排序使用与 SQLite 默认 `BINARY` 接近的大小写敏感二进制 collation。连接池初始化每个数据库会话为 UTC，JDBC 使用 typed parameter，不依赖 `DateStyle` 或隐式字符串转换。这些是部署前提，不增加表、列或索引。
+
+应用和导入器必须在 JDBC 写入前按字段检查 128、64 和 512 字符上限，超长值返回稳定校验错误，不得截断后写入。PG-compatible 模式下 `VARCHAR(n)` 的 `n` 按字符计算；中文、emoji 等 UTF-8 多字节值仍必须通过目标服务端和定制 JDBC 组合验证。
 
 原生类型会比 SQLite TEXT 更早拒绝非法值。导入前必须确认 `sessions.created_at` 和每个 `session_entries.timestamp` 可解析为时间点，四个 JSON 列均为合法 JSON；`migrations.applied_at` 由目标 migration runner 直接以 typed parameter 写入。`TIMESTAMPTZ(3)` 只保留毫秒精度；`JSONB` 不保留空白、对象键顺序或重复键。
 
@@ -92,7 +95,7 @@ SQLite `applyMigrations()` 先建立 `migrations(id, applied_at)`，再按顺序
 
 entry payload 在 SQLite 中是 type-specific JSON TEXT。base 字段 `id`、`parentId`、`timestamp` 和 `type` 分别保存在固定列中，读取时重新组合为 `SessionTreeEntry`。目标 GaussDB 把该 JSON TEXT 适配为 `JSONB`，所以行为对齐比较解码结构，不比较 JSON 原文。
 
-默认 session id 是 UUIDv7，但 `SessionCreateOptions.id` 允许调用方提供任意字符串；常规 entry id 还是 UUIDv7 的末 8 位，底层校验只要求非空字符串。因此 ID 列不能统一改成 `UUID`。这也是本版本使用无长度 `VARCHAR`、而不增加格式或长度约束的直接原因。
+默认 session id 是 UUIDv7，但 `SessionCreateOptions.id` 允许调用方提供任意字符串；常规 entry id 还是 UUIDv7 的末 8 位，底层校验只要求非空字符串。因此 ID 列不能统一改成 `UUID`。本文的显式 `VARCHAR(n)` 是 GaussDB 目标产品约束，不是 pi SQLite 源码已有的长度保证。
 
 源码证据：
 
@@ -158,14 +161,14 @@ SQLite `appendEntry()` 在同一事务中：
 
 | SQLite 表 | GaussDB 表 | 列对齐 | 允许的适配 |
 |---|---|---|---|
-| `migrations` | `migrations` | `id`, `applied_at` | string → `VARCHAR`；time → `TIMESTAMPTZ(3)` |
-| `sessions` | `sessions` | `id`, `created_at`, `cwd`, `parent_session_id`, `metadata`, `active_leaf_id` | string → `VARCHAR`；time → `TIMESTAMPTZ(3)`；JSON → `JSONB` |
-| `session_entries` | `session_entries` | `session_id`, `id`, `entry_seq`, `parent_id`, `type`, `timestamp`, `payload` | string → `VARCHAR`；sequence → `BIGINT`；time → `TIMESTAMPTZ(3)`；JSON → `JSONB` |
-| `session_sequences` | `session_sequences` | `session_id`, `next_seq` | string → `VARCHAR`；sequence → `BIGINT` |
-| `branch_entries` | `branch_entries` | `session_id`, `branch_id`, `entry_id`, `entry_seq` | string → `VARCHAR`；sequence → `BIGINT` |
-| `branch_tips` | `branch_tips` | `session_id`, `tip_id`, `branch_id` | string → `VARCHAR` |
-| `session_materialized` | `session_materialized` | `session_id`, `payload` | string → `VARCHAR`；JSON → `JSONB` |
-| `entry_materialized` | `entry_materialized` | `session_id`, `entry_seq`, `type`, `payload` | string → `VARCHAR`；sequence → `BIGINT`；JSON → `JSONB` |
+| `migrations` | `migrations` | `id`, `applied_at` | `id` → `VARCHAR(128)`；time → `TIMESTAMPTZ(3)` |
+| `sessions` | `sessions` | `id`, `created_at`, `cwd`, `parent_session_id`, `metadata`, `active_leaf_id` | ID/reference → `VARCHAR(128)`；`cwd` → `VARCHAR(512)`；time → `TIMESTAMPTZ(3)`；JSON → `JSONB` |
+| `session_entries` | `session_entries` | `session_id`, `id`, `entry_seq`, `parent_id`, `type`, `timestamp`, `payload` | ID/reference → `VARCHAR(128)`；`type` → `VARCHAR(64)`；sequence → `BIGINT`；time → `TIMESTAMPTZ(3)`；JSON → `JSONB` |
+| `session_sequences` | `session_sequences` | `session_id`, `next_seq` | `session_id` → `VARCHAR(128)`；sequence → `BIGINT` |
+| `branch_entries` | `branch_entries` | `session_id`, `branch_id`, `entry_id`, `entry_seq` | ID/reference → `VARCHAR(128)`；sequence → `BIGINT` |
+| `branch_tips` | `branch_tips` | `session_id`, `tip_id`, `branch_id` | ID/reference → `VARCHAR(128)` |
+| `session_materialized` | `session_materialized` | `session_id`, `payload` | `session_id` → `VARCHAR(128)`；JSON → `JSONB` |
+| `entry_materialized` | `entry_materialized` | `session_id`, `entry_seq`, `type`, `payload` | `session_id` → `VARCHAR(128)`；`type` → `VARCHAR(64)`；sequence → `BIGINT`；JSON → `JSONB` |
 
 目标 Schema 不包含任何第九张业务表。
 
@@ -173,7 +176,7 @@ SQLite `appendEntry()` 在同一事务中：
 
 | 表 | 作用 | 关键内容和关系 | 数据性质 |
 |---|---|---|---|
-| [`migrations`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations.ts#L30-L54) | 记录已成功执行的 Schema migration，供 migration runner 在启动时判断哪些 migration 不应重复执行。 | `id` 是 migration 标识，`applied_at` 是应用时间；每个 migration SQL 与账本行在同一事务中提交。 | Schema 迁移账本，不属于 session 业务数据。 |
+| [`migrations`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations.ts#L30-L54) | 数据库升级的“已完成清单”：记录哪些建表或改表脚本已经成功执行，避免下次启动时重复升级。 | `id` 保存脚本名，`applied_at` 保存成功时间；脚本 SQL 和登记行在同一事务中同时提交，任一失败就同时回滚。 | 只服务于数据库升级，不保存 session 或 entry 数据。 |
 | [`sessions`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L294-L365) | 保存每个 session 的主记录，用于 create、open、list、fork、head 读取和 delete。 | 保存创建时间、`cwd`、可选的父 session 和 metadata；`active_leaf_id` 保存当前活动 leaf，逻辑上指向同 session 的 `session_entries.id`。 | session 存在性、基本元数据和当前 head 的权威记录。 |
 | [`session_entries`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L367-L459) | 保存 session 的完整 append log 和树形 entry 历史，支持 entry 读取、分页、分支查询和 context 重建。 | `entry_seq` 确定追加顺序；`parent_id` 是同 session entry 父链的逻辑引用；`type` 和 `payload` 组合恢复具体 `SessionTreeEntry`。 | 权威 append log；`parent_id` 是分支树的事实源。 |
 | [`session_sequences`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-sequences.ts#L1-L16) | 为每个 session 保存下一个可分配的 `entry_seq`，使 append 按稳定的 64 位序号排序。 | create 时写入 `next_seq = 1`；append 先读取当前值，成功写入 entry 后在同一事务内递增。 | 每个 session 一行的序号分配运行状态；缺行被视为非法 session。 |
@@ -184,33 +187,48 @@ SQLite `appendEntry()` 在同一事务中：
 
 所有表间关系都是由应用在事务内维护的逻辑关系，不是数据库外键。会话树以 `session_entries.parent_id` 为权威父链；`branch_entries` 和 `branch_tips` 只是该父链的可重建查询缓存；`session_materialized` 和 `entry_materialized` 是由 append log 累积生成的读优化投影。这些职责说明不增加表、列、约束或索引。
 
+`migrations` 可以理解为一张很小的数据库升级记录表。假设 `001_initial.sql` 和 `002_branch_tips.sql` 已成功执行，表中可能如下（时间仅为示例）：
+
+| `id` | `applied_at` |
+|---|---|
+| `001_initial.sql` | `2026-08-03T10:00:00.000Z` |
+| `002_branch_tips.sql` | `2026-08-03T10:00:01.000Z` |
+
+应用下次启动时看到这两个 `id`，就知道基础表和 `branch_tips` 升级已完成，不会重新执行这两个 SQL 脚本。如果以后代码新增 `003_xxx.sql`，表中还没有它，系统才会执行并在成功后登记一行。
+
 ### 4.2 类型映射
 
 | SQLite 语义 | GaussDB 声明 | 对齐口径与理由 |
 |---|---|---|
-| 标识符、parent、branch、tip `TEXT` | `VARCHAR` | pi 接受任意字符串 ID；使用不带 `(n)` 的可变字符串，不增加 UUID 或长度约束 |
-| entry/materialized type `TEXT` | `VARCHAR` | 保留当前和未来 discriminator 的字符串接受域，不增加枚举或长度约束 |
+| migration/session/entry/branch/tip 标识及引用 `TEXT` | `VARCHAR(128)` | 16 个同类列统一长度；与现有 CampusAgent `Identifier` / `SessionId` 的 128 字符上限一致 |
+| entry/materialized type `TEXT` | `VARCHAR(64)` | 当前最长 entry type 为 21 字符；64 保留后续 discriminator 扩展空间，不改为 ENUM |
 | sequence `INTEGER` | `BIGINT` | 保留 SQLite INTEGER 的 64 位范围 |
 | ISO timestamp `TEXT` | `TIMESTAMPTZ(3)` | 比较同一 Instant；对外统一输出 UTC 三位毫秒格式 |
 | JSON document `TEXT` | `JSONB` | 比较解码结构；接受 JSONB 规范化，不比较原文字节 |
 | nullable metadata `TEXT` | nullable `JSONB` | SQL `NULL` 表示没有 metadata；不得与 JSON `null` 混淆 |
-| cwd `TEXT` | `VARCHAR` | 路径是无稳定长度上限的原始字符串，因此不声明 `(n)` |
+| cwd `TEXT` | `VARCHAR(512)` | Managed Agent 的 `cwd` 由服务端解析为受控规范绝对路径；512 是目标路径上限 |
 
 `JSONB` 而不是 `JSON` 是本版本明确选择的 GaussDB 原生类型。它在写入时验证 JSON，并以规范化结构保存；因此会移除无语义空白、重排对象键并只保留重复键的最后一个值。若产品要求 JSON 原文字节可逆，应另行把该映射改为 GaussDB `JSON`，不能在不增加原文列的情况下同时获得 JSONB 规范化和字节保真。
 
-GaussDB 官方字符类型允许 `VARCHAR` 不指定 `(n)`，其存储上限由行和列规格决定。本版本用该声明承载所有任意字符串，既使用 GaussDB 原生可变字符类型，又不把 pi 未限定长度的字段收窄为 `VARCHAR(n)`；同样不会把它们误声明为 `UUID` 或 ENUM。
+[`agent-metadata-gaussdb-design/schema.sql`](./agent-metadata-gaussdb-design/schema.sql#L7) 中 Agent ID、resource type 和 name 分别使用明确的 `VARCHAR(64)`、`VARCHAR(16)` 和 `VARCHAR(128)`。Memory 复用的是“有界字段显式声明长度、同一逻辑域保持同型”这一规则，不盲目复制具体数字：Memory `session_id` 已有 [128 字符协议上限](./pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml#L548)，而 `thinking_level_change` 已超过 16 字符。
+
+上述 `VARCHAR(n)` 会缩小 SQLite `TEXT` 的可接受值域，因此它们是用户批准的 target-only 产品约束，不得表述为 pi 源码事实。目标实现不增加独立长度 `CHECK`，但 API、Java validator、importer 和 DDL 必须使用同一上限。
+
+`cwd` 存在完整列索引 `idx_sessions_cwd`，因此不使用未经验证的超长路径上限。`VARCHAR(512)` 是受控 Managed Agent 路径的目标上限，不代表对所有数据库编码和索引页配置的理论保证；第 9.4 节必须使用 512 字符的最大 UTF-8 值实测该索引。
 
 ### 4.3 差异分类
 
 | 差异 | 分类 | 是否改变结构 |
 |---|---|---|
 | 删除 `WITHOUT ROWID` | GaussDB 语法适配 | 否 |
-| 任意字符串 `TEXT` → 无长度 `VARCHAR` | GaussDB 类型适配 | 否；字符串值域不增加业务长度约束 |
+| 标识及引用 `TEXT` → `VARCHAR(128)` | 用户批准的产品约束 | 不改变表或列集合；超过 128 字符的值被拒绝 |
+| type `TEXT` → `VARCHAR(64)` | 用户批准的产品约束 | 不改变 discriminator 集合；超过 64 字符的值被拒绝 |
+| cwd `TEXT` → `VARCHAR(512)` | 用户批准的产品约束 | 不改变列用途；受控规范路径不得超过 512 字符 |
 | `INTEGER` → `BIGINT` | GaussDB 类型适配 | 否 |
 | ISO timestamp `TEXT` → `TIMESTAMPTZ(3)` | 用户批准的 GaussDB 原生类型适配 | 否；改变值校验、表示和排序口径 |
 | JSON document `TEXT` → `JSONB` | 用户批准的 GaussDB 原生类型适配 | 否；改变值校验和规范化口径 |
 
-以上有意差异不是产品功能扩展、安全强化或架构变更，不得据此增加表、列、约束、索引或触发器。
+`VARCHAR(n)` 上限明确分类为产品约束；时间和 JSON 变化是 GaussDB 原生类型适配。这些差异都不是安全强化或架构变更，不得据此增加表、列、独立 CHECK、索引或触发器。
 
 ### 4.4 明确禁止的结构
 
@@ -272,7 +290,7 @@ command 不包含 operation id、expected revision 或 expected leaf。并发模
 | 驱动类 | `org.opengauss.Driver` |
 | URL | `jdbc:opengauss://host:port/database` |
 | Java API | `DataSource`, `Connection`, `PreparedStatement`, `ResultSet` |
-| VARCHAR | `setString` / `getString`；所有字符串列均不声明 `(n)` |
+| VARCHAR(n) | `setString` / `getString`；写入前分别校验 128、64 和 512 字符上限，超长值返回 validation error，不依赖数据库截断 |
 | BIGINT | `setLong` / `getLong`；读取 nullable 值时同时检查 `wasNull()` |
 | TIMESTAMPTZ(3) | 以 UTC `OffsetDateTime` 表示 Instant，并通过 JDBC 4.2 typed binding 读写；对外规范化为 UTC 三位毫秒 ISO 字符串 |
 | JSONB | 写入使用 JSON String 加 `CAST(? AS JSONB)`；读取使用 `getString()` 后交给统一 JSON codec，不依赖输出键顺序 |
@@ -287,23 +305,23 @@ DDL 分为 bootstrap、`001_initial.sql` 和 `002_branch_tips.sql`。migration i
 
 ```sql
 CREATE TABLE IF NOT EXISTS migrations (
-    id          VARCHAR        PRIMARY KEY,
+    id          VARCHAR(128)   PRIMARY KEY,
     applied_at  TIMESTAMPTZ(3) NOT NULL
 );
 ```
 
-应用仍按 `SELECT id FROM migrations ORDER BY applied_at, id` 判断已执行 migration。每个 migration 和对应 `migrations` insert 在同一事务中完成，`applied_at` 以 UTC `OffsetDateTime` typed parameter 写入。
+启动时，migration runner 先读取这张表：已有 `id` 的脚本直接跳过，尚未登记的脚本才执行。每个脚本和对应 `migrations` insert 在同一事务中完成，`applied_at` 以 UTC `OffsetDateTime` typed parameter 写入。所有 migration `id` 必须为 1–128 字符，超长脚本名在发布检查阶段拒绝。
 
 ### 6.2 `001_initial.sql`
 
 ```sql
 CREATE TABLE IF NOT EXISTS sessions (
-    id                 VARCHAR        PRIMARY KEY,
+    id                 VARCHAR(128)   PRIMARY KEY,
     created_at         TIMESTAMPTZ(3) NOT NULL,
-    cwd                VARCHAR        NOT NULL,
-    parent_session_id  VARCHAR,
+    cwd                VARCHAR(512)   NOT NULL,
+    parent_session_id  VARCHAR(128),
     metadata           JSONB,
-    active_leaf_id     VARCHAR
+    active_leaf_id     VARCHAR(128)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_created_at
@@ -316,11 +334,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_parent
     ON sessions (parent_session_id);
 
 CREATE TABLE IF NOT EXISTS session_entries (
-    session_id  VARCHAR        NOT NULL,
-    id          VARCHAR        NOT NULL,
+    session_id  VARCHAR(128)   NOT NULL,
+    id          VARCHAR(128)   NOT NULL,
     entry_seq   BIGINT         NOT NULL,
-    parent_id   VARCHAR,
-    type        VARCHAR        NOT NULL,
+    parent_id   VARCHAR(128),
+    type        VARCHAR(64)    NOT NULL,
     timestamp   TIMESTAMPTZ(3) NOT NULL,
     payload     JSONB          NOT NULL,
     PRIMARY KEY (session_id, id)
@@ -336,15 +354,15 @@ CREATE INDEX IF NOT EXISTS idx_session_entries_session_type
     ON session_entries (session_id, type);
 
 CREATE TABLE IF NOT EXISTS session_sequences (
-    session_id  VARCHAR PRIMARY KEY,
-    next_seq    BIGINT  NOT NULL
+    session_id  VARCHAR(128) PRIMARY KEY,
+    next_seq    BIGINT       NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS branch_entries (
-    session_id  VARCHAR NOT NULL,
-    branch_id   VARCHAR NOT NULL,
-    entry_id    VARCHAR NOT NULL,
-    entry_seq   BIGINT  NOT NULL,
+    session_id  VARCHAR(128) NOT NULL,
+    branch_id   VARCHAR(128) NOT NULL,
+    entry_id    VARCHAR(128) NOT NULL,
+    entry_seq   BIGINT       NOT NULL,
     PRIMARY KEY (session_id, branch_id, entry_id)
 );
 
@@ -358,15 +376,15 @@ CREATE INDEX IF NOT EXISTS idx_branch_entries_session_entry
     ON branch_entries (session_id, entry_id);
 
 CREATE TABLE IF NOT EXISTS session_materialized (
-    session_id  VARCHAR PRIMARY KEY,
-    payload     JSONB   NOT NULL
+    session_id  VARCHAR(128) PRIMARY KEY,
+    payload     JSONB        NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS entry_materialized (
-    session_id  VARCHAR NOT NULL,
-    entry_seq   BIGINT  NOT NULL,
-    type        VARCHAR NOT NULL,
-    payload     JSONB   NOT NULL,
+    session_id  VARCHAR(128) NOT NULL,
+    entry_seq   BIGINT       NOT NULL,
+    type        VARCHAR(64)  NOT NULL,
+    payload     JSONB        NOT NULL,
     PRIMARY KEY (session_id, entry_seq, type)
 );
 
@@ -374,15 +392,15 @@ CREATE INDEX IF NOT EXISTS idx_entry_materialized_session_type_seq
     ON entry_materialized (session_id, type, entry_seq);
 ```
 
-与 SQLite `001_initial.sql` 相比只做列类型和语法调整：删除 `WITHOUT ROWID`，任意字符串使用无长度 `VARCHAR`，sequence 使用 `BIGINT`，时间使用 `TIMESTAMPTZ(3)`，JSON document 使用 `JSONB`。表、列、列顺序、可空性、主键、唯一约束和索引均不改变。
+与 SQLite `001_initial.sql` 相比只做列类型和语法调整：删除 `WITHOUT ROWID`，标识及引用使用 `VARCHAR(128)`，type 使用 `VARCHAR(64)`，`cwd` 使用 `VARCHAR(512)`，sequence 使用 `BIGINT`，时间使用 `TIMESTAMPTZ(3)`，JSON document 使用 `JSONB`。表、列、列顺序、可空性、主键、唯一约束和索引均不改变。
 
 ### 6.3 `002_branch_tips.sql`
 
 ```sql
 CREATE TABLE IF NOT EXISTS branch_tips (
-    session_id  VARCHAR NOT NULL,
-    tip_id      VARCHAR NOT NULL,
-    branch_id   VARCHAR NOT NULL,
+    session_id  VARCHAR(128) NOT NULL,
+    tip_id      VARCHAR(128) NOT NULL,
+    branch_id   VARCHAR(128) NOT NULL,
     PRIMARY KEY (session_id, tip_id),
     UNIQUE (session_id, branch_id)
 );
@@ -449,7 +467,7 @@ GaussDB 直接使用 `branch_entries` 和 `branch_tips`：
 
 ![SQLite-aligned context rebuild](./diagrams/memory/memory-context-rebuild.svg)
 
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L227)
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L228)
 
 ```text
 leaf = sessions.active_leaf_id
@@ -492,11 +510,12 @@ GaussDB 保持相同的显式删除顺序，不使用 `ON DELETE CASCADE` 替代
 
 列转换规则：
 
-- ID、cwd 和 type 原字符串写入无长度 `VARCHAR`。
+- migration/session/entry/branch/tip 标识及引用在写入前校验不超过 128 字符，type 不超过 64 字符，`cwd` 不超过 512 字符。
 - sequence 以 64 位有符号整数复制。
 - `created_at` 和 `timestamp` 必须解析为 Instant，再以 `TIMESTAMPTZ(3)` 写入；迁移只接受毫秒精度，禁止静默截断或舍入更高精度。
 - metadata 和三个 payload 列必须先解析为 JSON，再以 JSONB 写入。
-- 非法 timestamp、非法 JSON 或不可表示值进入迁移错误报告；对应 session 不进入目标库。
+- 超长字符串不得截断；迁移错误报告必须包含表、列、主键、实际字符数和允许上限。
+- 非法 timestamp、非法 JSON、超长字符串或其他不可表示值进入迁移错误报告；对应 session 不进入目标库。
 
 必须校验：
 
@@ -523,7 +542,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 - 表名集合严格等于 8 张 SQLite 核心表。
 - 每张表列名、可空性和列顺序一致。
 - 主键、唯一索引、普通索引名称及列顺序一致。
-- 类型差异严格等于：19 个任意字符串列为无长度 `VARCHAR`，4 个 sequence 列为 `BIGINT`，3 个时间列为 `TIMESTAMPTZ(3)`，4 个 JSON document 列为 `JSONB`。
+- 类型差异严格等于：16 个标识或引用列为 `VARCHAR(128)`，2 个 type 列为 `VARCHAR(64)`，`sessions.cwd` 为 `VARCHAR(512)`，4 个 sequence 列为 `BIGINT`，3 个时间列为 `TIMESTAMPTZ(3)`，4 个 JSON document 列为 `JSONB`。
 - `002_branch_tips.sql` 执行后删除 `idx_branch_entries_session_branch`。
 - 不存在 revision、operation、search document 或其他额外表/列。
 
@@ -551,7 +570,8 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 
 - 驱动加载、URL、TLS、认证和连接池。
 - `CREATE TABLE/INDEX IF NOT EXISTS`、`DROP INDEX IF EXISTS`。
-- 无长度 VARCHAR primary key、复合 primary key、composite unique index、Unicode、空字符串和二进制等价排序。
+- `VARCHAR(128)`、`VARCHAR(64)` 和 `VARCHAR(512)` 的 `n-1`、`n`、`n+1` 字符边界，以及中文、emoji、空字符串和禁止静默截断。
+- 最大长度值用于 primary key、复合 primary key、composite unique index 和 `idx_sessions_cwd` 时的写入、查询与二进制等价排序。
 - BIGINT sequence 的绑定与读取。
 - TIMESTAMPTZ(3) 的 UTC、非 UTC offset、毫秒精度、排序和 JDBC typed binding。
 - JSONB 的 object、array、scalar、JSON null、Unicode、转义、大 payload 和数值往返。
@@ -562,8 +582,8 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 
 ### 9.5 验收标准
 
-- SQLite 和 GaussDB Schema diff 只包含 `WITHOUT ROWID` 删除，以及已批准的无长度 `VARCHAR`、`BIGINT`、`TIMESTAMPTZ(3)`、`JSONB` 类型映射。
-- 相同数据产生相同的 session metadata、entry、active leaf、projection、branch query 和 context；timestamp 按 Instant 等价，JSON 按解码结构等价，其余字符串完全相等。
+- SQLite 和 GaussDB Schema diff 只包含 `WITHOUT ROWID` 删除，以及已批准的 `VARCHAR(128)`、`VARCHAR(64)`、`VARCHAR(512)`、`BIGINT`、`TIMESTAMPTZ(3)`、`JSONB` 类型映射。
+- 符合目标长度上限的相同数据产生相同的 session metadata、entry、active leaf、projection、branch query 和 context；timestamp 按 Instant 等价，JSON 按解码结构等价，其余字符串完全相等。
 - GaussDB Schema 中没有 SQLite 基线之外的业务表、列、约束、索引或 trigger。
 - 所有 DDL 在目标集中式 GaussDB 和指定 JDBC JAR 上通过 compatibility suite。
 
@@ -591,7 +611,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 | TD-MEM-07 | 不增加 revision 或幂等 operation | 禁止额外设计 |
 | TD-MEM-08 | 不建立 GaussDB 搜索投影表 | FTS5 无直接语法/类型映射 |
 | TD-MEM-09 | Repository 保持 SQLite 串行写模型 | SQLite 运行行为对齐 |
-| TD-MEM-10 | 任意字符串 ID、cwd 和 type 映射为无长度 `VARCHAR` | 使用 GaussDB 原生字符类型，同时避免 UUID、ENUM 或长度约束 |
+| TD-MEM-10 | 16 个标识及引用列使用 `VARCHAR(128)`，2 个 type 列使用 `VARCHAR(64)`，`cwd` 使用 `VARCHAR(512)` | 用户批准的 target-only 产品约束；不使用 UUID 或 ENUM |
 
 ## 12. 官方能力依据
 
@@ -617,6 +637,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.10 | 2026-08-03 | 参照 Agent 元数据 GaussDB 的显式长度规则，将 16 个标识及引用列改为 `VARCHAR(128)`、2 个 type 列改为 `VARCHAR(64)`、`cwd` 改为 `VARCHAR(512)`；增加应用和迁移长度预检、边界测试和禁止截断规则；将 `migrations` 重写为数据库升级“已完成清单”并补充示例 |
 | v0.9 | 2026-08-03 | 补充 8 张 SQLite/GaussDB 对齐表的集中职责说明，明确 session 主记录、权威 append log、sequence 运行状态、可重建 branch cache、派生 materialized projection 和 migration 账本的边界；不改变 Schema 或运行行为 |
 | v0.8 | 2026-08-03 | 在不改变表、列、列顺序、可空性、主键、唯一约束和索引的前提下使用 GaussDB 原生语义类型：任意字符串改为无长度 `VARCHAR`，时间字段改为 `TIMESTAMPTZ(3)`，JSON document 改为 `JSONB`，sequence 改为 `BIGINT`；迁移和验收改为按字符串、Instant 与解码后 JSON 结构比较 |
 | v0.7 | 2026-08-03 | 将 GaussDB 从“SQLite 行为对齐 + 可靠性扩展”收敛为 SQLite 物理 Schema 对齐；表名、列名、主键、索引和 migration id 与 SQLite 一致；删除 revision、operation、checksum、额外搜索投影、外键和 CHECK；仅删除 `WITHOUT ROWID` 并把 sequence `INTEGER` 映射为 `BIGINT` |

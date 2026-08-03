@@ -44,9 +44,9 @@ sql --> db
 note right of db
 Tables and columns match SQLite.
 Only SQLite WITHOUT ROWID syntax is removed.
-Native semantic types are used.
-Strings use VARCHAR, sequences use BIGINT,
-timestamps use TIMESTAMPTZ(3), and JSON uses JSONB.
+Native semantic types and explicit lengths are used.
+IDs use VARCHAR(128), types use VARCHAR(64),
+cwd uses VARCHAR(512), sequences BIGINT, time TIMESTAMPTZ(3), and JSON JSONB.
 end note
 
 note bottom of sql
@@ -132,67 +132,68 @@ skinparam classBackgroundColor #F7F9FC
 ' - packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts: serializeSummary
 ' Observed behavior: the final SQLite core schema has exactly eight logical tables.
 ' Target adaptation: preserve names, columns, nullability, keys, and indexes.
-' Type adaptation: strings use VARCHAR, sequences use BIGINT, timestamps use TIMESTAMPTZ(3), and JSON documents use JSONB.
+' Target-only product constraint: IDs use VARCHAR(128), types use VARCHAR(64), and cwd uses VARCHAR(512).
+' Type adaptation: sequences use BIGINT, timestamps use TIMESTAMPTZ(3), and JSON documents use JSONB.
 ' Design reason: omit SQLite WITHOUT ROWID and add no other database structure.
 
 class "migrations" as migrations <<table>> {
-  id : varchar [PK]
+  id : varchar(128) [PK]
   --
   applied_at : timestamptz(3)
 }
 
 class "sessions" as sessions <<table>> {
-  id : varchar [PK]
+  id : varchar(128) [PK]
   --
   created_at : timestamptz(3)
-  cwd : varchar
-  parent_session_id : varchar [nullable]
+  cwd : varchar(512)
+  parent_session_id : varchar(128) [nullable]
   metadata : jsonb [nullable]
-  active_leaf_id : varchar [nullable]
+  active_leaf_id : varchar(128) [nullable]
 }
 
 class "session_entries" as session_entries <<table>> {
-  session_id : varchar [PK]
-  id : varchar [PK]
+  session_id : varchar(128) [PK]
+  id : varchar(128) [PK]
   --
   entry_seq : bigint [UQ]
-  parent_id : varchar [nullable]
-  type : varchar
+  parent_id : varchar(128) [nullable]
+  type : varchar(64)
   timestamp : timestamptz(3)
   payload : jsonb
 }
 
 class "session_sequences" as session_sequences <<table>> {
-  session_id : varchar [PK]
+  session_id : varchar(128) [PK]
   --
   next_seq : bigint
 }
 
 class "branch_entries" as branch_entries <<cache>> {
-  session_id : varchar [PK]
-  branch_id : varchar [PK]
-  entry_id : varchar [PK]
+  session_id : varchar(128) [PK]
+  branch_id : varchar(128) [PK]
+  entry_id : varchar(128) [PK]
   --
   entry_seq : bigint
 }
 
 class "branch_tips" as branch_tips <<cache>> {
-  session_id : varchar [PK]
-  tip_id : varchar [PK]
+  session_id : varchar(128) [PK]
+  tip_id : varchar(128) [PK]
   --
-  branch_id : varchar [UQ]
+  branch_id : varchar(128) [UQ]
 }
 
 class "session_materialized" as session_materialized <<projection>> {
-  session_id : varchar [PK]
+  session_id : varchar(128) [PK]
   --
   payload : jsonb
 }
 
 class "entry_materialized" as entry_materialized <<projection>> {
-  session_id : varchar [PK]
+  session_id : varchar(128) [PK]
   entry_seq : bigint [PK]
-  type : varchar [PK]
+  type : varchar(64) [PK]
   --
   payload : jsonb
 }
@@ -218,8 +219,8 @@ Migration 002 clears both cache generations.
 end note
 
 note bottom of migrations
-Only id and applied_at are stored.
-No checksum or schema version column.
+Records database upgrade scripts that already completed.
+Existing IDs are skipped; no checksum or version column.
 end note
 
 @enduml
