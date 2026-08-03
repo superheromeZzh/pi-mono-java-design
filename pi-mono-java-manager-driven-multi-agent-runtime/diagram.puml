@@ -280,6 +280,8 @@ title Managed WebSocket Session Protocol
 ' Target design: the Runtime authenticates a calling service with configured Bearer or mTLS and does not model tenant or user identity.
 ' Target design: calling connect with a wss URI does not mean WebSocket is already established.
 ' Target design: HTTP 101 establishes transport; connect RequestFrame binds the Runtime Session.
+' Target design: typed structured delta is intrinsic to protocol v2; only full_thinking is optional.
+' Target design: chat.send acceptance returns the persisted user message id before origin run events.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
 
 skinparam backgroundColor #FFFFFF
@@ -322,7 +324,7 @@ Transport -> Pool : resolve session_id or create binding\nand validate effective
 Pool -> Hub : atomic subscribe and snapshot
 Hub --> Transport : cursor, active_run, buffered publisher
 Transport --> WS : SessionConnectResult
-WS --> Client : ResponseFrame payload with connection_id,\nsession_id, agent_id, model, active_run
+WS --> Client : ResponseFrame payload with connection_id,\nsession_id, agent_id, model, active_run\nand optional effective full_thinking
 WS -> Transport : subscribe to events()
 Hub --> Transport : events after cursor
 
@@ -331,12 +333,12 @@ alt idle session
   WS -> Transport : request(ChatSend, metadata)
   Transport -> Pool : atomically create primary run
   Pool -> Session : prompt(message, attachments)
-  Pool --> Transport : run_id and accepted
+  Pool --> Transport : run_id, user_message_id, accepted
   Transport --> WS : SessionResponse
   WS --> Client : ResponseFrame ok with payload
   Session -> Hub : AssistantMessageEvent delta
   Hub -> Projection : project for fixed run policy
-  Projection --> Hub : safe structured delta
+  Projection --> Hub : visible update or redacted placeholder\nwith the same canonical run_seq slot
   Hub -> Hub : increment run_seq and update snapshot
   Hub --> Transport : typed SessionEvents
   Transport --> WS : run, message, and tool events
@@ -367,13 +369,19 @@ alt transport disconnects while run is active
   WS -> Transport : connect(command, metadata)
   Transport -> Pool : resolve existing Session
   Pool -> Hub : atomic logical subscribe and snapshot
-  Hub --> Transport : cursor, partial Message, active tools
+  Hub --> Transport : cursor, history watermark, frozen model/thinking,\npartial Message or null, open contents, active tools
   Transport --> WS : SessionConnectResult
   WS --> Client : ResponseFrame snapshot first
   WS -> Transport : subscribe to events()
   Hub --> Transport : deltas with run_seq after snapshot
-  Transport --> WS : typed events
-  WS --> Client : ordered EventFrames
+  Transport --> WS : typed post-snapshot events
+  WS --> Client : EventFrames may arrive immediately
+  Client -> Client : validate connection seq and buffer
+  Client -> WS : chat.history(run_id, through history_seq)
+  WS -> Store : read prior messages and tool results
+  Store --> WS : history through watermark
+  WS --> Client : history response
+  Client -> Client : apply history and snapshot,\nthen release buffered run_seq events
 end
 
 alt explicit abort
@@ -393,7 +401,9 @@ end
 note over WS,Hub
 Event seq is connection-local.
 run_seq is continuous across reconnects.
+Suppressed thinking content uses redacted placeholders.
 Snapshot response is sent before post-cursor deltas.
+Typed structured delta is a protocol v2 invariant.
 end note
 
 note over Client,WS
@@ -533,5 +543,109 @@ note over Provider,ModelManager
 The Provider maps events only.
 Tool execution remains in AgentLoop.
 No fallback to built-in providers.
+end note
+@enduml
+
+@startuml frontend_websocket_client_integration
+title CampusClaw WebSocket Client Integration
+
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (handle, onAgentEvent)
+' Source: modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java (typed event records)
+' Current Java behavior: the browser-facing v1 client replaces accumulated Message snapshots.
+' Target design: a calling service or server SDK authenticates to the Runtime and binds one session.
+' Target design: typed structured delta is intrinsic to protocol v2; full_thinking is optional.
+' Target design: chat.send response precedes origin run events and returns the user message id.
+' Design reason: a client must implement request correlation, reduction, and recovery from the contract alone.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam participant {
+  BackgroundColor #F8FAFC
+  BorderColor #475569
+  FontColor #0F172A
+}
+skinparam ArrowColor #475569
+skinparam sequence {
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor "Browser UI" as Browser
+participant "Calling session service\nor server SDK" as Client
+participant "ChatWebSocketAdapter" as WS
+participant "ManagedSessionPool" as Pool
+participant "ManagedRunHub" as Hub
+participant "Client reducer" as Reducer
+database "Session history" as History
+
+opt browser product
+  Browser -> Client : upstream browser protocol\nout of Runtime scope
+end
+
+Client -> WS : establish wss with\nBearer or mTLS
+WS --> Client : HTTP 101
+Client -> WS : req connect create or resume
+WS -> Pool : bind session and agent
+Pool -> Hub : atomic snapshot and cursor
+Hub --> Pool : active_run or null
+Pool --> WS : connect result
+WS --> Client : res connect payload first
+Client -> Reducer : enter sync and buffer post-snapshot events
+
+alt idle session
+  Client -> WS : req chat.send\nmessage and idempotency key
+  WS -> Pool : persist user message and\natomically reserve run
+  Pool --> WS : run_id and user_message_id
+  WS --> Client : res chat.send before origin events
+  Client -> Reducer : reconcile optimistic user message
+  Hub --> WS : run, message, and tool events
+  WS --> Client : typed EventFrames
+  Client -> Reducer : verify seq and run_seq\nthen reduce by content_index
+  WS --> Client : message.completed\nthen run.completed
+  Client -> Reducer : replace partial message\nthen clear active run
+else active session
+  Client -> WS : req chat.send
+  WS --> Client : res error RUN_ACTIVE
+end
+
+alt sequence gap or recoverable close
+  Client -> Client : backoff and open new socket generation
+  Client -> WS : req connect mode resume
+  WS -> Hub : atomic snapshot and cursor
+  Hub --> WS : run_seq N, history_seq H, frozen model/thinking,\npartial message, open contents, active tools
+  WS --> Client : res connect snapshot first
+  Hub --> WS : events with run_seq greater than N
+  WS --> Client : post-snapshot EventFrames may arrive
+  Client -> Reducer : validate connection seq and buffer
+  Client -> WS : req chat.history(run_id, through H)
+  WS -> History : read prior run messages and tool results
+  History --> WS : history through watermark
+  WS --> Client : res history
+  Client -> Reducer : apply history, snapshot, and open state
+  Client -> Reducer : release buffered events in run_seq order
+else run ended while offline
+  Client -> WS : req chat.history
+  WS -> History : read messages and run records
+  History --> WS : ordered history items
+  WS --> Client : res authoritative history
+  Client -> Reducer : reconcile by message_id and run_id
+end
+
+note over Browser,Client
+Browser authentication and transport are upstream concerns.
+The browser does not hold Runtime service credentials.
+end note
+
+note over Client,Reducer
+Protocol v2 always uses typed structured delta.
+Only full_thinking is capability-negotiated.
+Suppressed thinking updates use redacted placeholders.
+Request id selects the pending payload decoder.
 end note
 @enduml

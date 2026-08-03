@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.3 |
+| 文档版本 | 1.5.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -67,6 +67,10 @@ call_tool
 接收完整 Message 投影。
 本专题的规范性协议文件为
 [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)。
+实现上层服务、SDK 或浏览器侧 Frame reducer 时，按
+[`chat-ws-v2-client-integration.md`](chat-ws-v2-client-integration.md)
+给出的连接、发送、归并、恢复和错误路径实施；浏览器仍只连接上层会话服务，
+不直接持有 Runtime 服务凭据。
 
 CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负责创建
 `session_id`、维护用户会话列表和数量限制、发起业务删除；CampusClaw 把
@@ -87,7 +91,7 @@ CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负�
 
 - 三类元数据到 Agent 运行目录的确定性映射；
 - Agent cwd、Session 隔离和 WebSocket 握手；
-- Session-scoped WebSocket v2、Frame、能力协商、追踪、结构化流事件、恢复和背压；
+- Session-scoped WebSocket v2、Frame、可选能力协商、追踪、结构化流事件、恢复和背压；
 - 服务端 SessionTransport 端口与 WebSocket Adapter 的依赖倒置；
 - Managed Prompt 与 pi-mono-java `Context` 的组装；
 - Tool Manager 的逻辑工具发现和执行；
@@ -226,7 +230,7 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 | ManagedSessionTransport | connect 状态、Session 绑定、强类型请求和事件订阅 | 实现 `connect/request/events/close`，隔离应用语义与网络实现 |
 | ChatWebSocketAdapter | WebSocket Frame、连接序列和网络流控 | 映射 Frame 与 Session 类型，处理首帧、Ping/Pong、1009 和 1013 |
 | ManagedSessionPool | 全局唯一 `session_id` 到 Session 和 active run 的映射 | 内存隔离、恢复、Agent 绑定、运行所有权和淘汰 |
-| ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于连接持续运行，并为订阅者生成原子恢复点 |
+| ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于连接持续维护恢复投影与游标，并为订阅者生成原子恢复点 |
 | ConnectionAuthAdapter | 调用服务身份与 Manager audience 凭据 | 校验服务间 Bearer 或 mTLS 身份并避免凭据进入 Agent 数据 |
 | Attachment service | REST 上传制品、Session 绑定和短期访问能力 | WebSocket 只引用上层已授权的 `attachment_id` |
 | Runtime Session Store | JSONL 消息、Agent/Model 绑定和删除状态 | 按全局 `session_id` 持久化会话，不保存用户或租户身份 |
@@ -776,7 +780,7 @@ Model Manager 持续返回文本、thinking、ToolCall 和终态事件；Provide
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L475)
+[PlantUML 源码](diagram.puml#L485)
 
 具体映射如下：
 
@@ -825,6 +829,14 @@ Gateway，也不允许连接建立后切换 Agent 或 Session。
 [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)。本文解释架构与
 取舍；字段约束、Schema 和示例以该文件为准。后续实施 Java 改造时，以该
 文件替换 pi-mono-java 的 `docs/asyncapi/chat-ws.yaml`。
+
+客户端实现顺序、完整 Happy Path、TypeScript dispatcher、Message reducer、
+thinking、历史、断线恢复和错误动作矩阵集中在
+[`Chat WebSocket v2 客户端接入指南`](chat-ws-v2-client-integration.md)。
+直接连接 Runtime 的客户端是上层会话服务、服务端 SDK 或 CLI。浏览器原生
+`WebSocket` 不能自由设置服务 Bearer Header，也不应获得 mTLS 私钥，因此浏览器
+连接上层会话服务；上层服务若透传相同 Frame，浏览器可以复用指南中的 reducer，
+但其 URL 和认证不属于本 Runtime 协议。
 
 ### 9.2 HTTP Upgrade、服务认证和首帧
 
@@ -920,7 +932,7 @@ WebSocket 使用 HTTP opening handshake，而不是另起一套裸协议握手�
 | 阶段 | 线协议 | 负责内容 | 成功结果 |
 |---|---|---|---|
 | 传输握手 | TLS + HTTP WebSocket Upgrade | mTLS/Bearer、路由、Upgrade headers | HTTP `101` |
-| 应用握手 | 第一个 WebSocket Text Frame：`connect` RequestFrame | 协议版本、capability、session_id、Agent、Model | `connect` ResponseFrame |
+| 应用握手 | 第一个 WebSocket Text Frame：`connect` RequestFrame | 协议版本、可选 capability、session_id、Agent、Model | `connect` ResponseFrame |
 | Session 交互 | 后续 WebSocket Frames | `chat.send`、事件、恢复和流控 | ResponseFrame/EventFrame |
 
 所以 HTTP `Connection: Upgrade` 与 CampusClaw `method: "connect"` 没有字段或
@@ -967,8 +979,7 @@ Frame，且该 Frame 只能是：
       "id": "campusclaw-session-service",
       "version": "1.0.0",
       "platform": "service"
-    },
-    "capabilities": ["structured_message_delta"]
+    }
   }
 }
 ```
@@ -977,10 +988,12 @@ Frame，且该 Frame 只能是：
 关闭。协议区间不包含版本 2 时，先返回 `UNSUPPORTED_PROTOCOL`，再使用
 1002 关闭。
 
-`capabilities` 必须包含 `structured_message_delta`。数组允许携带服务端尚不
-认识的能力名；未知值被忽略且不回显，避免客户端新增可选能力就无法连接。
-客户端声明不构成授权，`full_thinking` 仍需通过调用服务 scope、Agent、
-Model 和可选委托披露上限的全部策略。
+协议 2 固定使用 typed structured delta；它不是 capability，也不存在成功
+连接后降级为累计 Message 或 `replace` 的路径。`capabilities` 可以省略，省略
+等价于空数组。当前已知的可选增强只有 `full_thinking`；未知能力名允许携带，
+但服务端忽略且不回显。客户端声明 `full_thinking` 不构成授权，也不会自动把
+Session 设置为 full，仍需通过调用服务 scope、Agent、Model 和可选委托披露
+上限的全部策略。
 
 `session_id` 始终由上层会话服务提供，CampusClaw 不生成第二套 Runtime
 Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
@@ -998,7 +1011,9 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
   `FORBIDDEN` 拒绝，避免泄露 Session 是否绑定到其他 Agent。
 
 `mode=create` 的重试对相同 `session_id`、`agent_id` 和 `model_id` 保持
-幂等；同一 `session_id` 请求不同 Agent 绑定时拒绝。上层业务删除后，Runtime
+幂等；create Response 在网络中丢失时，调用方在新连接上使用完全相同的
+三个标识重试 `mode=create`，不直接改用可能返回 `SESSION_NOT_FOUND`
+的 resume。同一 `session_id` 请求不同 Agent 绑定时拒绝。上层业务删除后，Runtime
 记录删除状态，该 `session_id` 不得重新用于 `mode=create`。
 
 成功的 connect Response 返回：
@@ -1016,9 +1031,10 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
     "model": {"model_id": "model-a", "name": "Model A"},
     "session": {"state": "idle", "thinking": "hidden"},
     "limits": {
-      "max_frame_bytes": 1048576,
+      "max_message_bytes": 1048576,
       "max_connection_buffer_bytes": 4194304,
       "heartbeat_seconds": 20,
+      "pong_timeout_seconds": 10,
       "connect_timeout_seconds": 5
     },
     "features": {
@@ -1044,21 +1060,28 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
         "message.completed",
         "run.completed"
       ],
-      "capabilities": ["structured_message_delta"]
+      "capabilities": []
     },
     "active_run": null
   }
 }
 ```
 
-`features.methods/events/capabilities` 是客户端声明、服务能力、调用服务授权和
-Agent 配置共同过滤后的稳定有序列表。它用于发现和降级，不构成调用授权；
-动态 active-run 状态、附件归属以及 Model/Tool 权限仍在每次请求或执行时
-校验。
+`features.methods` 由服务能力、调用服务授权和 Agent 配置共同过滤，但
+`chat.history` 是快照恢复必备方法，每个成功 connect 的列表都必须包含；
+调用服务无权读取投影历史时直接拒绝 connect。
+`features.events` 必须按固定顺序返回上述全部八类 Chat 事件，不允许
+缺少 `message.completed` 或 `run.completed` 等终态事件。
+`features.capabilities` 只返回可选增强能力，合法结果可以是 `[]` 或
+`["full_thinking"]`。这些列表用于发现和降级，不构成调用授权；动态
+active-run 状态、附件归属以及 Model/Tool 权限仍在每次请求或执行时校验。
 
-恢复时 `active_run` 可包含 `run_id`、快照对应的 `run_seq`、当前
-`message_snapshot` 和 `active_tools`。connect 成功后任何试图再次调用
-`connect` 或更换 Agent/Session 的请求都返回 `INVALID_REQUEST`；创建新
+恢复时 `active_run` 包含 `run_id`、快照对应的 `run_seq/history_seq`、
+冻结的 `model_id/thinking`、可为 null 的当前 `message_snapshot`、以
+`content_index` 字符串为 key 的 `open_contents` 对象和 `active_tools`。
+connect 成功后任何
+试图再次调用 `connect` 或更换 Agent/Session 的请求都返回
+`INVALID_REQUEST`；创建新
 Session 必须由上层服务分配新的 `session_id` 并建立新连接。
 
 ### 9.3 Frame、追踪、标识符和命令
@@ -1075,10 +1098,25 @@ Error         = {code, message, details?, retryable?, retry_after_ms?}
 ```
 
 所有 Frame 都是封闭对象，未知顶层字段在进入 SessionTransport 前被拒绝。
-`RequestFrame.id` 在连接内由客户端生成且用于关联唯一 Response Frame。命令
-接受成功仅代表服务端已原子接受操作，不代表 run 已完成。
-`EventFrame.seq` 是连接级从 1 开始的单调序列，重连后重新开始；run 事件的
-`payload.run_seq` 则在同一 run 内跨重连连续递增。
+`RequestFrame.id` 在物理连接的整个生命周期内唯一。客户端发送请求时保存
+`id -> method + 成功 payload decoder`；connect 成功后可以并发多个请求，
+Response 可以乱序并与 Event 交错。AsyncAPI 的 `x-method-contracts` 是 method
+到成功 payload Schema 的规范映射。命令接受成功仅代表服务端已原子接受操作，
+不代表 run 已完成。
+
+一个完整 WebSocket UTF-8 Text Message 恰好承载一个 JSON Frame。允许底层
+WebSocket fragmentation，但大小在解压和重组后按完整 JSON 的 UTF-8 字节数
+计算；Binary Message 使用 1003 关闭，非法 UTF-8 或 JSON 使用 1007 关闭。
+
+`EventFrame.seq` 在新连接第一条 EventFrame 上为 1，之后每成功写出一条事件
+恰好加 1；ResponseFrame 不占用 seq，重连后重新从 1 开始。run 事件的
+`payload.run_seq` 从 `run.started=1` 开始，由同一 run 的所有 Message 和 Tool
+事件共同逐一递增，并跨重连连续。实时流上重复、倒退或跳号都触发恢复，客户端
+不得猜测并继续归并。
+
+connect Response 必须先于新连接上的任何 EventFrame。对发起 `chat.send` 的
+连接，成功 Response 必须先于该 run 的 `run.started`；其他观察连接不受这个
+局部排序约束。
 本协议不增加 OpenClaw Gateway 全局快照使用的 `stateVersion`：Session-scoped
 Chat 没有需要同步的全局 presence/health 状态，恢复以连接 `seq`、run
 `run_seq`、active-run 快照和权威 Session 历史完成。
@@ -1120,10 +1158,10 @@ session_id
 
 | method | 关键参数 | 成功 payload 和约束 |
 |---|---|---|
-| `chat.send` | `message`、`attachment_ids[]`、`idempotency_key`、可选 `thinking` | 返回 `run_id + accepted`；同一 Session 已有主 run 时返回 `RUN_ACTIVE` |
-| `chat.steer` | `run_id`、`message`、`idempotency_key` | 向指定 active run 注入 steering message，不新建主 run |
+| `chat.send` | `message`、`attachment_ids[]`、`idempotency_key`、可选 `thinking` | 返回 `run_id + user_message_id + accepted`；同一 Session 已有主 run 时返回 `RUN_ACTIVE` |
+| `chat.steer` | `run_id`、`message`、`idempotency_key` | 返回 `run_id + user_message_id + accepted + idempotent`，向指定 active run 注入消息，不新建主 run |
 | `chat.abort` | `run_id`、`idempotency_key` | 显式终止 run；对同一 run 和 key 重复调用返回相同接受结果 |
-| `chat.history` | 可选 `cursor`、`limit` | 按服务端披露策略分页返回权威历史和下一游标 |
+| `chat.history` | 可选 `cursor`、`limit`、`run_id`、`through_history_seq` | 按服务端披露策略返回按 `history_seq` 排序的 Message/RunRecord 和下一游标；run/水位过滤用于 active-run 恢复 |
 | `session.get` | 无 | 返回 Session、有效 Model、thinking 和 active-run 状态 |
 | `models.list` | 无 | 调用 `listModels(agent_id)`，只返回当前 Agent 可用模型 |
 | `model.set` | `model_id` | 调用 `resolveModel(agent_id, model_id)`；active run 期间拒绝 |
@@ -1134,6 +1172,13 @@ session_id
 协议不提供连接内 `new_session`。`idempotency_key` 在当前
 session_id/command 范围内判重；同 key 同负载返回原
 结果，同 key 不同负载返回 `INVALID_REQUEST`。
+
+`chat.send accepted=true` 的提交边界包含：用户消息已持久化、run_id 已分配、
+active-run 占位已建立，run 所有权已经独立于 WebSocket。调用方可先用临时 ID
+乐观展示用户消息，随后用 `user_message_id` 对齐权威历史。同一
+idempotency_key 的等价重试必须返回同一 `run_id + user_message_id`，即使原
+run 当前仍 active，也不能先返回 `RUN_ACTIVE`。Request 超时不证明服务端没有
+执行；重试使用新的 RequestFrame id 和原 idempotency_key。
 
 附件必须先经上层服务的 REST 接口上传。上层服务完成 tenant/user 归属、
 扫描和业务授权，再把绑定当前 `session_id` 的 `attachment_ids` 交给 Runtime。
@@ -1183,7 +1228,8 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 `ManagedSessionTransport` 实现该接口并依赖 ManagedSessionPool、ManagedRunHub
 和各 Manager。`ChatWebSocketAdapter` 消费接口，不实现接口：它负责 Upgrade
 后的首帧计时、JSON Frame 编解码、请求 ID 关联、连接 `seq`、Ping/Pong、
-单帧限制、发送缓冲以及 close code。应用核心和 `SessionTransport` 类型中
+完整 Text Message 大小限制、发送缓冲以及 close code。应用核心和
+`SessionTransport` 类型中
 不得出现 Spring `WebSocketSession`、`TextMessage` 或 WebSocket close code。
 
 连接恢复时，`connect()` 在同一临界区内注册逻辑订阅、捕获 snapshot/cursor
@@ -1196,7 +1242,7 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 
 ![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
 
-[PlantUML 源码](diagram.puml#L414)
+[PlantUML 源码](diagram.puml#L424)
 
 ### 9.5 流式事件和 Message 投影
 
@@ -1214,6 +1260,10 @@ message.completed
 run.completed
 ```
 
+这套 typed structured delta 是协议 2 的固有行为，不通过 capability 开启。
+所有 v2 客户端都必须实现该事件模型；服务端不发送累计 AssistantMessage，
+也不提供 OpenClaw 式 `replace` 分支。
+
 每个 run 事件都携带 `agent_id`、`session_id`、`run_id`、
 `run_seq` 和时间戳。Message 事件增加 `message_id`；内容更新增加
 `content_index`。Tool 事件增加 `tool_call_id` 和逻辑 `tool_id`。
@@ -1223,7 +1273,7 @@ run.completed
 
 ```text
 text_start / text_delta / text_end
-thinking_start / thinking_delta / thinking_summary / thinking_end
+thinking_start / thinking_delta / thinking_summary / thinking_redacted / thinking_end
 toolcall_start / toolcall_delta / toolcall_end
 ```
 
@@ -1233,9 +1283,34 @@ toolcall_start / toolcall_delta / toolcall_end
 结果，以及可用的 usage、stop reason 和结构化 Error；它是 run 的唯一
 终态事件。
 
+客户端归并规则固定为：
+
+1. `message.started` 先按 `message_id` 创建 streaming Message；
+2. 每个 `content_index` 独立遵循匹配类型的 `start -> delta* -> end`，不同
+   index 可以交错；
+3. `text_delta` 直接追加；`toolcall_delta` 是可能尚不合法的 JSON 文本片段，
+   只累计不解析，最终以 `toolcall_end.arguments` 完整对象为准；
+4. hidden thinking 在最终 Message 中保留不含正文的占位块，使后续
+   `content_index` 不前移；`thinking_summary` 每块最多一次，是 Manager
+   明确提供的完整安全摘要，客户端替换而不追加；
+5. canonical thinking delta/summary 被当前连接抑制时，仍在相同
+   `run_seq` 位置发送不含内容的 `thinking_redacted`，客户端只推进
+   序列；
+6. `message.completed.message` 按相同 message_id 整体替换本地 partial
+   Message，不另插一条；
+7. 一个 run 可以包含多个 Assistant Message 和多个 Tool 周期；每个已开始的
+   Message 恰好有一个终态 `message.completed`；
+8. 每个已发送 `tool.started` 的 Tool 在 `run.completed` 前恰好发送一次
+   `tool.completed`，run 中止时未完成 Tool 使用 `status=aborted`；
+9. `run.completed` 每个 run 恰好一次，必须最后发送，此后不再产生该 run 的
+   事件。
+
 Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，也通过
 `tool.started/updated/completed` 表示 Tool Manager 的实际执行过程。两者
 使用相同 `tool_call_id` 关联，但不能混为一个事件。
+
+完整客户端 reducer 和线协议示例见
+[`客户端接入指南`](chat-ws-v2-client-integration.md#5-message-reducer)。
 
 ### 9.6 Thinking 披露
 
@@ -1243,18 +1318,27 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 已允许的级别，不能通过单次请求提升权限。披露级别固定为
 `hidden < summary < full`：
 
-- `hidden` 是默认值，只发送 `thinking_start` 和 `thinking_end` 状态，不发送
-  原始 thinking 或摘要正文；
+- `hidden` 是默认值，不发送原始 thinking 或摘要正文；除
+  `thinking_start/end` 外，被抑制的 canonical 内容更新使用不含正文的
+  `thinking_redacted` 保持 `run_seq` 连续；
 - `summary` 只发送 Model Manager 明确标记为安全的
-  `thinking_summary`，不得由 CampusClaw 从原始 thinking 合成；
+  `thinking_summary`，每块最多一次且按完整值替换，不得由 CampusClaw
+  从原始 thinking 合成；
 - `full` 必须同时满足调用服务 scope、Agent 策略、Model 能力、可选委托披露
   上限和客户端 `full_thinking` capability；
-- `chat.send.thinking` 只能把当前 Session 允许级别调低，不能临时提升；
+- `full_thinking` 只是可选客户端能力声明，不自动把 Session 设置为 full；
+- `thinking.set(full)` 在有效 capabilities 不包含 `full_thinking` 时返回
+  `FORBIDDEN`，不得静默降级；
+- `chat.send.thinking` 省略时继承当前连接看到的 Session 默认级别，只能把该
+  级别调低，不能临时提升；高于允许级别同样返回 `FORBIDDEN`；
 - 实时事件、connect 恢复快照、`session.get` 和 `chat.history` 使用同一个
   `ThinkingProjectionPolicy`，避免从恢复或历史旁路泄露。
 
-策略在 run 开始时固化为该 run 的不可变投影上下文。中途权限收紧时立即按
-更严格策略投影后续事件，但不重发已经披露的数据。
+请求的 thinking 级别在 run 开始时固化；每条观察连接再按其有效
+capability 做只降低的投影。active-run 快照返回当前连接对该冻结级别的
+有效结果。run 中途不允许 `thinking.set`；若服务授权或 Agent 策略在
+执行中被紧急撤销，服务端终止 run 并按 error/aborted 收束，而不在同一
+连接上无事件地切换投影。
 
 ### 9.7 run 所有权、重连和无竞态快照
 
@@ -1272,7 +1356,10 @@ WebSocket 断开时，Adapter 只取消当前订阅；AgentSession 和 AgentLoop
 ```text
 run_id
 last run_seq
-partial projected Message
+persisted history_seq watermark
+frozen model and thinking projection
+partial projected Message or null
+open content states
 active tools
 terminal outcome
 bounded post-snapshot event buffer
@@ -1281,15 +1368,26 @@ bounded post-snapshot event buffer
 恢复连接时，服务端在同一临界区内完成“注册订阅 + 捕获 cursor/snapshot”：
 
 1. 为连接注册订阅并记录 Hub 当前 cursor；
-2. 从同一状态版本生成 `active_run` 快照；
+2. 从同一状态版本生成 `active_run` 快照；快照同时固定已持久化的
+   `history_seq`、run 的 Model 和当前连接有效 thinking 投影；run 已开始但
+   Assistant Message 尚未
+   开始时 `message_snapshot=null`，`open_contents` 记录已经 start、尚未 end
+   的 text/thinking/toolcall 块；
 3. 先发送 connect Response；
 4. 再按 `run_seq > snapshot.run_seq` 顺序排出订阅缓冲中的事件。
 
 因此快照和新 delta 之间没有丢失窗口，也不会重放已包含在快照中的 delta。
+客户端收到 connect Response 后先缓冲新 EventFrame，调用
+`chat.history(run_id=snapshot.run_id, through_history_seq=snapshot.history_seq)` 并读完
+该过滤历史，恢复用户消息、先前完成的 Assistant Message 和 ToolResult；
+然后应用 partial Message、open_contents 和 active_tools，最后按 `run_seq`
+释放缓冲事件。
 若 run 在断线期间已经结束，connect 返回 `active_run: null`，客户端通过
-`chat.history` 读取已持久化的 `message.completed` 等价终态。客户端发现
-连接 `seq` 或单个 run 的 `run_seq` 缺口时不得猜测缺失文本，应断开并按
-上述流程恢复。
+`chat.history` 读取按 `history_seq` 排列的终态 Message 和 RunRecord，对账
+outcome、usage、stop reason 与 Error。初始排流忽略
+`run_seq <= snapshot.run_seq`，只接受下一连续
+值。客户端发现连接 `seq` 或单个 run 的 `run_seq` 重复、倒退或缺口时不得
+猜测缺失文本，应停止归并并按上述流程恢复。
 
 ### 9.8 流控、心跳和错误
 
@@ -1299,9 +1397,9 @@ Adapter 只有在上一帧发送成功后才请求下一条事件；如果待发
 
 | 限制 | 默认值 | 处理 |
 |---|---:|---|
-| 单 WebSocket frame | 1 MiB | 超限使用 1009 关闭 |
+| 解压、重组后的单个 UTF-8 JSON Text Message | 1 MiB | 超限使用 1009 关闭 |
 | 单连接待发送缓冲 | 4 MiB | 慢消费者使用 1013 关闭，客户端重连恢复 |
-| 原生 Ping/Pong | 20 秒 | 连接超时只取消订阅，不终止 run |
+| 原生 Ping 间隔 / Pong 超时 | 20 秒 / 10 秒 | 超时关闭连接，只取消订阅，不终止 run |
 | 首帧 `connect` | 5 秒 | 超时使用 1008 关闭 |
 
 实际限制在 connect Response 的 `limits` 返回。业务命令失败优先使用
@@ -1331,6 +1429,11 @@ WebSocket Adapter 只在上一帧异步写入成功后向 `events()` Publisher �
 Manager 认证失败不得把上游凭据或响应正文写入 `details`。`retryable` 和
 `retry_after_ms` 只描述同一命令是否适合稍后重试；对可能产生副作用的命令，
 客户端仍必须复用原 `idempotency_key`。
+
+客户端按以下边界处理关闭：1000 默认不自动恢复；1002 停止重试并升级协议；
+1003/1007/1008/1009 先修复消息、编码、策略或大小；1001、1011、1013 以及本地
+观察到的异常断开 1006 使用带抖动的指数退避后 `mode=resume`。1006 不能作为
+线上 Close Frame 发送。无论何种 Close，都不等于 `chat.abort`。
 
 ### 9.9 内存隔离
 
@@ -1404,9 +1507,9 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | 当前位置 | 目标改造 | 分类 |
 |---|---|---|
 | WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
-| `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
+| `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.3.3 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.4.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1416,7 +1519,8 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | `Api` / `ApiProviderRegistry` | 增加 MODEL_MANAGER Api 和 Spring Provider | 架构改造 |
 | `Agent` stream options | 合并不可变 agent_id、session_id 和解析后的 Trace Context metadata | 架构改造 |
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
-| Web 前端 `useChatWs` | 按 message_id/content_index 合并 delta；序列缺口时重连并应用快照 | 架构改造 |
+| Runtime WebSocket 客户端/SDK | 按客户端接入指南实现 connect、pending request、typed delta reducer、幂等与恢复 | 架构改造 |
+| 浏览器 Web 前端 | 连接上层会话服务而非 Runtime；若上层透传相同 Frame，可复用 message_id/content_index reducer，但不得获得 Runtime 服务凭据 | 安全加固 |
 | REST attachment service | 由上层服务完成用户归属和扫描，返回绑定 session_id 的 attachment_id 供 chat.send 引用 | 安全加固 |
 | Legacy CLI | 保持原来的本地 Provider、Tool、Settings 和资源发现路径 | 兼容要求 |
 
@@ -1559,12 +1663,17 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   `payload`，错误响应只允许 `error`；
 - 缺失 `traceparent` 时创建新 trace；合法值传播到 Model/Tool Manager，
   非法值返回 `INVALID_REQUEST`，且任何 trace 字段不进入 Prompt 或 JSONL；
-- capabilities 缺少 `structured_message_delta` 时拒绝连接；未知值被忽略，
-  `full_thinking` 只在客户端声明和全部授权同时满足时出现在有效 features；
-- connect 返回的 methods、events、capabilities 顺序稳定、无重复，并按粗粒度
-  授权过滤；列表披露不会绕过逐请求授权；
+- 省略 capabilities、空数组和未知能力名都可以完成 connect；typed structured
+  delta 始终生效且不出现在 capability 列表，未知值被忽略；
+- `full_thinking` 只在客户端声明和全部授权同时满足时出现在有效 features；
+  未生效时 `thinking.set(full)` 返回 FORBIDDEN 而不静默降级；
+- connect 返回的 methods/capabilities 顺序稳定、无重复且按粗粒度
+  授权过滤，但 methods 必须包含 `chat.history`；events 必须是顺序稳定、
+  无重复的八类完整集合；列表披露不会
+  绕过逐请求授权；
 - `mode=create` 只接受上层提供的 `session_id + agent_id + model_id`，相同
-  绑定重试幂等，不同 Agent 重绑定和已删除 ID 复用被拒绝；
+  绑定重试幂等，create Response 丢失时在新连接上重试 create 而不是
+  resume；不同 Agent 重绑定和已删除 ID 复用被拒绝；
 - `mode=resume` 接受 `session_id + agent_id`，缺失 Session 返回
   `SESSION_NOT_FOUND`，并重新校验保存模型；
 - Upgrade URL 中的业务 query 和 token 被拒绝，首帧 connect 的 5 秒约束
@@ -1577,9 +1686,17 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   `RUN_ACTIVE`；
 - `chat.steer` 和 `chat.abort` 只作用于指定 active `run_id`，重复 abort
   保持幂等；
+- `chat.send` 原子返回同一幂等结果的 `run_id + user_message_id`，发起连接先
+  收到成功 Response 再收到 run 事件；Response 丢失后用新 request id 和原
+  idempotency_key 能取得相同结果；
 - `message.updated` 只携带本次 delta，不携带 OpenClaw 式累计 message 或
   replace；客户端可按 content_index 还原为
   `message.completed` 的最终 Message；
+- text/thinking/toolcall 的 start/update/end 状态机、summary 完整替换、hidden
+  占位块和 `thinking_redacted` 序列占位均可由 reducer 重现；
+- 每个 `tool.started` 在 run 终态前恰好收到一次
+  `tool.completed(done|error|aborted)`；一个 run 多 Message 和
+  `message.completed` 权威替换均可对账；
 - `SessionTransport` 状态机拒绝重复 connect、connect 前 request 和 close 后
   request；`events()` 只允许一个订阅者，`close()` 幂等；
 - 使用假的 `SessionTransport` 可独立测试 WebSocket Frame 映射；使用假的
@@ -1587,14 +1704,22 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   `ManagedSessionTransport`；
 - ManagedSessionPool、ManagedRunHub、AgentSession 和 SessionTransport
   不引用 Spring WebSocket 类型、`TextMessage` 或 close code；
-- 断线期间 run 继续；重连的快照和快照 cursor 之后的 delta 无丢失、无重复；
-- run 在断线期间结束后，`chat.history` 返回持久化终态；
+- 断线期间 run 继续；冻结 Model/Thinking、history 水位、null
+  message_snapshot、开放 text/thinking/toolcall 和 active tools 组成可恢复快照；
+  客户端缓冲 post-snapshot 事件、读完水位历史后再释放，无丢失、无重复；
+- run 在断线期间结束后，`chat.history` 返回带 history_seq 的终态 Message 和
+  RunRecord，能够恢复 outcome、usage、stop reason 和 Error；
+- history `has_more=true` 必须返回 next_cursor，false 时不返回；run/水位过滤在
+  所有 cursor 页保持不变；
 - hidden、summary、full 在实时、快照和历史中保持同一披露结果，未经 Manager
-  标记的摘要不会输出；
+  标记的摘要不会输出；不同投影用 redacted 占位看到连续且可比的
+  canonical run_seq；
 - 未绑定当前 session_id、过期或不存在的 attachment_id 返回
   `INVALID_ATTACHMENT`；用户归属测试在上层会话服务完成；
-- 客户端检测 `seq` 或 `run_seq` 缺口后重连恢复，不拼接未知缺口；
-- 1 MiB frame、4 MiB 缓冲、1009、1013 和 Ping/Pong 行为可重复验证；
+- 客户端检测 `seq` 或 `run_seq` 重复、倒退或缺口后重连恢复，不拼接未知缺口；
+- 一个 UTF-8 Text Message 对应一个 JSON Frame；Binary、非法 UTF-8/JSON、
+  1 MiB 重组后 Message、4 MiB 缓冲、1003/1007/1009/1013 和 Ping/Pong
+  行为可重复验证；
 - Manager 身份交换失败和 Manager 不可用分别返回稳定错误，且错误中无凭据。
 
 ## 13. 设计验收标准
@@ -1614,7 +1739,11 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - 核心标识限定为 connection/session/agent/model/message/run 六类，并明确
   Request Frame `id`、`tool_call_id` 只是局部关联标识；
 - WebSocket 首帧固定 Session，所有命令和事件使用封闭 Frame，成功响应使用
-  `payload`，实时流使用结构化纯 delta；
+  `payload`，协议 2 固有使用结构化纯 delta，不依赖 capability 协商；
+- 客户端接入指南能独立说明调用方角色、Happy Path、请求关联、typed delta
+  reducer、thinking、历史、断线恢复、关闭码和重试动作；
+- chat.send 的 user_message_id、Response/Event 顺序、seq/run_seq、开放内容快照
+  和 RunRecord 历史形成可实现、可恢复的客户端契约；
 - SessionTransport 以 connect/request/events/close 隔离 Session 应用语义和
   WebSocket 网络实现；
 - traceparent 只进入遥测和下游 Manager 调用，有效 features 可发现但不构成授权；
@@ -1629,6 +1758,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.5.0 | 2026-08-03 | 新增客户端接入指南和客户端交互图；将 typed structured delta 固化为协议 2 语义，仅保留 full_thinking 可选能力；补齐 user_message_id、Response/Event 顺序、固定事件集、redacted thinking 序列占位、历史水位快照、Message/Tool reducer、RunRecord 历史、线协议大小与关闭恢复规则，并同步 AsyncAPI 2.4.0 |
 | 1.4.3 | 2026-08-03 | 全文统一为“调用方或组件动作、服务端处理、可观察结果、约束与原因”的行为先行表述；统一既有 Bearer/mTLS 替代认证口径，保持 Frame、Schema 和源码证据不变，并同步 AsyncAPI 2.3.3 |
 | 1.4.2 | 2026-08-03 | 明确 wss URI 是客户端建连指令而不是已建立的 WebSocket；补充 TCP、TLS、HTTP Upgrade、101 和 WebSocket Frame 的真实顺序及复用 HTTP 基础设施的原因；保留完整握手示例并同步 AsyncAPI 2.3.2 |
 | 1.4.1 | 2026-08-03 | 明确 wss URI、HTTP/TLS 握手目标、HTTP/1.1 Upgrade headers、101 协议边界和首个 connect RequestFrame 的分层关系；同步 AsyncAPI 2.3.1 |

@@ -54,15 +54,17 @@ package "pi-mono-java v1 - current" as java_v1 {
 
 package "CampusClaw v2 - target only" as campus_v2 {
   actor "Calling session service" as cc_client
-  component "Session-scoped connection" as cc_conn
+  component "Session-scoped connection A" as cc_conn
+  component "Observer connection B" as cc_observer_conn
   component "ManagedSessionPool" as cc_pool
   component "ManagedRunHub" as cc_hub
   database "Session 1 / immutable Agent A" as cc_session
   actor "Observer client" as cc_observer
 
   cc_client --> cc_conn : connect once
-  cc_observer --> cc_conn : another subscription
+  cc_observer --> cc_observer_conn : separate physical connection
   cc_conn --> cc_pool : globally unique session_id
+  cc_observer_conn --> cc_pool : same session_id
   cc_pool --> cc_session
   cc_session --> cc_hub : zero or one active run
 }
@@ -103,6 +105,7 @@ title WebSocket Handshake and Authentication Comparison
 ' Target design: the Runtime authenticates the calling service with configured Bearer or mTLS, not the end user.
 ' Target design: a wss URI starts establishment; the WebSocket exists only after HTTP 101.
 ' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
+' Target design: typed structured delta is intrinsic to protocol v2; only full_thinking is optional.
 ' Design reason: service credentials stay in transport authentication and never enter chat payloads.
 
 skinparam backgroundColor #FFFFFF
@@ -162,6 +165,8 @@ The HTTPS form is a handshake target, not a REST API.
 HTTP 101 creates transport; connect binds the session.
 The connection cannot switch agent or session.
 Unknown capabilities are ignored and not echoed.
+Typed structured delta is not a capability.
+full_thinking is optional and policy-gated.
 Effective features do not replace request authorization.
 end note
 @enduml
@@ -180,7 +185,7 @@ title Stream and Recovery Comparison
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw clients recover from sequence gaps by reconnecting and reloading authoritative state.
 ' Current Java behavior: message_update sends the accumulated message and disconnect aborts streaming.
-' Target design: ManagedRunHub owns the run and atomically returns a snapshot plus a post-cursor stream.
+' Target design: Pool retains the active-run reference; AgentSession executes; Hub maintains recovery state.
 ' Design reason: network connection lifetime must not define model run lifetime.
 
 skinparam backgroundColor #FFFFFF
@@ -208,6 +213,7 @@ OC -> OC : detect connection or run sequence gap
 OC -> OCH : chat.history(sessionKey)
 OCH --> OC : authoritative messages and in-flight state
 note over OC,OGB
+Chat delta is a standard event, not capability-gated.
 Some chat deltas may be marked dropIfSlow.
 A gap is observable because sequence numbers advance.
 end note
@@ -231,12 +237,14 @@ The run continues without a WebSocket subscriber.
 end note
 CCC -> CCW : reconnect and req connect
 CCW -> MRH : atomically subscribe and capture cursor
-MRH --> CCW : active_run snapshot at run_seq=N
-CCW --> CCC : connect response with full partial message and tools
+MRH --> CCW : active_run snapshot at run_seq=N\nand history_seq=H
+CCW --> CCC : connect response with frozen model/thinking,\npartial message or null, open contents, and tools
+CCC -> CCH : chat.history(runId, through H)
+CCH --> CCC : prior messages and tool results
 MRH --> CCW : deltas after N
 CCW --> CCC : ordered message.updated events
 CCC -> CCH : chat.history if the run ended while offline
-CCH --> CCC : authoritative completed messages
+CCH --> CCC : authoritative messages and RunRecord
 @enduml
 
 @startuml websocket_transport_dependency_inversion_comparison

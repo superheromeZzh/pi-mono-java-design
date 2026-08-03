@@ -3,7 +3,7 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.3.3
+  version: 2.4.0
   description: |
     调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
     客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换
@@ -11,7 +11,7 @@ info:
 
     调用方必须在 101 后五秒内发送首个 `connect` RequestFrame。服务端根据
     `mode` 创建或恢复 `session_id` 对应的 Runtime Session，并校验
-    `agent_id`、`model_id` 和 capabilities；成功后，这条连接在整个生命周期
+    `agent_id`、`model_id` 和可选 capabilities；成功后，这条连接在整个生命周期
     内固定绑定到对应的 `(agent_id, session_id)`。
 
     连接随后承载 RequestFrame、ResponseFrame 和 EventFrame。active run 由
@@ -23,9 +23,13 @@ info:
     不接收或维护 tenant_id、user_id。调用方提供的 `session_id` 必须在一个
     Runtime 部署范围内全局唯一，删除后不得复用。
 
-    协议版本 2 使用 request/response/event Frame 和结构化消息增量，直接替换
-    `/api/ws/chat` 的 v1 格式。调用方不得通过业务查询参数或 URL token 传递
-    身份及 Session 信息，也不能在已绑定的连接内创建另一个 Session。
+    协议版本 2 固定使用 request/response/event Frame 和结构化消息增量，
+    不通过 capability 协商其他累计 Message 格式，并直接替换 `/api/ws/chat`
+    的 v1 格式。调用方不得通过业务查询参数或 URL token 传递身份及 Session
+    信息，也不能在已绑定的连接内创建另一个 Session。
+
+    实现调用方、请求关联、消息归并、断线恢复和错误处理时，先阅读同目录的
+    `chat-ws-v2-client-integration.md`；字段和取值仍以本文件为规范来源。
 
     `https://api.example.com/api/ws/chat` 只是同一 host、port 和 path 的 HTTP
     握手视角，不是 RESTful API，也不表示第二条连接。
@@ -75,18 +79,18 @@ channels:
       ServerEventFrame:
         $ref: '#/components/messages/ServerEventFrame'
 operations:
-  sendRequest:
-    action: send
-    channel:
-      $ref: '#/channels/sessionChat'
-    summary: 调用方先发送 connect RequestFrame；绑定成功后发送当前 Session 的命令请求。
-    messages:
-      - $ref: '#/channels/sessionChat/messages/ClientRequestFrame'
-  receiveResponseOrEvent:
+  receiveRequest:
     action: receive
     channel:
       $ref: '#/channels/sessionChat'
-    summary: 服务端为命令返回同 id 的 ResponseFrame，并按 seq 发送当前 Session 的有序事件。
+    summary: CampusClaw 服务端先接收 connect RequestFrame；绑定成功后接收当前 Session 的命令请求。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ClientRequestFrame'
+  sendResponseOrEvent:
+    action: send
+    channel:
+      $ref: '#/channels/sessionChat'
+    summary: CampusClaw 服务端为命令发送同 id 的 ResponseFrame，并按 seq 发送当前 Session 的有序事件。
     messages:
       - $ref: '#/channels/sessionChat/messages/ServerResponseFrame'
       - $ref: '#/channels/sessionChat/messages/ServerEventFrame'
@@ -135,8 +139,6 @@ components:
                 id: campusclaw-session-service
                 version: 1.0.0
                 platform: service
-              capabilities:
-                - structured_message_delta
         - name: 恢复会话
           payload:
             type: req
@@ -153,7 +155,7 @@ components:
                 version: 1.0.0
                 platform: sdk
               capabilities:
-                - structured_message_delta
+                - full_thinking
         - name: 发送用户消息
           payload:
             type: req
@@ -193,9 +195,10 @@ components:
                 state: running
                 thinking: hidden
               limits:
-                max_frame_bytes: 1048576
+                max_message_bytes: 1048576
                 max_connection_buffer_bytes: 4194304
                 heartbeat_seconds: 20
+                pong_timeout_seconds: 10
                 connect_timeout_seconds: 5
               features:
                 methods:
@@ -219,10 +222,13 @@ components:
                   - message.completed
                   - run.completed
                 capabilities:
-                  - structured_message_delta
+                  - full_thinking
               active_run:
                 run_id: run-01
                 run_seq: 14
+                history_seq: 41
+                model_id: model-a
+                thinking: hidden
                 message_snapshot:
                   message_id: message-01
                   role: assistant
@@ -231,7 +237,45 @@ components:
                     - type: text
                       text: 订单当前状态为
                   created_at: '2026-07-30T08:00:00Z'
+                open_contents:
+                  '0':
+                    type: text
                 active_tools: []
+        - name: 发送消息已接受
+          payload:
+            type: res
+            id: send-1
+            ok: true
+            payload:
+              run_id: run-01
+              user_message_id: message-user-01
+              accepted: true
+        - name: 读取权威历史
+          payload:
+            type: res
+            id: history-1
+            ok: true
+            payload:
+              items:
+                - type: message
+                  history_seq: 21
+                  run_id: run-01
+                  message:
+                    message_id: message-01
+                    role: assistant
+                    status: completed
+                    content:
+                      - type: text
+                        text: 已发货
+                    created_at: '2026-07-30T08:00:00Z'
+                    completed_at: '2026-07-30T08:00:02Z'
+                - type: run
+                  history_seq: 22
+                  run:
+                    run_id: run-01
+                    outcome: done
+                    completed_at: '2026-07-30T08:00:03Z'
+              has_more: false
         - name: active run 冲突
           payload:
             type: res
@@ -248,32 +292,109 @@ components:
       payload:
         $ref: '#/components/schemas/AnyEventFrame'
       examples:
-        - name: 文本增量
+        - name: 1 run 开始
           payload:
             type: event
-            event: message.updated
-            seq: 7
+            event: run.started
+            seq: 1
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 1
+              timestamp: '2026-07-30T08:00:00Z'
+              model_id: model-a
+              thinking: hidden
+        - name: 2 Assistant Message 开始
+          payload:
+            type: event
+            event: message.started
+            seq: 2
             payload:
               agent_id: agent-a
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
-              run_seq: 7
+              run_seq: 2
+              timestamp: '2026-07-30T08:00:00Z'
+              role: assistant
+        - name: 3 文本块开始
+          payload:
+            type: event
+            event: message.updated
+            seq: 3
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 3
+              content_index: 0
+              timestamp: '2026-07-30T08:00:01Z'
+              update:
+                type: text_start
+        - name: 4 文本增量
+          payload:
+            type: event
+            event: message.updated
+            seq: 4
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 4
               content_index: 0
               timestamp: '2026-07-30T08:00:01Z'
               update:
                 type: text_delta
                 delta: 已发货
-        - name: run 已完成
+        - name: 5 文本块结束
           payload:
             type: event
-            event: run.completed
-            seq: 24
+            event: message.updated
+            seq: 5
             payload:
               agent_id: agent-a
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
-              run_seq: 24
+              message_id: message-01
+              run_seq: 5
+              content_index: 0
+              timestamp: '2026-07-30T08:00:02Z'
+              update:
+                type: text_end
+        - name: 6 Message 完成
+          payload:
+            type: event
+            event: message.completed
+            seq: 6
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 6
+              timestamp: '2026-07-30T08:00:02Z'
+              message:
+                message_id: message-01
+                role: assistant
+                status: completed
+                content:
+                  - type: text
+                    text: 已发货
+                created_at: '2026-07-30T08:00:00Z'
+                completed_at: '2026-07-30T08:00:02Z'
+        - name: 7 run 完成
+          payload:
+            type: event
+            event: run.completed
+            seq: 7
+            payload:
+              agent_id: agent-a
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 7
               timestamp: '2026-07-30T08:00:03Z'
               outcome: done
               stop_reason: stop
@@ -336,6 +457,10 @@ components:
       type: string
       minLength: 1
       maxLength: 128
+      description: |
+        调用方生成的连接内请求关联 ID。在同一物理连接的整个生命周期内不得
+        重复使用。调用方用它保存 method 和预期成功 payload Schema；服务端
+        可以乱序返回并发请求的 ResponseFrame，但每个可解析请求恰好返回一次。
     TraceParent:
       type: string
       minLength: 55
@@ -350,6 +475,11 @@ components:
       type: string
       minLength: 8
       maxLength: 128
+      description: |
+        副作用命令的幂等键，作用域为 session_id + method。Request 超时或连接
+        中断后，调用方使用新的 RequestFrame.id 和原 idempotency_key 重试。
+        traceparent 和 RequestFrame.id 不参与业务负载等价比较。服务端在
+        Session 未删除期间保留已接受结果。
     Timestamp:
       type: string
       format: date-time
@@ -359,6 +489,10 @@ components:
         - hidden
         - summary
         - full
+      description: |
+        当前连接的 thinking 投影级别。full 只有在 connect 返回的
+        features.capabilities 包含 full_thinking 时才合法；capability 只开放
+        选择上限，不会自动把级别切换为 full。
     ClientInfo:
       type: object
       additionalProperties: false
@@ -384,14 +518,16 @@ components:
             - other
     ClientCapabilities:
       type: array
-      minItems: 1
       uniqueItems: true
+      default: []
       description: |
-        调用方在 connect 中声明自己能够处理的 capability，并且必须包含
-        structured_message_delta。服务端取客户端声明、服务能力和授权策略的
-        交集作为有效 capability；未知字符串被忽略且不回显。
-      contains:
-        const: structured_message_delta
+        调用方可以在 connect 中声明可选增强能力；省略等价于空数组。协议 v2
+        固定使用 typed structured delta，因此 delta 不属于 capability。
+        当前已知值只有 full_thinking，它只表示客户端可以安全消费完整 thinking，
+        不会自动把 Session 的 thinking 级别设为 full，也不构成披露授权。
+        未知字符串允许发送，以便客户端前向演进；服务端忽略且不回显。
+      x-known-capabilities:
+        - full_thinking
       items:
         type: string
         minLength: 1
@@ -409,11 +545,16 @@ components:
       type: object
       additionalProperties: false
       description: |
-        调用方在首个 connect Frame 中提供 mode、全局唯一 session_id、agent_id、
-        客户端信息和 capabilities。使用 create 时还必须提供 model_id；服务端
+        调用方在首个 connect Frame 中提供 mode、全局唯一 session_id、agent_id
+        和客户端信息，并可声明可选 capabilities。使用 create 时还必须提供
+        model_id；服务端
         对相同 Session、Agent 和 Model 的重试保持幂等。使用 resume 时服务端
         不创建缺失或已删除的 Session；只有不存在 active run 时，显式不同的
-        model_id 才表示切换。
+        model_id 才表示切换。min_protocol 必须小于或等于 max_protocol；服务端
+        选择双方共同支持的最高版本，本制品只支持 2。没有交集时返回
+        UNSUPPORTED_PROTOCOL。create 请求的响应丢失时，调用方必须在新连接上
+        使用完全相同的 session_id + agent_id + model_id 重试 mode=create；不得直接
+        改用 resume，因为原 create 可能尚未提交。
       required:
         - mode
         - min_protocol
@@ -421,7 +562,6 @@ components:
         - agent_id
         - session_id
         - client
-        - capabilities
       properties:
         mode:
           $ref: '#/components/schemas/SessionConnectMode'
@@ -453,6 +593,11 @@ components:
     ConnectRequest:
       type: object
       additionalProperties: false
+      description: |
+        必须是 101 后五秒内的首个 Text Message。connect 成功 Response 写出前
+        不得发送其他 RequestFrame。任何 connect 失败都会先在可关联时返回
+        ErrorResponseFrame，再关闭尚未绑定的连接：协议无交集使用 1002，暂时
+        不可用使用 1013，其他身份、参数或绑定失败使用 1008。
       required:
         - type
         - id
@@ -472,6 +617,10 @@ components:
     ChatSendParams:
       type: object
       additionalProperties: false
+      description: |
+        幂等负载由 message、attachment_ids 的顺序和值以及 thinking 是否省略和
+        具体值共同决定；RequestFrame.id 和 traceparent 不参与。相同 key 携带
+        不同幂等负载返回 INVALID_REQUEST。
       required:
         - message
         - idempotency_key
@@ -479,7 +628,11 @@ components:
         message:
           type: string
           minLength: 1
-          maxLength: 1048576
+          maxLength: 262144
+          description: |
+            用户文本。字符上限不是线上的最终大小判断；调用方还必须确保完整
+            JSON Text Message 的 UTF-8 字节数不超过 connect 返回的
+            max_message_bytes。
         attachment_ids:
           type: array
           maxItems: 32
@@ -490,6 +643,9 @@ components:
           $ref: '#/components/schemas/IdempotencyKey'
         thinking:
           $ref: '#/components/schemas/ThinkingLevel'
+          description: |
+            省略时使用当前连接看到的 Session 默认级别。显式值只能低于或等于
+            该默认级别；请求更高值返回 FORBIDDEN，不执行静默降级。
     ChatSendRequest:
       type: object
       additionalProperties: false
@@ -522,7 +678,11 @@ components:
         message:
           type: string
           minLength: 1
-          maxLength: 1048576
+          maxLength: 262144
+          description: |
+            Steering 文本。字符上限不是线上的最终大小判断；调用方还必须
+            确保完整 JSON Text Message 的 UTF-8 字节数不超过 connect 返回的
+            max_message_bytes。
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
     ChatSteerRequest:
@@ -587,9 +747,54 @@ components:
           minimum: 1
           maximum: 200
           default: 50
+    ChatHistoryFirstPageParams:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        run_id:
+          $ref: '#/components/schemas/RunId'
+          description: 只返回指定 run 的 Message 和 RunRecord；active-run 同步时必须使用。
+        through_history_seq:
+          type: integer
+          minimum: 0
+          description: |
+            首页查询的包含性 history_seq 上界。active_run 恢复时传入快照返回的
+            history_seq。
+    ChatHistoryCursorParams:
+      type: object
+      additionalProperties: false
+      required:
+        - cursor
+      properties:
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 服务端上一页返回的不透明游标；它已固定首页的过滤条件和上界。
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+    ChatHistoryParams:
+      oneOf:
+        - $ref: '#/components/schemas/ChatHistoryFirstPageParams'
+        - $ref: '#/components/schemas/ChatHistoryCursorParams'
+      description: 首页可设置 run_id 和水位；后续页只使用不透明 cursor，不重复或变更过滤条件。
     ChatHistoryRequest:
       type: object
       additionalProperties: false
+      description: |
+        读取当前 Session 的权威持久历史。省略 cursor 时返回查询时刻最新的一页；
+        next_cursor 用于继续读取更早的数据。每页 items 按 history_seq 从旧到新
+        排列，游标不透明、固定首次查询的过滤条件和上界，分页不重叠。
+        active-run 恢复必须在首页提交 snapshot.run_id 和
+        snapshot.history_seq，并在应用 post-snapshot 事件前读完该过滤历史。
       required:
         - type
         - id
@@ -604,7 +809,7 @@ components:
         method:
           const: chat.history
         params:
-          $ref: '#/components/schemas/CursorPageParams'
+          $ref: '#/components/schemas/ChatHistoryParams'
     SessionGetRequest:
       type: object
       additionalProperties: false
@@ -667,6 +872,10 @@ components:
     ThinkingSetParams:
       type: object
       additionalProperties: false
+      description: |
+        修改 Session 默认披露级别。请求 full 时，当前 connect 的有效 capability
+        必须包含 full_thinking；否则返回 FORBIDDEN。active run 存在时返回
+        RUN_ACTIVE。服务端不静默降级请求值。
       required:
         - level
       properties:
@@ -773,19 +982,24 @@ components:
             - running
         thinking:
           $ref: '#/components/schemas/ThinkingLevel'
+          description: 当前连接经过 capability 与授权上限投影后的 Session 默认值。
     ConnectionLimits:
       type: object
       additionalProperties: false
       required:
-        - max_frame_bytes
+        - max_message_bytes
         - max_connection_buffer_bytes
         - heartbeat_seconds
+        - pong_timeout_seconds
         - connect_timeout_seconds
       properties:
-        max_frame_bytes:
+        max_message_bytes:
           type: integer
           minimum: 1024
           default: 1048576
+          description: |
+            一个完整 WebSocket Text Message 在解压、重组并编码为 UTF-8 JSON 后
+            的最大字节数；不是底层分片数量或单个 wire frame 的上限。
         max_connection_buffer_bytes:
           type: integer
           minimum: 1024
@@ -794,6 +1008,10 @@ components:
           type: integer
           minimum: 1
           default: 20
+        pong_timeout_seconds:
+          type: integer
+          minimum: 1
+          default: 10
         connect_timeout_seconds:
           type: integer
           minimum: 1
@@ -802,10 +1020,14 @@ components:
       type: array
       minItems: 1
       uniqueItems: true
+      contains:
+        const: chat.history
       description: |
         服务端在 connect 成功响应中返回当前连接可发现的方法，并按本 Schema
         的枚举顺序稳定排列。调用方可据此决定展示哪些功能；服务端仍对每个
-        请求重新执行状态和权限校验。
+        请求重新执行状态和权限校验。chat.history 是快照恢复的必备方法，
+        每个成功 connect 的列表都必须包含；调用服务无权读取投影历史时，
+        服务端必须拒绝 connect，不得返回无法恢复的连接。
       items:
         type: string
         enum:
@@ -821,9 +1043,13 @@ components:
           - skills.list
     NegotiatedEvents:
       type: array
-      minItems: 1
+      minItems: 8
+      maxItems: 8
       uniqueItems: true
-      description: 服务端在 connect 成功响应中返回当前连接可能接收的事件族，并按本 Schema 的枚举顺序稳定排列。
+      description: |
+        协议 2 的 Chat 事件族是不可拆分的完整集合，服务端按本
+        Schema 的枚举顺序稳定返回全部八项。若不能提供完整集合，
+        connect 必须失败，不得建立一条无法判定 Message 或 run 终态的连接。
       items:
         type: string
         enum:
@@ -837,18 +1063,15 @@ components:
           - run.completed
     EffectiveCapabilities:
       type: array
-      minItems: 1
       uniqueItems: true
-      contains:
-        const: structured_message_delta
       description: |
-        服务端根据客户端声明、服务能力和当前授权计算 capability 交集，并在
-        connect 成功响应中返回。只有调用服务 scope、Agent、Model、可选委托
-        披露上限和客户端声明全部允许时，结果才包含 full_thinking。
+        服务端根据客户端声明、服务能力和当前授权计算可选增强能力的交集，并
+        在 connect 成功响应中返回。空数组表示没有可选增强，不影响协议 v2
+        固有的 typed structured delta。只有调用服务 scope、Agent、Model、
+        可选委托披露上限和客户端声明全部允许时，结果才包含 full_thinking。
       items:
         type: string
         enum:
-          - structured_message_delta
           - full_thinking
     NegotiatedFeatures:
       type: object
@@ -880,7 +1103,6 @@ components:
       additionalProperties: false
       required:
         - type
-        - text
         - disclosure
       properties:
         type:
@@ -890,8 +1112,35 @@ components:
         disclosure:
           type: string
           enum:
+            - hidden
             - summary
             - full
+      allOf:
+        - if:
+            properties:
+              disclosure:
+                const: hidden
+            required:
+              - disclosure
+          then:
+            not:
+              required:
+                - text
+        - if:
+            properties:
+              disclosure:
+                enum:
+                  - summary
+                  - full
+            required:
+              - disclosure
+          then:
+            required:
+              - text
+      description: |
+        Thinking 内容块始终占用原 content_index，因此 hidden 投影也保留
+        一个不含 text 的占位块，后续可见块的索引不会前移。disclosure=full
+        只允许出现在有效 capability 包含 full_thinking 的连接投影中。
     ToolCallContent:
       type: object
       additionalProperties: false
@@ -931,9 +1180,48 @@ components:
           enum:
             - done
             - error
+            - aborted
         result: {}
         error:
           $ref: '#/components/schemas/Error'
+      allOf:
+        - if:
+            properties:
+              status:
+                const: done
+            required:
+              - status
+          then:
+            required:
+              - result
+            not:
+              required:
+                - error
+        - if:
+            properties:
+              status:
+                const: error
+            required:
+              - status
+          then:
+            required:
+              - error
+            not:
+              required:
+                - result
+        - if:
+            properties:
+              status:
+                const: aborted
+            required:
+              - status
+          then:
+            not:
+              anyOf:
+                - required:
+                    - result
+                - required:
+                    - error
     ProjectedMessage:
       type: object
       additionalProperties: false
@@ -971,6 +1259,75 @@ components:
           $ref: '#/components/schemas/Timestamp'
         completed_at:
           $ref: '#/components/schemas/Timestamp'
+    TerminalProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - completed
+                - aborted
+                - error
+      description: message.completed 和 chat.history 使用的终态 Message；status 不得为 streaming。
+    StreamingProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          properties:
+            status:
+              const: streaming
+      description: active-run 快照中当前未完成的 Assistant Message。
+    OpenTextContentState:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+      properties:
+        type:
+          const: text
+    OpenThinkingContentState:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - disclosure
+      properties:
+        type:
+          const: thinking
+        disclosure:
+          type: string
+          enum:
+            - hidden
+            - summary
+            - full
+    OpenToolCallContentState:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - tool_call_id
+        - tool_id
+        - arguments_delta
+      properties:
+        type:
+          const: tool_call
+        tool_call_id:
+          $ref: '#/components/schemas/ToolCallId'
+        tool_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          type: string
+          maxLength: 256
+        arguments_delta:
+          type: string
+          description: 已累计但可能仍不是合法 JSON 的参数文本；最终以 toolcall_end.arguments 为准。
+    OpenContentState:
+      oneOf:
+        - $ref: '#/components/schemas/OpenTextContentState'
+        - $ref: '#/components/schemas/OpenThinkingContentState'
+        - $ref: '#/components/schemas/OpenToolCallContentState'
     ActiveTool:
       type: object
       additionalProperties: false
@@ -999,7 +1356,11 @@ components:
       required:
         - run_id
         - run_seq
+        - history_seq
+        - model_id
+        - thinking
         - message_snapshot
+        - open_contents
         - active_tools
       properties:
         run_id:
@@ -1007,12 +1368,54 @@ components:
         run_seq:
           type: integer
           minimum: 0
+          description: 快照已经包含的最后一个 run_seq；后续只发送更大的值。
+        history_seq:
+          type: integer
+          minimum: 0
+          description: |
+            快照临界区已持久化的最大 history_seq。客户端在应用快照前使用
+            chat.history(run_id, through_history_seq) 读取不超过该值的当前 run
+            终态 Message，以恢复用户消息、先前完成的 Assistant Message 和
+            ToolResult。
+        model_id:
+          $ref: '#/components/schemas/ModelId'
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+          description: 当前连接对该 run 冻结 thinking 级别的有效投影。
         message_snapshot:
-          $ref: '#/components/schemas/ProjectedMessage'
+          oneOf:
+            - $ref: '#/components/schemas/StreamingProjectedMessage'
+            - type: 'null'
+          description: |
+            当前未完成 Assistant Message 的完整可见投影。run 已建立但尚未发生
+            message.started 时为 null。先前已完成的 Message 通过上述 history_seq
+            水位读取，而不在此字段重复。
+        open_contents:
+          type: object
+          propertyNames:
+            pattern: '^(0|[1-9][0-9]*)$'
+          additionalProperties:
+            $ref: '#/components/schemas/OpenContentState'
+          description: |
+            快照时刻已 start 但尚未 end 的内容块；对象 key 是十进制
+            content_index，因此同一索引不可重复。客户端先应用历史水位和
+            message_snapshot，再据此初始化开放块，随后只归并 run_seq 大于
+            快照值的 delta。message_snapshot 为 null 时该对象必须为空。
         active_tools:
           type: array
           items:
             $ref: '#/components/schemas/ActiveTool'
+      allOf:
+        - if:
+            properties:
+              message_snapshot:
+                type: 'null'
+            required:
+              - message_snapshot
+          then:
+            properties:
+              open_contents:
+                maxProperties: 0
     ConnectResult:
       type: object
       additionalProperties: false
@@ -1047,19 +1450,52 @@ components:
           oneOf:
             - $ref: '#/components/schemas/ActiveRunSnapshot'
             - type: 'null'
+      description: |
+        session.state=running 当且仅当 active_run 非 null；session.state=idle 当且
+        仅当 active_run 为 null。connect Response 必须先于新连接上的任何
+        EventFrame 写出。
     ChatSendResult:
       type: object
       additionalProperties: false
+      description: |
+        accepted=true 表示用户消息已持久化、run_id 已分配且 active-run 占位已
+        原子提交；随后即使连接断开，run 仍继续。服务端必须先向发起连接写出
+        本 ResponseFrame，再向该连接写出该 run 的 run.started；其他观察连接
+        不受这一局部排序约束。同一 idempotency_key 的等价重试优先返回原结果，
+        不因原 run 已处于 active 状态而返回 RUN_ACTIVE。
       required:
         - run_id
+        - user_message_id
         - accepted
       properties:
         run_id:
           $ref: '#/components/schemas/RunId'
+        user_message_id:
+          $ref: '#/components/schemas/MessageId'
+          description: |
+            服务端已经持久化的权威用户消息 ID。调用方用它替换本地乐观消息的
+            临时 ID；同一 idempotency_key 的等价重试返回相同值。
         accepted:
           type: boolean
           const: true
-    RunCommandResult:
+    ChatSteerResult:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - user_message_id
+        - accepted
+        - idempotent
+      properties:
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        user_message_id:
+          $ref: '#/components/schemas/MessageId'
+        accepted:
+          type: boolean
+        idempotent:
+          type: boolean
+    ChatAbortResult:
       type: object
       additionalProperties: false
       required:
@@ -1073,23 +1509,133 @@ components:
           type: boolean
         idempotent:
           type: boolean
+    RunRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - outcome
+        - completed_at
+      properties:
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        outcome:
+          type: string
+          enum:
+            - done
+            - aborted
+            - error
+        completed_at:
+          $ref: '#/components/schemas/Timestamp'
+        usage:
+          $ref: '#/components/schemas/Usage'
+        stop_reason:
+          type: string
+          maxLength: 256
+        error:
+          $ref: '#/components/schemas/Error'
+      allOf:
+        - if:
+            properties:
+              outcome:
+                const: error
+            required:
+              - outcome
+          then:
+            required:
+              - error
+        - if:
+            properties:
+              outcome:
+                enum:
+                  - done
+                  - aborted
+            required:
+              - outcome
+          then:
+            not:
+              required:
+                - error
+      description: |
+        run.completed 的持久化投影。outcome=error 时必须携带 error；outcome=done
+        或 aborted 时不得携带 error。调用方按 run_id 与实时状态对账。
+    HistoryMessageItem:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - history_seq
+        - run_id
+        - message
+      properties:
+        type:
+          const: message
+        history_seq:
+          type: integer
+          minimum: 1
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        message:
+          $ref: '#/components/schemas/TerminalProjectedMessage'
+    HistoryRunItem:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - history_seq
+        - run
+      properties:
+        type:
+          const: run
+        history_seq:
+          type: integer
+          minimum: 1
+        run:
+          $ref: '#/components/schemas/RunRecord'
+    HistoryItem:
+      oneOf:
+        - $ref: '#/components/schemas/HistoryMessageItem'
+        - $ref: '#/components/schemas/HistoryRunItem'
     HistoryResult:
       type: object
       additionalProperties: false
       required:
-        - messages
+        - items
         - has_more
       properties:
-        messages:
+        items:
           type: array
           items:
-            $ref: '#/components/schemas/ProjectedMessage'
+            $ref: '#/components/schemas/HistoryItem'
+          description: |
+            同一页内按 history_seq 从旧到新排列。调用方按 message_id 和 run_id
+            去重并以较新的权威投影覆盖本地状态。
         next_cursor:
           type: string
           minLength: 1
           maxLength: 1024
         has_more:
           type: boolean
+      allOf:
+        - if:
+            properties:
+              has_more:
+                const: true
+            required:
+              - has_more
+          then:
+            required:
+              - next_cursor
+        - if:
+            properties:
+              has_more:
+                const: false
+            required:
+              - has_more
+          then:
+            not:
+              required:
+                - next_cursor
     SessionGetResult:
       type: object
       additionalProperties: false
@@ -1208,7 +1754,8 @@ components:
       oneOf:
         - $ref: '#/components/schemas/ConnectResult'
         - $ref: '#/components/schemas/ChatSendResult'
-        - $ref: '#/components/schemas/RunCommandResult'
+        - $ref: '#/components/schemas/ChatSteerResult'
+        - $ref: '#/components/schemas/ChatAbortResult'
         - $ref: '#/components/schemas/HistoryResult'
         - $ref: '#/components/schemas/SessionGetResult'
         - $ref: '#/components/schemas/ModelsListResult'
@@ -1218,7 +1765,12 @@ components:
         - $ref: '#/components/schemas/SkillsListResult'
     ErrorCode:
       type: string
-      enum:
+      minLength: 1
+      maxLength: 128
+      description: |
+        当前稳定错误码如下。调用方必须为未知字符串保留 UNKNOWN 分支；新增
+        可恢复错误码不改变 Frame 结构，不能导致客户端反序列化失败。
+      x-known-values:
         - INVALID_REQUEST
         - UNAUTHENTICATED
         - FORBIDDEN
@@ -1250,9 +1802,12 @@ components:
           additionalProperties: true
         retryable:
           type: boolean
+          default: false
+          description: 省略等价于 false；只说明同一业务操作是否适合稍后重试。
         retry_after_ms:
           type: integer
           minimum: 0
+          description: 仅当 retryable=true 时有效；副作用请求仍必须复用原 idempotency_key。
     SuccessResponseFrame:
       type: object
       additionalProperties: false
@@ -1320,6 +1875,7 @@ components:
           $ref: '#/components/schemas/ModelId'
         thinking:
           $ref: '#/components/schemas/ThinkingLevel'
+          description: 该 run 在当前连接上的冻结有效 thinking 投影；恢复快照必须返回相同语义。
     MessageStartedPayload:
       type: object
       additionalProperties: false
@@ -1382,12 +1938,24 @@ components:
       additionalProperties: false
       required:
         - type
+        - disclosure
       properties:
         type:
           const: thinking_start
+        disclosure:
+          type: string
+          enum:
+            - hidden
+            - summary
+            - full
+          description: 当前连接对该 thinking 块的有效投影级别。
     ThinkingDeltaUpdate:
       type: object
       additionalProperties: false
+      description: |
+        只在当前连接对 run 的投影级别为 full 且有效 capability 包含
+        full_thinking 时发送。summary/hidden 连接在同一 run_seq 位置收到
+        thinking_redacted，使 run_seq 在不同投影中仍保持稳定连续。
       required:
         - type
         - delta
@@ -1400,6 +1968,10 @@ components:
     ThinkingSummaryUpdate:
       type: object
       additionalProperties: false
+      description: |
+        只在 disclosure=summary 的投影中发送，每个 thinking 块最多一次。summary
+        是当前块的完整安全摘要，客户端以它替换当前摘要，不做字符串追加。
+        full/hidden 连接在同一 run_seq 位置收到 thinking_redacted。
       required:
         - type
         - summary
@@ -1409,6 +1981,24 @@ components:
         summary:
           type: string
           minLength: 1
+    ThinkingRedactedUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - redacted_type
+      properties:
+        type:
+          const: thinking_redacted
+        redacted_type:
+          type: string
+          enum:
+            - delta
+            - summary
+      description: |
+        不含 thinking 内容的序列占位。服务端对每个被当前连接投影策略抑制的
+        canonical thinking_delta 或 thinking_summary 发送一条，使所有观察
+        连接看到相同的 run_seq 域。客户端只推进序列，不创建可见正文。
     ThinkingEndUpdate:
       type: object
       additionalProperties: false
@@ -1450,6 +2040,9 @@ components:
         delta:
           type: string
           minLength: 1
+          description: |
+            Tool arguments 的 JSON 文本片段，本次片段可能不是合法 JSON。客户端只
+            追加保存，不逐帧解析；toolcall_end.arguments 是权威完整对象。
     ToolCallEndUpdate:
       type: object
       additionalProperties: false
@@ -1473,6 +2066,7 @@ components:
         - $ref: '#/components/schemas/ThinkingStartUpdate'
         - $ref: '#/components/schemas/ThinkingDeltaUpdate'
         - $ref: '#/components/schemas/ThinkingSummaryUpdate'
+        - $ref: '#/components/schemas/ThinkingRedactedUpdate'
         - $ref: '#/components/schemas/ThinkingEndUpdate'
         - $ref: '#/components/schemas/ToolCallStartUpdate'
         - $ref: '#/components/schemas/ToolCallDeltaUpdate'
@@ -1480,6 +2074,12 @@ components:
     MessageUpdatedPayload:
       type: object
       additionalProperties: false
+      description: |
+        content_index 在同一 message_id 内标识最终 content 数组位置。每个位置
+        遵循匹配类型的 start -> update* -> end；Thinking update 可以是 delta、
+        一次 summary 或不含内容的 redacted 占位。不同位置可以交错。客户端先按
+        run_seq 去重和检查缺口，再应用 update。快照 open_contents 可以初始化
+        一个在重连前已经 start 的位置，因此快照后的第一帧可以直接是 delta。
       required:
         - agent_id
         - session_id
@@ -1620,9 +2220,51 @@ components:
         result: {}
         error:
           $ref: '#/components/schemas/Error'
+      allOf:
+        - if:
+            properties:
+              status:
+                const: done
+            required:
+              - status
+          then:
+            required:
+              - result
+            not:
+              required:
+                - error
+        - if:
+            properties:
+              status:
+                const: error
+            required:
+              - status
+          then:
+            required:
+              - error
+            not:
+              required:
+                - result
+        - if:
+            properties:
+              status:
+                const: aborted
+            required:
+              - status
+          then:
+            not:
+              anyOf:
+                - required:
+                    - result
+                - required:
+                    - error
     MessageCompletedPayload:
       type: object
       additionalProperties: false
+      description: |
+        如果同一 message_id 已发送 message.started，则本事件恰好出现一次，并
+        在 run.completed 之前发送。外层 message_id 必须等于 message.message_id；
+        客户端以 message 完整替换本地流式组装结果。
       required:
         - agent_id
         - session_id
@@ -1646,7 +2288,7 @@ components:
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         message:
-          $ref: '#/components/schemas/ProjectedMessage'
+          $ref: '#/components/schemas/TerminalProjectedMessage'
     Usage:
       type: object
       additionalProperties: false
@@ -1666,6 +2308,10 @@ components:
     RunCompletedPayload:
       type: object
       additionalProperties: false
+      description: |
+        每个 run_id 恰好发送一次，是该 run 的最后一个事件。outcome=error 时
+        必须携带 error；outcome=done 或 aborted 时不得携带 error。它之后不得再出现相同
+        run_id 的 EventFrame。
       required:
         - agent_id
         - session_id
@@ -1698,6 +2344,28 @@ components:
           maxLength: 256
         error:
           $ref: '#/components/schemas/Error'
+      allOf:
+        - if:
+            properties:
+              outcome:
+                const: error
+            required:
+              - outcome
+          then:
+            required:
+              - error
+        - if:
+            properties:
+              outcome:
+                enum:
+                  - done
+                  - aborted
+            required:
+              - outcome
+          then:
+            not:
+              required:
+                - error
     RunStartedEvent:
       type: object
       additionalProperties: false
@@ -1843,6 +2511,25 @@ components:
         payload:
           $ref: '#/components/schemas/RunCompletedPayload'
     AnyEventFrame:
+      description: |
+        同一连接的第一条 EventFrame.seq 为 1，之后每成功写出一条事件恰好加 1；
+        ResponseFrame 不占用 seq，重连后从 1 重新开始。run_seq 从 run.started
+        的 1 开始，对同一 run 的全部 Message 和 Tool 事件恰好加 1，并跨重连
+        连续。重复、倒退或跳号都不能继续猜测归并：客户端停止应用当前流并
+        通过 mode=resume 取得新快照。
+
+        生命周期约束为 run.started 最先、run.completed 最后。一个 run 可以
+        包含多个 Message 和 Tool 周期；message.started 必须早于同一 message_id
+        的 updated/completed，tool.started 必须早于同一 tool_call_id 的
+        updated/completed。已经 start 的 Message 即使因 abort/error 结束，也要
+        在 run.completed 前发送一次终态 message.completed。每个已发送
+        tool.started 的 tool_call_id 也必须在 run.completed 前恰好发送一次
+        tool.completed；run abort 时尚未结束的 Tool 使用 status=aborted。
+
+        run_seq 属于 canonical run 事件域，不因连接的 thinking 投影而变化。
+        当 canonical thinking delta 或 summary 不允许向某连接披露时，该连接
+        仍在相同 run_seq 位置收到不含内容的 thinking_redacted，因此多观察者
+        和重连前后的 run_seq 都连续且可比较。
       oneOf:
         - $ref: '#/components/schemas/RunStartedEvent'
         - $ref: '#/components/schemas/MessageStartedEvent'
@@ -1852,7 +2539,66 @@ components:
         - $ref: '#/components/schemas/ToolCompletedEvent'
         - $ref: '#/components/schemas/MessageCompletedEvent'
         - $ref: '#/components/schemas/RunCompletedEvent'
+x-method-contracts:
+  description: |
+    RequestFrame.id 关联到下列 method 和成功 payload。调用方应在 pending map 中
+    保存该映射，而不是根据 payload 形状猜测响应类型。连接成功后允许多个普通
+    请求并发 in-flight，ResponseFrame 可以乱序并与 EventFrame 交错。
+    这是 CampusClaw 的规范性扩展；通用 AsyncAPI 生成器只能看到泛化 Frame
+    oneOf。生成强类型 SDK 时必须使用理解本扩展的模板，或在 SDK 中手工保留
+    下列 method -> payload decoder 映射；本文不声称零配置的通用代码生成。
+  connect:
+    requestSchema: '#/components/schemas/ConnectRequest'
+    successPayloadSchema: '#/components/schemas/ConnectResult'
+    errors: [INVALID_REQUEST, UNSUPPORTED_PROTOCOL, FORBIDDEN, AGENT_NOT_FOUND, SESSION_NOT_FOUND, MODEL_REQUIRED, MODEL_NOT_ALLOWED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+  chat.send:
+    requestSchema: '#/components/schemas/ChatSendRequest'
+    successPayloadSchema: '#/components/schemas/ChatSendResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, INVALID_ATTACHMENT, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+  chat.steer:
+    requestSchema: '#/components/schemas/ChatSteerRequest'
+    successPayloadSchema: '#/components/schemas/ChatSteerResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
+  chat.abort:
+    requestSchema: '#/components/schemas/ChatAbortRequest'
+    successPayloadSchema: '#/components/schemas/ChatAbortResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
+  chat.history:
+    requestSchema: '#/components/schemas/ChatHistoryRequest'
+    successPayloadSchema: '#/components/schemas/HistoryResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, MANAGER_UNAVAILABLE]
+  session.get:
+    requestSchema: '#/components/schemas/SessionGetRequest'
+    successPayloadSchema: '#/components/schemas/SessionGetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, SESSION_NOT_FOUND]
+  models.list:
+    requestSchema: '#/components/schemas/ModelsListRequest'
+    successPayloadSchema: '#/components/schemas/ModelsListResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+  model.set:
+    requestSchema: '#/components/schemas/ModelSetRequest'
+    successPayloadSchema: '#/components/schemas/ModelSetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, MODEL_NOT_ALLOWED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+  thinking.set:
+    requestSchema: '#/components/schemas/ThinkingSetRequest'
+    successPayloadSchema: '#/components/schemas/ThinkingSetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE]
+  prompt_templates.list:
+    requestSchema: '#/components/schemas/PromptTemplatesListRequest'
+    successPayloadSchema: '#/components/schemas/PromptTemplatesListResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, MANAGER_UNAVAILABLE]
+  skills.list:
+    requestSchema: '#/components/schemas/SkillsListRequest'
+    successPayloadSchema: '#/components/schemas/SkillsListResult'
+    errors: [INVALID_REQUEST, FORBIDDEN]
 x-websocket:
+  dataMessages:
+    acceptedType: text
+    encoding: UTF-8
+    mapping: one complete WebSocket Text Message contains exactly one JSON RequestFrame, ResponseFrame, or EventFrame
+    fragmentation: allowed; size is checked after reassembly and decompression
+    binaryMessageCloseCode: 1003
+    invalidUtf8OrJsonCloseCode: 1007
   handshake:
     clientUri: wss://api.example.com/api/ws/chat
     conceptualHttpTarget: https://api.example.com/api/ws/chat
@@ -1899,11 +2645,37 @@ x-websocket:
       切换。
   firstFrameTimeoutSeconds: 5
   pingPongIntervalSeconds: 20
-  defaultMaxFrameBytes: 1048576
+  pongTimeoutSeconds: 10
+  defaultMaxMessageBytes: 1048576
   defaultMaxConnectionBufferBytes: 4194304
+  requestConcurrency:
+    connectMustCompleteFirst: true
+    requestIdUniqueForConnectionLifetime: true
+    concurrentRequestsAfterConnect: true
+    responsesMayBeOutOfOrder: true
+    responsesAndEventsMayInterleave: true
+    originChatSendResponseBeforeRunEvents: true
+  recovery:
+    clientCursorInConnect: false
+    description: |
+      调用方不提交旧连接 seq 或 run_seq。服务端在 resume connect 中原子生成
+      active_run 快照和 cursor，先写出 ResponseFrame，再发送 run_seq 大于快照
+      值的 EventFrame。客户端先缓冲这些 EventFrame，使用快照的 run_id 和
+      history_seq 读完当前 run 已持久化的历史，再应用 partial Message、
+      open contents 与 active tools，最后按 run_seq 释放缓冲事件。
+
+      canonical thinking 事件如果被当前连接投影抑制，服务端仍发送
+      thinking_redacted 占位，所以 run_seq 不会因 full/summary/hidden 而出现缺口。
+      调用方观察到 seq/run_seq 缺口、1001、1006、1011 或 1013 时，使用带抖动的
+      指数退避重新连接并执行 mode=resume。
   closeCodes:
-    '1000': 正常关闭
+    '1000': 正常关闭；默认不自动恢复，关闭前若要终止 run 必须先调用 chat.abort
+    '1001': 服务端关闭或 Ping/Pong 超时；退避后 resume
     '1002': 不支持的协议版本
+    '1003': 收到 Binary Message；改为 UTF-8 Text Message 后再连接
+    '1007': Text Message 不是合法 UTF-8 JSON；修复客户端编码后再连接
     '1008': connect 超时或违反连接策略
-    '1009': 帧大小超过协商上限
+    '1009': 重组并解压后的 WebSocket Message 超过协商上限
+    '1011': 服务端暂时性内部错误；退避后 resume
     '1013': 消费端过慢；需要重连并通过快照恢复
+    '1006': 仅为调用方观察到的异常断开，不能在线上 Close Frame 中发送；退避后 resume
