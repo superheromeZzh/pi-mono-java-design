@@ -125,8 +125,8 @@ participant "ManagedRunHub" as Hub
 database "Runtime session store" as Store
 
 Client -> Client : call WebSocket library\nconnect(wss URI)
-Client -> Auth : one TCP connection, TLS, then\nHTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
-Auth -> Auth : complete TLS or mTLS\nvalidate service principal and Upgrade
+Client -> Auth : open one TCP connection\nthen TLS or mTLS\nthen HTTP/1.1 GET /api/ws/chat\nUpgrade headers; Bearer if configured
+Auth -> Auth : validate Bearer or mTLS identity\nand validate Upgrade
 Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth --> WS : immutable connection auth context
 WS -> TransportFactory : open(auth context)
@@ -177,8 +177,8 @@ Isolation key:
 globally unique session_id
 agent_id is an immutable binding.
 Tenant and user belong upstream.
-The run is owned by Pool and Hub,
-not by the transport or WebSocket.
+Pool retains AgentSession and the active-run reference; transport only subscribes.
+AgentSession and AgentLoop execute; Hub maintains recovery state.
 end note
 @enduml
 
@@ -277,7 +277,7 @@ title Managed WebSocket Session Protocol
 ' and aborts AgentSession when the WebSocket closes.
 ' Java divergence: v2 maps Frame payloads to typed SessionTransport requests and events.
 ' Architecture change: one connection is scoped to one caller-owned session and Agent, unlike OpenClaw Gateway multiplexing.
-' Target design: the Runtime authenticates a calling service and does not model tenant or user identity.
+' Target design: the Runtime authenticates a calling service with configured Bearer or mTLS and does not model tenant or user identity.
 ' Target design: calling connect with a wss URI does not mean WebSocket is already established.
 ' Target design: HTTP 101 establishes transport; connect RequestFrame binds the Runtime Session.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
@@ -310,8 +310,8 @@ participant "Thinking projection" as Projection
 database "Session JSONL" as Store
 
 Client -> Client : call WebSocket library\nconnect(wss URI)
-Client -> Auth : one TCP connection, TLS, then\nHTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
-Auth -> Auth : complete TLS or mTLS\nreject URL token and business query\nvalidate service principal and Upgrade
+Client -> Auth : open one TCP connection\nthen TLS or mTLS\nthen HTTP/1.1 GET /api/ws/chat\nUpgrade headers; Bearer if configured
+Auth -> Auth : validate Bearer or mTLS identity\nreject URL token and business query\nvalidate Upgrade
 Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth -> WS : immutable auth context
 WS -> Transport : create per-connection transport
@@ -468,7 +468,7 @@ end note
 
 note bottom of Runtime
 close removes the subscription only.
-The active run remains owned by Pool and Hub.
+Pool retains the run reference; AgentSession and AgentLoop execute; Hub maintains recovery state.
 end note
 @enduml
 

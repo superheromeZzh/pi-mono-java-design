@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.3.2` |
+| 文档版本 | `1.3.3` |
 | 状态 | 目标设计对比，CampusClaw v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.4.2` |
-| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.3.2`、协议号 `2` |
+| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.4.3` |
+| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.3.3`、协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -105,10 +105,11 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 
 ### 3.3 CampusClaw v2：目标设计
 
-目标设计以以下仓库内制品为准：
+CampusClaw v2 尚未实现；本节描述的全部行为都是目标设计。其规范来源是以下
+两个仓库内制品：
 
-- [Manager 驱动的多 Agent 运行设计 1.4.2](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.3.2](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [Manager 驱动的多 Agent 运行设计 1.4.3](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.3.3](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -146,7 +147,9 @@ v1 建连时根据 `conversation_id` 得到 `AgentSession`，handler 在该连�
 
 ### 4.3 CampusClaw v2：严格 Session-scoped
 
-连接在 `connect` 成功后固定：
+CampusClaw v2 在 `connect` 成功后，将连接固定绑定到上层提供的全局唯一
+`session_id` 及其不可变 `agent_id`；后续命令只能作用于该 Session。完整作用
+域为：
 
 ```text
 authenticated calling service
@@ -176,7 +179,7 @@ Runtime 上下文、JSONL 和 run。代价是需要同时观察很多 Session �
 | 核心定位 | 通用 Gateway 控制平面和节点传输 | Chat 服务端模式 | Agent Runtime 的 Session-scoped Chat 协议 | 原因：收窄 ToB Runtime 边界；收益：降低跨 Agent 授权复杂度；代价：多会话客户端连接更多 |
 | 连接作用域 | 一条连接可调用多个 Session 和控制面能力 | 一条连接持有一个 `AgentSession`，但可 `new_session` | 一条连接固定调用方 `session_id` 及其 Agent 绑定 | 原因：固定审计和权限边界；收益：后续帧无需重新路由；代价：不具备 Gateway 式多路复用 |
 | Upgrade 输入 | 建立 WebSocket 后进行 challenge/connect | query `conversation_id`；AsyncAPI 还声明 query `token` | `wss://...` 由客户端库生成同 host/path 的 HTTP GET + Upgrade headers；该路径不是 REST API，且不收业务 query 和 URL token | 原因：传输握手与应用绑定分层；收益：凭据和路由不进入代理 URL 日志；代价：代理必须正确支持 Upgrade |
-| 认证 | connect 内认证、设备签名/配对、role/scope | 基线路由没有实现文档所述 query token 校验 | 调用服务 Bearer，入口可叠加 mTLS；不接收 tenant/user 身份 | 原因：Runtime 只建立服务信任；收益：不重复上层用户体系；代价：上层服务成为用户授权责任边界 |
+| 认证 | connect 内认证、设备签名/配对、role/scope | 基线路由没有实现文档所述 query token 校验 | 调用服务按部署使用 Bearer 或 mTLS；不接收 tenant/user 身份 | 原因：Runtime 只建立服务信任；收益：不重复上层用户体系；代价：上层服务成为用户授权责任边界 |
 | 握手 | HTTP/WebSocket 建立后：`connect.challenge` → `connect` → `hello-ok` | 没有协议首帧，Upgrade 后直接处理命令 | HTTP/1.1 GET Upgrade → `101` → 5 秒内 `connect` RequestFrame → ResponseFrame | 原因：明确 HTTP 与应用协议边界；收益：握手错误和业务错误各归其层；代价：服务端要维护首帧超时状态 |
 | 版本协商 | `minProtocol/maxProtocol`，基线协议 v4 | 无 | `min_protocol/max_protocol`，仅接受 v2 | 原因：管理破坏性变更；收益：不兼容时快速失败；代价：服务端和 SDK 要维护版本矩阵 |
 | capability 与 features | 客户端声明 caps；`hello-ok.features` 返回可用 methods/events/capabilities | 无 | 客户端必须支持 `structured_message_delta`；connect `payload.features` 返回按认证、Agent 和服务过滤后的稳定列表 | 原因：能力发现与逐请求授权分离；收益：客户端可适配服务能力，未知 capability 可前向兼容；代价：必须验证过滤、排序和降权 |
@@ -212,10 +215,11 @@ Runtime 上下文、JSONL 和 run。代价是需要同时观察很多 Session �
 
 [PlantUML 源码：`websocket_handshake_comparison`](diagram.puml#L89)
 
-### 6.1 OpenClaw 为什么使用 challenge 和设备身份
+### 6.1 OpenClaw：challenge 验证设备身份
 
-OpenClaw Gateway 面向范围广泛的客户端和节点。服务端发送 nonce，客户端把
-设备身份、签名、role、scope、capability 与 connect 请求一起提交，适合解决：
+OpenClaw 在 WebSocket 建立后先发送 `connect.challenge`。客户端收到 nonce
+后提交设备身份、签名、role、scope 和 capability；Gateway 验证成功后返回
+`hello-ok`，失败则拒绝应用连接。这套流程面向范围广泛的客户端和节点，解决：
 
 - “这个连接是哪台已配对设备”的持续身份；
 - operator 与 node 等角色的不同能力；
@@ -225,14 +229,20 @@ OpenClaw Gateway 面向范围广泛的客户端和节点。服务端发送 nonce
 这套体系是 Gateway 产品模型的组成部分，不是所有 WebSocket Chat 都必须复制
 的通用规范。
 
-### 6.2 CampusClaw 为什么在 Upgrade 认证调用服务
+### 6.2 CampusClaw：Upgrade 认证调用服务，`101` 后建立 WebSocket
 
-CampusClaw v2 是内部 Agent Runtime，不直接承接最终用户或浏览器身份：
+调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
+客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换协议；
+服务端返回 `101` 后，WebSocket 才正式建立。
+
+客户端库按部署配置在 Upgrade 请求中携带 Bearer，或在此前的 TLS 握手中出示
+mTLS 证书；Runtime 在返回 `101` 前完成调用服务身份校验。CampusClaw v2 是
+内部 Agent Runtime，不直接承接最终用户或浏览器身份：
 
 - 浏览器先连接上层会话服务，由上层完成 Cookie、Origin 和用户授权；
-- 上层服务使用 `Authorization: Bearer` 调用 Runtime，部署可叠加 mTLS；
-- Runtime 校验 service principal、audience 和 scope，不接收业务
-  `tenant_id/user_id`；
+- 上层服务按部署配置使用 `Authorization: Bearer` 或 mTLS 调用 Runtime；
+- Runtime 校验 service principal；Bearer 路径继续校验 audience 和 scope，
+  mTLS 路径校验证书策略；两条路径都不接收业务 `tenant_id/user_id`；
 - Runtime 调用 Manager 时使用独立 audience 凭据或受控 token exchange；
 - 凭据不进入 Prompt、JSONL、WebSocket 事件或业务日志。
 
@@ -241,10 +251,6 @@ CampusClaw v2 是内部 Agent Runtime，不直接承接最终用户或浏览器�
 ```text
 wss://api.example.com/api/ws/chat
 ```
-
-调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
-客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换协议；
-服务端返回 `101` 后，WebSocket 才正式建立。
 
 调用 `connect("wss://...")` 只是请求客户端库开始上述过程，不表示 WebSocket
 已经建立。不存在“先建立 wss/WebSocket，再使用 HTTP Upgrade 升级”的过程。
@@ -266,7 +272,8 @@ parse wss URI
 建连指令，`https` 形式只是解释 opening handshake 承载在 HTTP/TLS 上；该路径
 不会因此自动获得普通 REST GET/POST 语义，也不会建立第二条连接。
 
-常见 HTTP/1.1 握手为：
+以下展示 Bearer 部署的常见 HTTP/1.1 握手；mTLS 部署在 TLS 阶段完成证书认证，
+可以不发送 `Authorization`：
 
 ```http
 GET /api/ws/chat HTTP/1.1
@@ -310,11 +317,11 @@ Request/Response/Event Frame，连接级错误使用 WebSocket close code。
 `model_id` 可省略并沿用已保存值。显式切换模型要经过 Model Manager，活动
 run 存在时拒绝；缺失或已删除 Session 不得由 resume 隐式重建。
 
-### 6.3 pi-mono-java v1 需要先承认的缺口
+### 6.3 pi-mono-java v1：query token 仅存在于文档
 
-现有 AsyncAPI 写了 query `token`，但固定基线的 Upgrade 路由只读取
-`conversation_id`。所以当前状态应表述为“文档存在 token 参数，所分析路由
-未实现其验证”，不能在 v2 设计中把它当作可复用的认证实现。
+固定基线的 AsyncAPI 声明了 query `token`，但 `ServerMode` Upgrade 路由只
+读取 `conversation_id`，没有提取或验证 token。因此，v1 不能被视为已经实现
+Upgrade 认证，v2 也不能复用一个并不存在的认证实现。
 
 ## 7. 命令、并发与响应关联
 
@@ -337,7 +344,9 @@ v1 依据顶层 `type` 分支执行命令。命令可带 `id`，服务端会返�
 
 ### 7.3 CampusClaw v2
 
-v2 固定三种 Frame：
+客户端发送 RequestFrame 后，CampusClaw 先按封闭 Schema 校验顶层字段，再
+返回唯一关联的 ResponseFrame；模型和 Tool 的异步输出通过独立 EventFrame
+发送。未知字段返回 `INVALID_REQUEST`。v2 固定三种 Frame 和一种错误结构：
 
 ```text
 RequestFrame  = {type:"req", id, method, params?, traceparent?}
@@ -382,17 +391,20 @@ OpenClaw Chat `delta` 同时提供三种客户端可利用的信息：
 这种设计能兼容逐步演进的客户端，也能处理模型输出被重写的情况。代价是
 delta 和累计快照可能同时存在，客户端必须实现清晰的优先级。
 
-### 8.2 Java v1 为什么会重复传累计 Message
+### 8.2 Java v1：每次更新重传累计 Message
 
-Java 内部 `MessageUpdateEvent` 已经同时保存累计 `AssistantMessage` 和
-细粒度 `AssistantMessageEvent`。v1 handler 选择前者映射为
-`message_update.message`，所以生成长度为 `n` 的回答时，网络会反复发送不断
-增长的对象，最坏总传输量趋近 O(n²)。这种格式不是 WebSocket 规范违规，但
-效率低，且 Tool、thinking、文本增量只能通过完整对象差分解释。
+Java v1 每次发送 `message_update` 时都会重传截至当前的完整 Message。回答
+长度为 `n` 时，总传输量最坏趋近 O(n²)，客户端必须从完整对象中差分文本和
+thinking 增量；Tool 生命周期另有 v1 独立事件，但 Message 内容本身仍按累计
+对象传输。原因是 Java 内部 `MessageUpdateEvent` 同时保存累计
+`AssistantMessage` 和细粒度 `AssistantMessageEvent`，而 v1 handler 选择前者
+映射为 `message_update.message`。这种格式不是 WebSocket 规范违规，但效率低。
 
 ### 8.3 CampusClaw v2 的 typed delta
 
-v2 事件族为：
+CampusClaw v2 每次 `message.updated` 只发送本次 typed delta；完整 Message 只
+在完成、恢复快照和历史读取时返回。客户端按 `message_id + content_index`
+合并增量，并在终态用完整 Message 对账。事件族为：
 
 ```text
 run.started
@@ -429,7 +441,10 @@ toolcall_start / toolcall_delta / toolcall_end
 
 ### 9.1 OpenClaw：重新投影权威状态
 
-OpenClaw 客户端文档要求把重连视为对“持久历史 + 当前内存 run”的新投影：
+OpenClaw 客户端断线重连后不会续用旧连接的事件序列。客户端重新订阅 Session，
+用 `chat.history` 替换本地持久消息；存在 `inFlightRun` 时，再恢复该 run 的
+缓冲状态并按 run 内序列继续处理。源码文档把该过程定义为对“持久历史 + 当前
+内存 run”的新投影：
 
 1. 重新建立 Session 和消息订阅；
 2. 调用 `chat.history(sessionKey)` 替换本地持久消息；
@@ -451,7 +466,10 @@ Session 的历史仍可再次读取，但 active run 被连接生命周期终止
 
 ### 9.3 CampusClaw v2：ManagedRunHub 原子恢复
 
-v2 把所有权从连接移到 `ManagedSessionPool/ManagedRunHub`：
+CampusClaw v2 的 WebSocket 断开时只取消该连接的订阅，AgentSession 和
+AgentLoop 继续执行 active run，`ManagedRunHub` 维护投影和恢复状态。客户端
+重连时，`connect` 原子取得订阅、cursor 和 active-run 快照，然后只接收
+cursor 之后的 delta。所有权关系为：
 
 ```text
 WebSocket connection = subscriber
@@ -476,13 +494,16 @@ Message、active tools、终态和 `run_seq`。
 
 ### 10.1 OpenClaw
 
-`hello-ok` 返回连接 policy。Gateway 广播对每个连接维护 buffered amount 和
-序列；慢消费者上的可丢事件可以被跳过，其他情况关闭连接。客户端以序列缺口
-和权威重载恢复。
+OpenClaw Gateway 检测到连接缓冲达到慢消费者阈值时，会跳过标记为
+`dropIfSlow` 的事件，或关闭无法继续发送的连接。事件被跳过会形成可检测的
+序列缺口，客户端随后通过权威状态重载恢复；`hello-ok.policy` 向客户端披露
+相关限制。
 
 ### 10.2 CampusClaw v2
 
-v2 选择更严格的 Chat 输出策略：
+CampusClaw v2 不静默丢弃 `message.updated` delta。单帧超过上限时以 `1009`
+关闭连接；连接缓冲超过上限时以 `1013` 关闭连接，客户端随后通过原子快照
+恢复。具体策略为：
 
 - 默认单帧上限 1 MiB，连接缓冲上限 4 MiB，以 connect response 的实际值为准；
 - 超限帧使用 WebSocket close code `1009`；
@@ -516,7 +537,9 @@ MANAGER_UNAVAILABLE
 
 ### 11.1 Thinking
 
-CampusClaw v2 固定三级披露：
+CampusClaw v2 对实时事件、重连快照和历史读取应用同一个 thinking 披露上限；
+默认级别是 `hidden`。单次 `chat.send` 只能在当前允许上限内降低披露级别，
+不能借此提升上限。三级披露为：
 
 - `hidden`：默认，只发送 thinking 开始/结束状态；
 - `summary`：只发送 Model Manager 明确提供的安全摘要，不从原始 thinking 合成；
@@ -543,7 +566,10 @@ WebSocket 的 Tool 事件只是“向客户端披露执行状态”，不承担 
 
 ### 11.3 附件
 
-OpenClaw `chat.send` Schema 允许携带附件 envelope。CampusClaw v2 改为：
+CampusClaw v2 不通过 WebSocket 传输附件内容；`chat.send` 只接受已经绑定当前
+`session_id` 的 `attachment_id[]`。上层服务在此前通过 REST 完成上传、扫描、
+归属与业务授权，Runtime 只校验制品状态、Session 绑定和 Agent 可用性。完整
+流程为：
 
 1. 通过 REST 上传；
 2. 上层服务完成大小限制、MIME/安全处理、tenant/user 归属和业务授权；
@@ -551,8 +577,9 @@ OpenClaw `chat.send` Schema 允许携带附件 envelope。CampusClaw v2 改为�
 4. WebSocket `chat.send` 只提交 `attachment_id[]`；
 5. Runtime 只校验附件存在、未过期、Session 绑定和 Agent 可用性。
 
-这是安全加固和架构改造。收益是 WebSocket 保持轻量、附件可复用且容易审计；
-代价是客户端多一个上传阶段，并要处理制品过期。
+OpenClaw `chat.send` Schema 则允许携带附件 envelope。CampusClaw 的差异属于
+安全加固和架构改造：收益是 WebSocket 保持轻量、附件可复用且容易审计；代价
+是客户端多一个上传阶段，并要处理制品过期。
 
 ### 11.4 凭据和审计
 
@@ -580,11 +607,12 @@ v1 AsyncAPI 描述了 query token，但分析到的 `ServerMode` 路由没有提
 handler 也以手写 `type` 分支处理消息。因此 AsyncAPI 目前更接近说明文档，
 不是实现的唯一可执行来源。
 
-### 12.3 CampusClaw v2：AsyncAPI 是规范，但尚不是实现
+### 12.3 CampusClaw v2：AsyncAPI 是目标规范
 
-中文版 [AsyncAPI 3.1 制品](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
-完整描述安全方案、connect、命令、响应、事件、Schema、错误和例子。Java
-落地时应：
+CampusClaw v2 尚未实现；中文版
+[AsyncAPI 3.1 制品](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+当前是规范性目标，不是 Java 运行时事实。它已经定义安全方案、connect、命令、
+响应、事件、Schema、错误和例子。Java 落地时应：
 
 - 从同一 Schema 生成或复用 DTO/validator；
 - 在解码后、进入 `SessionTransport` 前完成 Frame 和参数校验；
@@ -596,11 +624,14 @@ handler 也以手写 `type` 分支处理消息。因此 AsyncAPI 目前更接近
 
 ### 12.4 Transport 依赖方向
 
+OpenClaw 已在 SDK 客户端抽象 Transport，但服务端广播仍直接依赖 WebSocket；
+CampusClaw v2 则把服务端 Session 状态机置于 `SessionTransport` 后面。
+
 ![WebSocket Transport 依赖倒置对比](websocket_transport_dependency_inversion_comparison.svg)
 
 [PlantUML 源码：`websocket_transport_dependency_inversion_comparison`](diagram.puml#L242)
 
-OpenClaw 最新 SDK 已把客户端依赖倒置到
+具体而言，OpenClaw 最新 SDK 已把客户端依赖倒置到
 `OpenClawTransport.request/events/close`，`GatewayClientTransport` 再封装
 WebSocket 客户端；这是完整的客户端 Transport 边界。服务端 method handler
 通过 `RespondFn` 隔离具体发送动作，但 `GatewayWsClient` 和广播器仍直接持有
@@ -624,6 +655,10 @@ Session 生命周期。`close()` 只解除该连接订阅，不终止 active run
 
 ### 13.1 challenge 握手与 Upgrade 认证后 connect
 
+OpenClaw 在 WebSocket 建立后通过 challenge/connect 验证设备；CampusClaw 在
+HTTP Upgrade 阶段验证调用服务，返回 `101` 后再用 connect Frame 绑定协议和
+Session。`101` 只表示传输建立。
+
 OpenClaw：
 
 ```json
@@ -634,7 +669,9 @@ OpenClaw：
 
 CampusClaw v2：
 
-调用服务配置 `wss://api.example.com/api/ws/chat`，客户端库发送：
+以下展示 Bearer 部署。调用服务配置
+`wss://api.example.com/api/ws/chat` 后，客户端库发送；mTLS 部署可以不发送
+`Authorization`：
 
 ```http
 GET /api/ws/chat HTTP/1.1
@@ -662,14 +699,15 @@ Sec-WebSocket-Accept: <derived-value>
 {"type":"res","id":"connect-1","ok":true,"payload":{"protocol":2,"connection_id":"conn-1","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent-a","model":{"model_id":"model-a","name":"模型 A","reasoning":true},"session":{"state":"idle","thinking":"hidden"},"limits":{"max_frame_bytes":1048576,"max_connection_buffer_bytes":4194304,"heartbeat_seconds":20,"connect_timeout_seconds":5},"features":{"methods":["chat.send","chat.steer","chat.abort","chat.history","session.get","models.list","model.set","thinking.set","prompt_templates.list","skills.list"],"events":["run.started","message.started","message.updated","tool.started","tool.updated","tool.completed","message.completed","run.completed"],"capabilities":["structured_message_delta"]},"active_run":null}}
 ```
 
-关键差异：OpenClaw challenge 证明设备请求的新鲜性并服务于配对体系；
-CampusClaw 已在 HTTP Upgrade 完成调用服务认证，`101` 只表示 WebSocket
-传输建立，随后 `connect` RequestFrame 才执行协议与 Session 绑定。
+OpenClaw challenge 证明设备请求的新鲜性并服务于配对体系；CampusClaw 的
 最终用户和浏览器身份留在上层会话服务。
 客户端的未知 capability 被忽略且不回显；`features` 是当前连接的有效发现列表，
 不代替后续逐请求授权。
 
 ### 13.2 每次请求携带 `sessionKey` 与连接预绑定 Session
+
+OpenClaw 每个 Chat 请求都用 `sessionKey` 选择目标 Session；CampusClaw 的目标
+Session 已由连接固定，后续请求不得携带 `agent_id/session_id` 改变路由。
 
 OpenClaw：
 
@@ -689,6 +727,10 @@ CampusClaw 后续请求里没有 `agent_id` 或 `session_id`，不是信息缺�
 客户端逐帧改变授权目标。
 
 ### 13.3 `deltaText/message/replace` 与结构化 `message.updated`
+
+OpenClaw 的 delta 可以同时携带后缀、累计 Message 和 replace 指令；CampusClaw
+的 `message.updated` 只携带一个 typed delta，完整 Message 在
+`message.completed` 返回。
 
 OpenClaw：
 
@@ -753,7 +795,8 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed 
 
 ## 15. 未来 Gateway 边界
 
-只有出现以下需求时，才应设计新的 `/api/ws/gateway`：
+CampusClaw v2 不扩展 `/api/ws/chat` 的连接作用域。只有出现以下跨 Session
+控制面需求时，才新增独立 `/api/ws/gateway`：
 
 - 一个运维连接观察大量 Agent/Session；
 - 全局 Session 列表、运行状态和告警；
@@ -767,7 +810,8 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 ## 16. 实施与验收重点
 
-后续 Java 实施至少需要验证：
+只有以下行为都可以从 Java 实现和契约测试中观察到时，CampusClaw v2 才通过
+验收：
 
 - `wss://.../api/ws/chat` 产生合法 HTTP/1.1 Upgrade 请求，成功返回 `101`；
   相同 path 的普通 HTTP GET 不创建 Session；
@@ -776,7 +820,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
   成功或失败；
 - `mode=create/resume` 的 `session_id/agent_id/model_id` 规则，以及上层提供
   `session_id`、删除后不复用的边界；
-- 服务 Bearer、可选 mTLS、audience、scope 和过期凭据；
+- 服务 Bearer 或 mTLS、Bearer audience/scope 和过期凭据；
 - 三类封闭 Frame 的判别、未知顶层字段拒绝和 `payload/error` 互斥；
 - `traceparent` 缺失、合法、非法和到 Model/Tool Manager 的只读传播；
 - 未知 capability 忽略、必需 capability 缺失拒绝、`full_thinking` 只能降权；
@@ -810,6 +854,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.3.3` | 2026-08-03 | 全文统一为“主体动作、触发条件、可观察结果、机制与原因”的行为先行表述；同步 CampusClaw Manager 1.4.3 与 AsyncAPI 2.3.3，统一既有 Bearer/mTLS 替代认证口径，三态事实和 Schema 行为不变 |
 | `1.3.2` | 2026-08-03 | 同步 CampusClaw Manager 1.4.2 与 AsyncAPI 2.3.2；明确 wss URI 是客户端建连指令，WebSocket 仅在 HTTP 101 后成立，并补充复用同一 TCP/TLS 连接和 HTTP 基础设施的原因 |
 | `1.3.1` | 2026-08-03 | 同步 CampusClaw Manager 1.4.1 与 AsyncAPI 2.3.1；明确 wss URI、HTTP/1.1 Upgrade 请求、101 协议边界和 connect RequestFrame 是三个不同概念 |
 | `1.3.0` | 2026-08-02 | 同步 CampusClaw Manager 1.4.0 与 AsyncAPI 2.3.0；Runtime 改以全局唯一 session_id 为唯一隔离键，tenant/user 和浏览器认证留在上层会话服务，Upgrade 只认证调用服务 |

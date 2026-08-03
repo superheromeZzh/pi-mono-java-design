@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.2 |
+| 文档版本 | 1.4.3 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -12,22 +12,22 @@
 
 ## 1. 结论
 
-本设计使用一个目录编译程序，把 AGENT、SKILL、TOOL 元数据投影为
-pi-mono-java 可以直接读取的 Agent 运行目录。目录只承担 Prompt 和 Skill
-渐进式披露，不承担模型、工具或权限的运行时权威。
+目录编译程序读取固定版本的 AGENT、SKILL 和 TOOL 元数据，生成 pi-mono-java
+可以直接加载的 Agent 运行目录。生成结果只向模型渐进披露 Prompt 和 Skill；
+Model Manager、Tool Manager 仍分别掌握模型、工具和权限的运行时权威。
 
-每条 WebSocket v2 连接通过首帧 `connect` 固定绑定一个由上层会话服务提供的
-`session_id` 及其不可变 `agent_id`。服务端从受控根目录解析 Agent cwd，
-创建该 Agent 独立的 `AgentSession` 和 `Agent`。模型由 Model Manager 调用，业务
-工具由 Tool Manager 发现和执行。连接断开只取消事件订阅，不终止正在执行的
-run；客户端重连后从原子快照继续消费。
+上层会话服务先为一次对话分配 `session_id`，再建立 WebSocket，并在首个
+`connect` Frame 中提交 Session、Agent 和 Model。服务端校验成功后，从受控
+根目录解析 Agent cwd，创建或恢复该 Agent 独立的 `AgentSession` 和 `Agent`。
+连接断开时，服务端只取消事件订阅，不终止正在执行的 run；客户端重连后从
+原子快照继续消费。
 
-WebSocket 只作为网络 Adapter。服务端为每条连接创建一个
-`ManagedSessionTransport`，通过 `connect/request/events/close` 暴露强类型
-Session 通道。Request Frame 可携带 W3C `traceparent`，connect Response
-返回经过客户端声明、服务能力和授权共同过滤的有效 features。
+`ChatWebSocketAdapter` 接收网络 Frame，并把强类型命令交给当前连接独占的
+`ManagedSessionTransport`；Transport 返回响应并持续发布 Session 事件。
+Request Frame 可以携带 W3C `traceparent`，connect Response 返回经过客户端
+声明、服务能力和授权共同过滤的有效 features。
 
-模型实际可执行的工具固定为：
+模型只直接调用以下三个通用工具：
 
 ```text
 read
@@ -35,10 +35,11 @@ get_tool_info
 call_tool
 ```
 
-真实业务工具不注册为 `AgentTool`。Agent 直接绑定的工具摘要进入
-`SYSTEM.md`；Skill 绑定的工具摘要进入该 Skill 的
-`references/tools.json`。模型先看到逻辑工具的 `tool_id`，再通过
-`get_tool_info` 取得当前 Schema，通过 `call_tool` 执行。
+当任务需要真实业务操作时，模型先读取 Agent 或 Skill 披露的逻辑
+`tool_id`，再通过 `get_tool_info` 取得当前 Schema，通过 `call_tool` 请求
+执行。服务端不把真实业务工具注册为 `AgentTool`；Agent 直接绑定的工具摘要
+进入 `SYSTEM.md`，Skill 绑定的工具摘要进入该 Skill 的
+`references/tools.json`。
 
 最终运行目录为：
 
@@ -61,8 +62,9 @@ call_tool
 
 `references/tools.json` 只在 Skill 存在直接有效 `binding_tools` 时生成。
 
-WebSocket 流不再反复发送累计 `AssistantMessage`。实时帧只发送结构化
-delta，`message.completed`、重连快照和历史接口才携带完整 Message 投影。
+模型产生流式输出时，服务端只发送本次结构化 delta，不反复发送累计
+`AssistantMessage`。客户端只在 `message.completed`、重连快照和历史接口中
+接收完整 Message 投影。
 本专题的规范性协议文件为
 [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)。
 
@@ -80,7 +82,8 @@ CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负�
 
 ## 2. 范围与设计分类
 
-本文覆盖：
+本文定义元数据发布、Session 建立、Context 组装、Manager 调用和 WebSocket
+恢复的完整 Runtime 边界；它覆盖：
 
 - 三类元数据到 Agent 运行目录的确定性映射；
 - Agent cwd、Session 隔离和 WebSocket 握手；
@@ -92,7 +95,7 @@ CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负�
 - 单 JVM 内多个 Agent 的隔离边界；
 - 对 pi-mono-java 的目标适配点和验收要求。
 
-本文不实现：
+本文只规定目标行为和适配边界，不交付以下实现：
 
 - pi-mono-java Java 代码；
 - 元数据管理服务；
@@ -119,6 +122,9 @@ Runtime 的固定协议规则。上层删除会话时必须通过独立的 Sessi
 
 ### 3.1 pi-mono
 
+在固定基线 `fc85bdd…` 中，pi 将 systemPrompt、messages 和 tools 分开组装，
+并通过摘要与 `read` 渐进加载 Skill；下表列出直接源码证据。
+
 源码仓库：
 
 ```text
@@ -139,6 +145,9 @@ pi 的这些行为是本设计保留“Context 分层”和“Skill 渐进式加
 Tool Manager 代理模式属于架构改造，不是 pi 已有的动态逻辑工具协议。
 
 ### 3.2 pi-mono-java
+
+在固定基线 `1f7a542…` 中，pi-mono-java 按单一 cwd 创建 Session、加载
+Prompt/Skill/Tool，并在 WebSocket 断开时 abort；下表列出直接源码证据。
 
 源码仓库：
 
@@ -170,6 +179,10 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 
 ### 3.3 OpenClaw Gateway
 
+在固定基线 `b015925…` 中，OpenClaw Gateway Protocol v4 使用统一 Frame、
+Gateway 多路复用、双层序列和权威恢复；下表列出本设计借鉴或明确不采用的
+源码行为。
+
 源码仓库：
 
 ```text
@@ -195,6 +208,10 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 服务端逻辑会话通道，属于借鉴依赖倒置思想后的架构改造，不宣称为同一接口。
 
 ## 4. 目标组件与权威边界
+
+上层服务创建或恢复 Session 时，Resolver 选择目录，Factory 组装 Agent，
+Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表明确每项数据
+由谁掌握。
 
 | 组件 | 权威数据 | 主要职责 |
 |---|---|---|
@@ -226,6 +243,9 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 
 ### 5.1 总体映射
 
+目录编译器读取三类固定版本元数据，只把模型需要阅读的信息写入 Agent 目录，
+并把 Schema、权限和运行状态留在 Manager；具体映射如下。
+
 | 元数据字段 | 运行目录或运行时目标 | 消费者 | 规则 |
 |---|---|---|---|
 | `AGENT.id` | `<agent-runtime-root>/<agent-id>` | AgentDirectoryResolver、Manager、SessionPool | 作为不透明 ID；目录解析必须限制在受控根目录 |
@@ -251,8 +271,10 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 
 ### 5.2 路径解析
 
-`agent_id` 和 `skill.name` 均按不透明标识处理，不把其内容解释为路径。
-Resolver 和编译器至少执行：
+在选择 Agent 目录时，调用方只提交 `agent_id`，不提交 cwd；
+`AgentDirectoryResolver` 将它验证为安全的单路径段并解析到受控根目录，
+解析失败时拒绝当前 connect 或目录解析请求。编译器对 `skill.name` 执行相同
+约束，不把任一标识的内容解释为路径，并至少执行：
 
 1. 拒绝空值、NUL、`/`、`\`、`.` 和 `..`；
 2. 确保标识只形成一个路径段；
@@ -276,7 +298,9 @@ agentCwd = AgentDirectoryResolver.resolve(agent_id)
 
 ### 5.3 `SYSTEM.md`
 
-编译器按固定结构生成：
+编译器把 Agent 的业务指令写入 `<agent_instructions>`，把直接绑定的工具摘要
+写入 `<agent_tools>`；模型因此只在初始 Prompt 中看到 Agent 级工具。文件按
+以下固定结构生成：
 
 ```markdown
 <agent_instructions>
@@ -351,7 +375,8 @@ Tool 摘要从固定版本 TOOL 元数据解析。以下情况拒绝发布：
 
 ### 5.4 `SKILL.md`
 
-编译器接受两种互斥输入。
+Skill 服务可以提供结构化字段或完整 `SKILL.md` 制品；编译器每次只接受一种
+输入，并把两种输入规范化为同一文件格式。
 
 结构化输入：
 
@@ -396,7 +421,9 @@ Skill 自有正文不得预先包含同名保留章节，避免不同输入模�
 
 ### 5.5 `references/tools.json`
 
-格式固定为：
+模型读取某个 Skill 后，只有在需要外部操作时才读取该 Skill 的
+`references/tools.json`。编译器只把该 Skill 直接绑定的逻辑工具写入文件，
+且读取结果不授予执行权限。文件格式固定为：
 
 ```json
 {
@@ -424,7 +451,8 @@ Skill 自有正文不得预先包含同名保留章节，避免不同输入模�
 
 ### 5.6 Skill 依赖闭包
 
-从 `AGENT.binding_skills` 开始递归展开：
+编译器从 `AGENT.binding_skills` 递归展开依赖，解析并校验所有版本后，再为
+每个 Skill 独立生成目录。依赖展开路径为：
 
 ```text
 AGENT.binding_skills
@@ -449,7 +477,9 @@ AGENT.binding_skills
 
 ### 6.1 最终 Context
 
-pi-mono-java 每次模型调用仍使用原生 `Context`：
+AgentLoop 每次调用模型时都构造一个原生 `Context`；在 Managed 模式下，它只
+加入当前 Agent 的 SYSTEM、三个通用工具、Skill 摘要、cwd 和当前 Session
+消息。结构仍为：
 
 ```text
 Context
@@ -483,18 +513,24 @@ tools
 
 ### 6.2 Managed Prompt profile
 
-当前 Java `SystemPromptBuilder` 会追加默认园区文档和日期、OS、Java、Shell
-等环境信息。目标新增 Managed Prompt profile，只允许：
+Managed Prompt profile 只从当前 Agent 和当前 Session 的四个来源收集
+Prompt，不遍历进程级、祖先级或其他 Agent 的上下文。当前 Java
+`SystemPromptBuilder` 会追加默认园区文档和日期、OS、Java、Shell 等环境
+信息，因此目标 profile 只允许：
 
 1. 当前 Agent 的 `.campusclaw/SYSTEM.md`；
 2. 当前 Session 的三个 AgentTool；
 3. 当前 Agent 目录下的 Skill 摘要；
 4. 当前 Agent cwd。
 
-Managed profile 不遍历全局或祖先上下文，不加载其他 Agent Skill，也不追加
-进程环境明细。Legacy CLI 保持原有行为。
+Managed profile 不追加进程环境明细。Legacy CLI 保持原有行为。
 
 ### 6.3 Session 创建和 Context
+
+调用方完成 Upgrade 并发送 `connect` 后，服务端依次解析 Agent 目录、创建或
+恢复 Session、加载 Context 来源并创建 Agent，再原子捕获 active-run 恢复点；
+AgentLoop 在每轮模型调用时才构造最终 Context。connect 成功响应写出后，
+客户端先收到其中的可选快照，再按顺序收到快照 cursor 之后的事件。
 
 ![Managed Session 与 Context 组装](managed_session_context_assembly.svg)
 
@@ -523,7 +559,9 @@ Managed profile 不遍历全局或祖先上下文，不加载其他 Agent Skill�
 
 ### 7.1 通用工具接口
 
-模型可调用的 Schema：
+模型需要业务工具时，先把 `tool_id` 交给 `get_tool_info` 获取当前 Schema，
+再把 `tool_id + parameters` 交给 `call_tool` 请求执行。模型可调用的 Schema
+固定为：
 
 ```text
 get_tool_info:
@@ -573,7 +611,8 @@ output_schema
 
 ### 7.2 Tool description
 
-通用调用协议由两个真实 AgentTool 的 description 承载。
+两个通用 AgentTool 的 description 直接告诉模型如何发现和执行逻辑工具，
+因此每个 Agent 不需要重复编写这套协议。
 
 `get_tool_info`：
 
@@ -600,6 +639,10 @@ validation.
 
 ### 7.3 发现和执行
 
+模型使用 Agent 直接工具时，可以立即根据 SYSTEM 中的 `tool_id` 查询 Schema；
+模型使用 Skill 工具时，必须先读取 Skill 和对应的 `tools.json`，再发起查询和
+执行。
+
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
 [PlantUML 源码](diagram.puml#L185)
@@ -623,15 +666,18 @@ Skill 摘要匹配任务
 -> call_tool(tool_id, parameters)
 ```
 
-Tool Manager 在 `get_tool_info` 和 `call_tool` 中都校验：
+Tool Manager 收到发现或执行请求后，先重新校验共同的授权前置条件：
 
 1. Agent 存在且启用；
 2. tool_id 当前绑定到该 Agent 或其可用 Skill；
 3. Tool 存在且启用；
 4. Agent、Skill、Tool 权限允许当前操作；
 5. 调用服务及可选的短期委托能力满足执行策略；
-6. `call_tool` 参数符合当前 input schema；
-7. 执行结果符合 output schema。
+
+`call_tool` 通过上述校验后，按执行边界完成两次 Schema 校验：
+
+1. 调用工具前，校验 parameters 符合当前 input schema；
+2. 工具返回后，校验执行结果符合 output schema。
 
 推荐的稳定错误码：
 
@@ -652,7 +698,9 @@ Runtime 不缓存 permission 作为安全依据。Session 内可缓存 ToolDescr
 
 ### 8.1 接口
 
-逻辑接口：
+Runtime 创建或恢复 Session 时调用 `resolveModel` 校验模型；每轮模型执行时
+调用 `invoke`，Model Manager 再根据 Agent 绑定和模型状态选择真实 Provider。
+逻辑接口为：
 
 ```java
 List<ModelDescriptor> listModels(String agentId);
@@ -686,7 +734,9 @@ max output tokens
 
 ### 8.2 Java Provider
 
-目标增加：
+`ManagedAgentSessionFactory` 根据 Model Manager 返回的 descriptor 构造 Java
+`Model`；AgentLoop 调用模型时，Provider 从本次 metadata 读取 Agent、Session
+和 Trace Context 并转发请求。目标增加：
 
 ```text
 Api.MODEL_MANAGER("model-manager")
@@ -721,11 +771,14 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 
 ### 8.3 流式事件
 
+Model Manager 持续返回文本、thinking、ToolCall 和终态事件；Provider 将它们
+一对一映射为 Java `AssistantMessageEvent`，AgentLoop 再执行返回的 ToolCall。
+
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
 [PlantUML 源码](diagram.puml#L475)
 
-Model Manager 事件一对一映射为 Java `AssistantMessageEvent`：
+具体映射如下：
 
 | Manager 事件 | Java 事件 |
 |---|---|
@@ -748,8 +801,11 @@ Provider。
 
 ### 9.1 协议定位
 
-`/api/ws/chat` 直接提供版本 2，不为同一路由保留 v1 消息语义。它是一条
-连接绑定一个 `session_id + agent_id` 的 Session-scoped 协议：
+调用方建立 WebSocket 时，每条连接只绑定一个 Session；不同 Session 使用不同
+连接。首个 `connect` Frame 固定 `session_id + agent_id`，连接内同一时刻最多
+执行一个主 run。
+
+`/api/ws/chat` 直接提供版本 2，不为同一路由保留 v1 消息语义。连接关系为：
 
 ```text
 one WebSocket connection
@@ -814,7 +870,8 @@ GET/POST 调用的 RESTful 资源。调用方只需把 `wss://...` 交给 WebSoc
 客户端库，由库完成 TCP、TLS、HTTP Upgrade 和后续协议切换；不能先调用一个
 REST API，也不需要建立第二条连接。
 
-规范性的 HTTP/1.1 握手请求示例：
+以下是使用 Bearer 认证的 HTTP/1.1 握手请求示例；使用 mTLS 的部署在 TLS
+握手阶段完成证书认证，可以不发送 `Authorization`：
 
 ```http
 GET /api/ws/chat HTTP/1.1
@@ -827,10 +884,10 @@ Sec-WebSocket-Key: <random-base64-key>
 ```
 
 其中 `Connection`、`Upgrade`、`Sec-WebSocket-Version` 和
-`Sec-WebSocket-Key` 属于 WebSocket opening handshake；`Authorization`
-属于 CampusClaw 服务认证。mTLS 在发送这些 HTTP headers 之前的 TLS 握手中
-完成。普通 HTTP GET 即使 host 和 path 相同，只要没有合法 Upgrade headers，
-也不得创建 Runtime Session。
+`Sec-WebSocket-Key` 属于 WebSocket opening handshake；示例中的
+`Authorization` 属于 CampusClaw Bearer 服务认证。mTLS 在发送这些 HTTP
+headers 之前的 TLS 握手中完成。普通 HTTP GET 即使 host 和 path 相同，只要
+没有合法 Upgrade headers，也不得创建 Runtime Session。
 
 Upgrade 成功时服务端返回：
 
@@ -851,8 +908,8 @@ WebSocket 使用 HTTP opening handshake，而不是另起一套裸协议握手�
 为了：
 
 - 复用 `443`、TLS 证书、反向代理、负载均衡、防火墙和 API Gateway；
-- 在 WebSocket 占用长连接之前，使用 HTTP Host、path、Bearer 和状态码完成
-  路由、认证、授权、限流及拒绝；
+- 在 WebSocket 占用长连接之前，使用 HTTP Host、path、按配置提供的 Bearer
+  或此前完成的 mTLS 以及状态码完成路由、认证、授权、限流及拒绝；
 - 让客户端、服务端和中间代理通过 Upgrade/101 明确确认后续字节按 WebSocket
   Frame 解释，避免普通 HTTP 请求被误判；
 - 在同一条 TCP/TLS 连接上从 HTTP opening handshake 切换到 WebSocket，避免
@@ -876,12 +933,19 @@ Upgrade URL 不接受 `agent_id`、`model_id`、`session_id`、token 或
 其他业务查询参数。该端点是内部服务接口，不直接接受浏览器终端连接；浏览器
 先连接上层会话服务，再由上层服务调用 Runtime。认证方式：
 
-- 调用服务使用 `Authorization: Bearer <token>`，部署也可以在入口增加 mTLS；
+- 调用服务按部署配置使用 `Authorization: Bearer <token>` 或 mTLS；同时启用
+  两者的部署可以执行更严格的双重校验；
 - Bearer 或 mTLS 解析出的服务身份固化在不可变
   `ConnectionAuthContext`，业务 `tenant_id/user_id` 不进入该上下文；
 - 外部 Bearer 只有在 Runtime audience 和 scope 均有效时才接受；调用
   Model/Tool Manager 时使用独立的 Manager audience 凭据或 token exchange；
 - 凭据及其 hash 不进入 Prompt、JSONL、WebSocket 事件、异常详情或普通日志。
+
+规范性 AsyncAPI 的 `server.security` 同时列出 Bearer 和 mTLS，表示部署可以
+选择其中一种替代方案，而不是要求两者同时满足；要求双重校验的部署属于更
+严格的入口策略。该口径遵循
+[AsyncAPI 3.1 Server Object](https://www.asyncapi.com/docs/reference/specification/v3.1.0#server-object)
+对 `security` 数组的定义。
 
 客户端必须在收到 `101`、WebSocket 协议生效后的 5 秒内发送首个 JSON Text
 Frame，且该 Frame 只能是：
@@ -999,7 +1063,9 @@ Session 必须由上层服务分配新的 `session_id` 并建立新连接。
 
 ### 9.3 Frame、追踪、标识符和命令
 
-所有文本帧均使用 JSON。四类公共结构为：
+客户端使用 RequestFrame 发送命令；服务端为每个请求返回一个 ResponseFrame，
+并通过 EventFrame 主动推送 run、消息和工具事件。所有文本帧均使用 JSON，
+四类公共结构为：
 
 ```text
 RequestFrame  = {type:"req", id, method, params?, traceparent?}
@@ -1077,7 +1143,9 @@ Runtime 在接受 `chat.send` 前只校验附件存在、未过期、与当前 `
 
 ### 9.4 服务端 SessionTransport
 
-目标接口为：
+HTTP Upgrade 成功后，`ChatWebSocketAdapter` 为该物理连接创建一个
+`ManagedSessionTransport`。Adapter 负责网络，Transport 负责 Session 的
+连接、请求、事件和关闭语义；目标接口为：
 
 ```java
 interface SessionTransportFactory {
@@ -1132,7 +1200,8 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 
 ### 9.5 流式事件和 Message 投影
 
-服务端事件族固定为：
+模型开始执行后，服务端按 run、Message 和 Tool 三条生命周期发送事件；实时
+更新只携带本次 delta，完成事件才携带完整投影。事件族固定为：
 
 ```text
 run.started
@@ -1170,7 +1239,9 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 
 ### 9.6 Thinking 披露
 
-披露级别固定为 `hidden < summary < full`：
+服务端在 run 开始时确定 thinking 披露级别，默认隐藏正文；调用方只能降低
+已允许的级别，不能通过单次请求提升权限。披露级别固定为
+`hidden < summary < full`：
 
 - `hidden` 是默认值，只发送 `thinking_start` 和 `thinking_end` 状态，不发送
   原始 thinking 或摘要正文；
@@ -1187,8 +1258,12 @@ Tool 既通过 Assistant Message 内的 `toolcall_*` 表示模型生成过程，
 
 ### 9.7 run 所有权、重连和无竞态快照
 
-`ManagedSessionPool` 持有 AgentSession 和 active run；WebSocket 只持有
-订阅。连接关闭时取消订阅，不调用 `AgentSession.abort()`。run 只在以下
+WebSocket 断开时，Adapter 只取消当前订阅；AgentSession 和 AgentLoop 继续
+执行 active run，`ManagedRunHub` 继续维护 partial Message、active tools、
+`run_seq` 和恢复缓冲。调用方重连后从原子快照和后续 delta 恢复。
+
+`ManagedSessionPool` 持有 AgentSession 和 active run，WebSocket 不持有 run；
+连接关闭时不调用 `AgentSession.abort()`。run 只在以下
 情况终止：正常完成、显式 `chat.abort`、Agent 或调用服务授权撤销、服务端有界
 运行超时或进程故障。
 
@@ -1218,7 +1293,9 @@ bounded post-snapshot event buffer
 
 ### 9.8 流控、心跳和错误
 
-服务端不得静默丢弃 delta。默认限制为：
+Adapter 只有在上一帧发送成功后才请求下一条事件；如果待发送数据超过预算，
+它使用 `1013` 关闭 WebSocket 连接并取消该订阅，而 active run 继续执行。
+服务端不得静默丢弃 delta，默认限制为：
 
 | 限制 | 默认值 | 处理 |
 |---|---:|---|
@@ -1257,7 +1334,8 @@ Manager 认证失败不得把上游凭据或响应正文写入 `details`。`retr
 
 ### 9.9 内存隔离
 
-ManagedSessionPool 的 key 为：
+Runtime 只用全局唯一的 `session_id` 查找 `ManagedSession`；`agent_id` 是创建
+后不可变的属性，不是第二个主键。ManagedSessionPool 的 key 为：
 
 ```text
 session_id
@@ -1280,7 +1358,8 @@ Runtime，应在入口或独立授权服务校验 `service_principal + session_i
 
 ### 9.10 JSONL 路径
 
-Runtime Session 存储：
+Runtime 创建或恢复 Session 时，Session Store 按全局 `session_id` 定位记录，
+并把 JSONL 物理存放在对应 Agent 子目录。存储结构为：
 
 ```text
 <runtime-data-root>/
@@ -1318,12 +1397,16 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 ## 10. pi-mono-java 目标适配点
 
+实现 Managed WebSocket v2 时，Java 先把网络 Adapter 与 Session 逻辑拆开，
+再按 Session 隔离 cwd、Agent、Model、Tool 和 run；下表列出各源码位置的目标
+改造。
+
 | 当前位置 | 目标改造 | 分类 |
 |---|---|---|
 | WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.3.2 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.3.3 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1344,7 +1427,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ### 11.1 发布失败
 
-以下任一情况不发布 Agent 目录：
+编译器遇到以下任一问题时立即停止发布，并保留当前可运行目录不变：
 
 - Agent、Skill 或 Tool 元数据 Schema 无效；
 - Agent 未启用；
@@ -1356,11 +1439,12 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - 绑定对象缺失、未启用、版本冲突或有效权限为 deny；
 - Tool 摘要缺少 tool_id、name 或 description。
 
-生成过程在临时目录完成，失败时不改变当前可运行 Agent 目录。
+编译器始终在临时目录完成生成，只有全量校验成功后才原子替换当前目录。
 
 ### 11.2 建 Session 失败
 
-以下情况在 connect 阶段返回明确错误，不创建部分 Session：
+服务端只有在 Upgrade、`connect`、Agent、Session 和 Model 全部校验成功后才
+创建 Session；以下任一校验失败都返回明确错误，不留下部分状态：
 
 - Upgrade 调用服务身份无效、Bearer audience/scope 不允许或 mTLS 校验失败；
 - 首帧不是 connect、超时或协议版本不兼容；
@@ -1376,6 +1460,9 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ### 11.3 运行时失败
 
+运行期间发生故障时，拥有该资源的组件负责终止或恢复：Tool Manager 返回
+工具错误，Model Provider 结束模型流，WebSocket Adapter 只处理订阅和连接。
+
 - Tool Manager 拒绝时，把结构化错误作为 ToolResult 返回模型；
 - Model Manager 在流开始前失败时可按平台 retry policy 重试；
 - 流开始后失败直接结束当前 Assistant turn；
@@ -1386,6 +1473,11 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - Agent 目录更新只影响后续新 Session，运行中的 Session 保持创建时快照。
 
 ### 11.4 信任边界
+
+调用方在 connect 阶段只能用 Session、Agent 和 Model 标识完成 Runtime
+Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息、附件等业务
+参数。Runtime 负责解析目录、注入 Manager 上下文并限制文件和凭据边界。
+具体约束为：
 
 - connect 只能提供 session_id、agent_id 和 model_id，不能提供 cwd；
 - session_id 由上层会话服务管理，必须在 Runtime 部署范围内全局唯一且删除后
@@ -1402,6 +1494,9 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - Tool Manager 和 Model Manager 是每次调用的最终权限执行点。
 
 ## 12. 测试与验收
+
+实现必须通过目录、Context、Manager、多 Agent 和 WebSocket 五层验证；以下
+用例共同证明可观察行为与本设计一致。
 
 ### 12.1 目录编译器
 
@@ -1504,6 +1599,8 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 ## 13. 设计验收标准
 
+只有以下结果全部可以从实现和测试中观察到时，本设计才通过验收：
+
 - 文档给出完整的元数据字段、文件和运行时消费者映射；
 - cwd 只由 agent_id 经受控 Resolver 产生；
 - Agent 运行目录能被 pi-mono-java 原生 SYSTEM 和 Skill 路径读取；
@@ -1532,6 +1629,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.3 | 2026-08-03 | 全文统一为“调用方或组件动作、服务端处理、可观察结果、约束与原因”的行为先行表述；统一既有 Bearer/mTLS 替代认证口径，保持 Frame、Schema 和源码证据不变，并同步 AsyncAPI 2.3.3 |
 | 1.4.2 | 2026-08-03 | 明确 wss URI 是客户端建连指令而不是已建立的 WebSocket；补充 TCP、TLS、HTTP Upgrade、101 和 WebSocket Frame 的真实顺序及复用 HTTP 基础设施的原因；保留完整握手示例并同步 AsyncAPI 2.3.2 |
 | 1.4.1 | 2026-08-03 | 明确 wss URI、HTTP/TLS 握手目标、HTTP/1.1 Upgrade headers、101 协议边界和首个 connect RequestFrame 的分层关系；同步 AsyncAPI 2.3.1 |
 | 1.4.0 | 2026-08-02 | 收紧 Agent Runtime 边界：删除 tenant_id/user_id SessionScope 和直接浏览器认证，以全局唯一 session_id 作为唯一隔离键；调用服务负责用户归属与配额，Runtime 只做服务认证、Agent 绑定和 Session 执行；同步 AsyncAPI 2.3.0 |

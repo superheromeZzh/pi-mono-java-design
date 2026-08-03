@@ -100,7 +100,7 @@ title WebSocket Handshake and Authentication Comparison
 ' Observed behavior: OpenClaw emits a challenge before the first client connect Request Frame.
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
 ' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
-' Target design: the Runtime authenticates only the calling service, not the end user.
+' Target design: the Runtime authenticates the calling service with configured Bearer or mTLS, not the end user.
 ' Target design: a wss URI starts establishment; the WebSocket exists only after HTTP 101.
 ' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
 ' Design reason: service credentials stay in transport authentication and never enter chat payloads.
@@ -144,8 +144,8 @@ end note
 
 == CampusClaw v2 target: HTTP opening handshake ==
 CC -> CC : call WebSocket library\nconnect(wss URI)
-CC -> EDGE : one TCP connection, TLS, then\nHTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
-EDGE -> EDGE : complete TLS or mTLS\nvalidate service principal and Upgrade
+CC -> EDGE : open one TCP connection\nthen TLS or mTLS\nthen HTTP/1.1 GET /api/ws/chat\nUpgrade headers; Bearer if configured
+EDGE -> EDGE : validate Bearer or mTLS identity\nand validate Upgrade
 EDGE --> CC : HTTP/1.1 101 Switching Protocols
 
 == CampusClaw v2 target: application handshake ==
