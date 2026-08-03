@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.0.0 |
+| 文档版本 | 1.1.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.4.0 |
-| Manager 设计 | [`README.md`](README.md)，1.5.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.5.0 |
+| Manager 设计 | [`README.md`](README.md)，1.7.0 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -166,7 +166,20 @@ JSON RequestFrame：
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "model": {
       "model_id": "model-a",
-      "name": "Model A"
+      "name": "Model A",
+      "reasoning": true,
+      "input": {
+        "modalities": ["text", "image", "document"],
+        "attachment_media_types": [
+          "image/png",
+          "image/jpeg",
+          "application/pdf",
+          "text/plain"
+        ],
+        "max_attachments": 10,
+        "max_attachment_bytes": 20971520,
+        "max_total_attachment_bytes": 52428800
+      }
     },
     "session": {
       "state": "idle",
@@ -219,7 +232,9 @@ JSON RequestFrame：
    `chat.history`；
 6. `features.events` 按规范顺序包含全部八类 Chat 事件；它是不可拆分的
    协议集合，缺少 `message.completed` 或 `run.completed` 时必须终止连接；
-7. `session.state=idle` 当且仅当 `active_run=null`。
+7. `model.input` 至少包含 text；上传前按 MIME、数量、单文件和总字节上限
+   预检，但不把客户端预检当作 Runtime 授权；
+8. `session.state=idle` 当且仅当 `active_run=null`。
 
 connect 成功前不得发送其他 RequestFrame。connect 失败后，这条未绑定连接会
 关闭；客户端不能继续复用它。
@@ -498,7 +513,7 @@ full:    thinking_start(full)    -> thinking_delta*
 | `chat.history` | cursor?、limit?、run_id?、through_history_seq? | items、next_cursor?、has_more | 返回权威持久历史；run/水位过滤用于恢复 |
 | `session.get` | 无 | Session、Model、active_run | 读取当前权威状态 |
 | `models.list` | 无 | models、effective_model_id | 只返回当前 Agent 可用模型 |
-| `model.set` | model_id | model | active run 期间拒绝 |
+| `model.set` | model_id | model | active run 期间拒绝；目标模型不兼容当前有效 transcript 的附件 plan 时返回 ATTACHMENT_NOT_SUPPORTED 并保持原模型 |
 | `thinking.set` | level | thinking | active run 期间拒绝；full 还需 capability |
 | `prompt_templates.list` | cursor?、limit? | templates、next_cursor?、has_more | 当前 Agent 范围 |
 | `skills.list` | 无 | skills | 当前 Agent 已物化 Skill |
@@ -716,6 +731,8 @@ Session 是否已经提交。客户端必须建立新连接，用新 RequestFram
 | `RUN_ACTIVE` | 等待终态，或对返回/已知 run 执行 steer/abort |
 | `RUN_NOT_FOUND` | 调用 `session.get` 或 `chat.history` 对账 |
 | `INVALID_ATTACHMENT` | 重新上传或重新绑定附件 |
+| `ATTACHMENT_NOT_READY` | 按 retry_after_ms 等待上层处理为 READY，再以相同业务负载重试 |
+| `ATTACHMENT_NOT_SUPPORTED` | 按当前 ModelSummary.input 更换附件或 Model |
 | `MODEL_NOT_ALLOWED` | 调用 `models.list` 后重新选择 |
 | `MANAGER_UNAVAILABLE` | 仅在 retryable 时按 retry_after_ms 重试 |
 
@@ -756,13 +773,159 @@ WebSocket Close 处理：
 
 ## 12. 附件
 
-Runtime WebSocket 不上传二进制内容。调用方必须先通过上层附件服务完成上传、
-扫描、最终用户归属和 Session 绑定，再把 `attachment_ids[]` 放入
-`chat.send`。本专题没有定义附件 REST URL，因此客户端不能从本文虚构一个
-Runtime 上传端点。
+### 12.1 先上传，再发送引用
 
-Runtime 接受消息前只校验附件存在、未过期、绑定当前 `session_id` 且当前
-Agent 可用；失败返回 `INVALID_ATTACHMENT`，不会创建 run。
+Runtime WebSocket 不上传二进制内容。调用方必须先通过上层 Attachment Service
+完成上传、扫描、最终用户归属和 Session 绑定，再把 `attachment_ids[]` 放入
+`chat.send`：
+
+```text
+select file
+  -> create upload intent for session_id
+  -> HTTP multipart upload or Object Storage direct upload
+  -> finalize upload
+  -> poll or subscribe until READY
+  -> WebSocket chat.send with attachment_ids
+```
+
+本专题没有定义 Attachment Service 的规范性 REST URL。下面只是上层服务需要
+提供的行为示例，不是 CampusClaw Runtime 端点：
+
+```http
+POST /api/v1/attachments HTTP/1.1
+Authorization: Bearer <end-user-or-service-token>
+Content-Type: multipart/form-data
+
+session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV
+file=@orders.pdf
+```
+
+也可以由上层服务发放预签名 URL，让客户端直传 Object Storage，再调用 finalize。
+无论采用哪种上传方式，上层返回的资源状态至少遵循：
+
+```text
+UPLOADING -> PROCESSING -> READY
+                  |          |
+                  +-> BLOCKED+-> EXPIRED or DELETED
+                  +-> FAILED
+```
+
+只有 `READY` 可以首次发送。上传响应可向 UI 展示 `attachment_id`、display name、
+扫描后的 MIME、实际字节数和状态，但 `chat.send` 只提交 ID；不得把 URL、路径、
+MIME、文件名、size、hash、Bearer 或 Base64 复制到 WebSocket Frame。
+
+### 12.2 按有效 Model 输入策略预检
+
+connect、`models.list` 和 `model.set` 返回同一种 `ModelSummary.input`。UI 在选择
+或上传前检查：
+
+- `modalities` 是否包含附件所需的 `image` 或 `document`；
+- 扫描后的 MIME 是否在 `attachment_media_types`；
+- 数量是否不超过 `max_attachments`；
+- 单文件和总字节数是否分别不超过两个 byte limit。
+
+这是用户体验预检，不是授权结论。Runtime 仍使用 Attachment Service 返回的
+可信元数据重新检查；客户端文件扩展名和浏览器 `File.type` 都不可信。切换
+Model 后必须按新的 ModelSummary 重新预检尚未发送的附件。
+
+这些上限实际作用于下一次模型调用的完整 AttachmentContextPlan：当前有效
+transcript 中仍会进入 Context 的历史附件，加上本次新附件。`models.list` 可以
+列出 Agent 允许但不兼容当前历史的模型；调用 `model.set` 时 Runtime 会重新
+计算 plan，不兼容则返回 `ATTACHMENT_NOT_SUPPORTED` 并保持原模型。新
+`chat.send` 也会在 accepted 前检查“历史 + 新附件”。客户端不能通过换模型让
+Runtime 静默忽略旧附件；需要显式创建分支或使用上层提供的 Context 压缩流程。
+
+### 12.3 发送带附件的消息
+
+选择 READY 附件后，保持现有字符串 `message` 线协议：
+
+```json
+{
+  "type": "req",
+  "id": "send-attachment-1",
+  "method": "chat.send",
+  "params": {
+    "message": "分析附件中的订单数据",
+    "attachment_ids": ["attachment-01"],
+    "idempotency_key": "6f46bc26-8a14-4d63-b7b1-8f1f933a0d50"
+  }
+}
+```
+
+`attachment_ids` 省略等价于空数组；非空数组的顺序会成为用户 Message 中附件
+块的顺序，并参与幂等负载比较。附件引用是协议 2 的标准可选字段，不需要声明
+capability。当前版本只有 `chat.send` 接受附件，`chat.steer` 不接受。
+
+Runtime 对全部 ID 做一次批量、保序、全有或全无解析。只有全部附件都已授权、
+绑定当前 Session、处于 READY、固定为不可变内容版本，并符合当前 Model 输入
+策略后，才会持久化用户 Message、分配 run 并返回：
+
+```json
+{
+  "type": "res",
+  "id": "send-attachment-1",
+  "ok": true,
+  "payload": {
+    "run_id": "run-01",
+    "user_message_id": "message-user-01",
+    "accepted": true
+  }
+}
+```
+
+任一附件失败都不会建立部分 run。若 Response 丢失，建立新连接恢复后，使用新
+RequestFrame `id`、原 `idempotency_key` 和完全相同的 message、附件 ID 顺序、
+thinking 重新发送。已接受结果优先返回原 `run_id/user_message_id`，即使附件
+此后过期或 run 仍 active；接受前错误不占用幂等键。
+
+### 12.4 错误和 UI 动作
+
+| code | UI/调用方动作 |
+|---|---|
+| `INVALID_ATTACHMENT` | 不区分不存在、无权、未绑定、删除或过期；移除引用并由上层重新上传/绑定，不能探测 ID |
+| `ATTACHMENT_NOT_READY` | 保留选择，按 `retry_after_ms` 查询上层状态；只有 READY 后用原业务负载重试 |
+| `ATTACHMENT_NOT_SUPPORTED` | 根据当前 ModelSummary 提示 MIME/数量/大小不支持；更换附件或 Model |
+| `MANAGER_UNAVAILABLE` | 仅在 `retryable=true` 时退避；不得改为把 URL/Base64 内联发送 |
+
+Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请求错误；客户端会
+收到 `run.completed(outcome="error")`，用户消息和附件历史仍保留。
+
+### 12.5 历史和删除
+
+`chat.history` 的 role=user Message 会返回接受时冻结的 AttachmentContent：
+
+```json
+{
+  "message_id": "message-user-01",
+  "role": "user",
+  "status": "completed",
+  "content": [
+    {"type": "text", "text": "分析附件中的订单数据"},
+    {
+      "type": "attachment",
+      "attachment_id": "attachment-01",
+      "content_version": "version-01",
+      "filename": "orders.pdf",
+      "media_type": "application/pdf",
+      "size_bytes": 182734,
+      "sha256": "3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f"
+    }
+  ],
+  "created_at": "2026-07-30T07:59:59Z",
+  "completed_at": "2026-07-30T07:59:59Z"
+}
+```
+
+客户端只把 filename 当作显示文本，不能当成本地路径。历史不会返回下载 URL、
+read handle、对象存储 key 或 Provider file ID；需要下载时向上层 Attachment
+Service 单独申请经过授权的短期下载能力。公开 `sha256` 始终对应原始不可变
+内容；OCR、文本抽取或供应商上传等派生制品使用服务端内部的独立版本和摘要，
+客户端不能用公开 sha256 校验不同的派生字节。
+
+删除附件选择只影响尚未发送的草稿。已接受 Message 的内容版本至少保留到上层
+删除整个 Session；归档/恢复不会释放。Session 删除通过独立控制面发起，不是
+WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 run，客户端
+不得把被撤销附件静默从历史中删掉后重新生成不同答案。
 
 ## 13. 实现检查表
 
@@ -788,6 +951,16 @@ Agent 可用；失败返回 `INVALID_ATTACHMENT`，不会创建 run。
   再应用 partial 快照和释放缓冲；
 - `active_run=null` 时能用 history 的 Message/RunRecord 对账；
 - Request 超时使用新 request ID 和原 idempotency key；
+- 上传状态未到 READY 时不发送；按 ModelSummary.input 预检 MIME、数量和字节，
+  WebSocket 只提交 attachment_ids，不提交 URL、MIME、文件名、size 或 Base64；
+- 带附件 send 的任一引用失败时不乐观显示为已接受；成功后按
+  user_message_id 对齐带 AttachmentContent 的权威历史；
+- `INVALID_ATTACHMENT` 不用于探测资源存在性，`ATTACHMENT_NOT_READY` 按建议
+  间隔重试，`ATTACHMENT_NOT_SUPPORTED` 要求更换附件或 Model；
+- model.set 遇到历史附件不兼容时保持原模型；chat.send 的预检包含有效历史与
+  新附件，客户端不假设 Runtime 会为适配模型静默丢弃历史内容；
+- 已接受附件的 Response 丢失时用原 ID 顺序和原幂等键重试，不重新上传或改写
+  业务负载；历史 filename 只作显示，下载另走上层短期授权接口；
 - create connect 响应丢失时用相同 Session/Agent/Model 重试 create，不改用
   resume；
 - `full_thinking` 只有在有效 capability 回显后才进入 UI；
@@ -806,14 +979,24 @@ pi-mono-java 固定基线的当前行为是：
   [`ChatWebSocketHandler.java#L422-L459`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L422-L459)、
   [`useChatWs.ts#L439-L448`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/frontend/src/composables/useChatWs.ts#L439-L448)；
 - Java 内部已经提供 text/thinking/toolcall 细粒度事件：
-  [`AssistantMessageEvent.java#L44-L164`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java#L44-L164)。
+  [`AssistantMessageEvent.java#L44-L164`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java#L44-L164)；
+- 当前 UserMessage 虽接受 ContentBlock 列表，但联合类型只有
+  text/image/thinking/toolCall，ImageContent 保存 base64；固定基线没有通用
+  attachment ID、不可变版本或读取租约：
+  [`UserMessage.java#L20-L31`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/UserMessage.java#L20-L31)、
+  [`ContentBlock.java#L17-L24`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ContentBlock.java#L17-L24)、
+  [`ImageContent.java#L9-L18`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java#L9-L18)；
+- 固定基线的 follow-up 文档把 WebSocket attachment input 列为待设计项：
+  [`ws-chat-followups.md#L12-L37`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/docs/plans/ws-chat-followups.md#L12-L37)。
 
 本文全部 v2 交互都是目标设计，尚未实现。typed delta、`user_message_id`、
-Session-scoped connect、run 独立生命周期、原子快照和历史 RunRecord 属于架构
-改造；服务认证、凭据隔离、thinking 投影和附件边界属于安全加固。
+Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecord、附件
+解析/租约/输入装配属于架构改造；服务认证、凭据隔离、thinking 投影和附件
+控制面/数据面边界属于安全加固。
 
 ## 15. 版本历史
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.1.0 | 2026-08-03 | 增加可直接实施的附件上传状态机、完整 AttachmentContextPlan/Model 切换预检、仅 ID 的 chat.send、批量原子接受、错误动作、幂等重试、AttachmentContent 历史、source digest 与 Session 保留/删除说明；同步 AsyncAPI 2.5.0 和 Manager 1.7.0 |
 | 1.0.0 | 2026-08-03 | 首版；给出客户端角色、建连、connect、chat.send、typed delta reducer、redacted thinking、命令、水位历史、快照恢复、错误、关闭码和 TypeScript dispatcher 的完整接入路径 |

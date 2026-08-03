@@ -3,7 +3,7 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.4.0
+  version: 2.5.0
   description: |
     调用方使用 `wss://api.example.com/api/ws/chat` 请求建立安全 WebSocket。
     客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换
@@ -22,6 +22,12 @@ info:
     业务删除。CampusClaw 将 `session_id` 作为不透明的 Runtime Session 标识，
     不接收或维护 tenant_id、user_id。调用方提供的 `session_id` 必须在一个
     Runtime 部署范围内全局唯一，删除后不得复用。
+
+    文件内容由上层 Attachment Service 通过 HTTP 或 Object Storage 接收、
+    扫描并绑定到 `session_id`；WebSocket `chat.send` 只传
+    `attachment_ids`。附件引用是协议 2 的标准可选字段，不是 capability。
+    Runtime 只使用调用服务身份和已绑定 Session 解析不可变附件版本，不接受
+    客户端 URL、MIME、文件名、Base64 或 tenant/user 字段。
 
     协议版本 2 固定使用 request/response/event Frame 和结构化消息增量，
     不通过 capability 协商其他累计 Message 格式，并直接替换 `/api/ws/chat`
@@ -191,6 +197,19 @@ components:
                 model_id: model-a
                 name: 模型 A
                 reasoning: true
+                input:
+                  modalities:
+                    - text
+                    - image
+                    - document
+                  attachment_media_types:
+                    - image/png
+                    - image/jpeg
+                    - application/pdf
+                    - text/plain
+                  max_attachments: 10
+                  max_attachment_bytes: 20971520
+                  max_total_attachment_bytes: 52428800
               session:
                 state: running
                 thinking: hidden
@@ -258,6 +277,25 @@ components:
             payload:
               items:
                 - type: message
+                  history_seq: 20
+                  run_id: run-01
+                  message:
+                    message_id: message-user-01
+                    role: user
+                    status: completed
+                    content:
+                      - type: text
+                        text: 分析附件中的订单数据
+                      - type: attachment
+                        attachment_id: attachment-01
+                        content_version: version-01
+                        filename: orders.pdf
+                        media_type: application/pdf
+                        size_bytes: 182734
+                        sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
+                    created_at: '2026-07-30T07:59:59Z'
+                    completed_at: '2026-07-30T07:59:59Z'
+                - type: message
                   history_seq: 21
                   run_id: run-01
                   message:
@@ -285,6 +323,25 @@ components:
               code: RUN_ACTIVE
               message: 当前 Session 已存在 active run。
               retryable: true
+        - name: 附件仍在处理
+          payload:
+            type: res
+            id: send-3
+            ok: false
+            error:
+              code: ATTACHMENT_NOT_READY
+              message: 附件处理尚未完成。
+              retryable: true
+              retry_after_ms: 1000
+        - name: 当前模型不支持附件
+          payload:
+            type: res
+            id: send-4
+            ok: false
+            error:
+              code: ATTACHMENT_NOT_SUPPORTED
+              message: 附件类型、数量或大小不符合当前模型输入策略。
+              retryable: false
     ServerEventFrame:
       name: ServerEventFrame
       title: 有序 Session 事件
@@ -453,6 +510,32 @@ components:
       description: |
         模型或 Runtime 为一个 run 内的工具调用提供 tool_call_id。服务端用它
         关联 toolcall 内容和 Tool Manager 事件；它不参与 Session 路由。
+    AttachmentId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        上层 Attachment Service 生成的不透明资源 ID。它不是 Bearer capability，
+        也不扩展 Runtime Session 路由；每次首次接受的新 chat.send 都必须结合
+        不可变调用服务身份和当前 session_id 解析。已接受幂等重试直接读取冻结
+        结果，不重新解析。调用方不能用 URL、路径或对象存储 key
+        替代该值。READY 后 ID 不得重新指向其他内容，删除后不得复用；接受时
+        仍额外冻结 content_version 和 sha256 以支持历史重放与安全撤销。
+    AttachmentContentVersion:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+      description: Attachment Service 为已通过扫描的不可变内容版本生成的稳定标识。
+    AttachmentMediaType:
+      type: string
+      minLength: 3
+      maxLength: 127
+      pattern: '^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$'
+      description: Attachment Service 通过内容嗅探得到并规范化为小写的可信 MIME type。
+    Sha256:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+      description: Attachment Service 对不可变原始内容计算并验证的十六进制 SHA-256。
     RequestId:
       type: string
       minLength: 1
@@ -469,8 +552,8 @@ components:
       description: |
         调用方可以在 RequestFrame 中提供 W3C traceparent。服务端收到请求后先
         执行 Schema 预检，再使用标准解析器校验完整规则；非法值返回
-        INVALID_REQUEST。合法值只传播到遥测、Model Manager 和 Tool Manager，
-        不写入 Prompt、JSONL 或业务事件。
+        INVALID_REQUEST。合法值只传播到遥测、Model Manager、Tool Manager 和
+        Attachment Service 调用，不写入 Prompt、JSONL 或业务事件。
     IdempotencyKey:
       type: string
       minLength: 8
@@ -479,7 +562,8 @@ components:
         副作用命令的幂等键，作用域为 session_id + method。Request 超时或连接
         中断后，调用方使用新的 RequestFrame.id 和原 idempotency_key 重试。
         traceparent 和 RequestFrame.id 不参与业务负载等价比较。服务端在
-        Session 未删除期间保留已接受结果。
+        Session 未删除期间保留已接受结果。chat.send 在执行 active-run 与附件
+        当前状态检查前，先查询已接受的同 key 结果；接受前错误不占用幂等键。
     Timestamp:
       type: string
       format: date-time
@@ -620,7 +704,11 @@ components:
       description: |
         幂等负载由 message、attachment_ids 的顺序和值以及 thinking 是否省略和
         具体值共同决定；RequestFrame.id 和 traceparent 不参与。相同 key 携带
-        不同幂等负载返回 INVALID_REQUEST。
+        不同幂等负载返回 INVALID_REQUEST。服务端先返回已经接受的同 key 结果，
+        再处理 RUN_ACTIVE 或重新解析附件；首次请求只有在全部附件原子解析为
+        不可变版本、取得 Session 保留引用和当前 run 受控读取句柄，并验证
+        “有效历史附件 + 本次新附件”的完整 AttachmentContextPlan 符合模型输入
+        策略、持久化用户消息后，才可以提交 accepted=true。
       required:
         - message
         - idempotency_key
@@ -635,10 +723,16 @@ components:
             max_message_bytes。
         attachment_ids:
           type: array
+          default: []
           maxItems: 32
           uniqueItems: true
+          description: |
+            已由上层 Attachment Service 绑定当前 session_id 的不透明 ID。数组
+            省略或为空表示没有附件。协议 2 对附件引用不要求 capability；32 是
+            线协议硬上限，当前 ModelSummary.input 可能给出更低的有效数量和
+            字节限制。调用方不得同时提交 URL、MIME、文件名或 Base64。
           items:
-            $ref: '#/components/schemas/Identifier'
+            $ref: '#/components/schemas/AttachmentId'
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
         thinking:
@@ -845,6 +939,10 @@ components:
     ModelSetParams:
       type: object
       additionalProperties: false
+      description: |
+        active run 期间拒绝。服务端在持久化切换前，为当前有效 transcript 生成
+        AttachmentContextPlan；若任何仍会进入下一次模型调用的历史附件不符合
+        目标 ModelSummary.input，返回 ATTACHMENT_NOT_SUPPORTED 且保持原模型。
       required:
         - model_id
       properties:
@@ -947,12 +1045,102 @@ components:
         - $ref: '#/components/schemas/ThinkingSetRequest'
         - $ref: '#/components/schemas/PromptTemplatesListRequest'
         - $ref: '#/components/schemas/SkillsListRequest'
+    ModelInputPolicy:
+      type: object
+      additionalProperties: false
+      description: |
+        Model Manager 返回的当前 Agent 与 Model 的有效输入策略。调用方用它在
+        上传和 chat.send 前完成 UI 预检；Runtime 仍以 Attachment Service
+        返回的可信大小和 MIME 重新校验。数量和字节限制作用于下一次模型调用
+        的完整 AttachmentContextPlan，包括当前有效 transcript 中仍保留的历史
+        附件与本次新附件，而不只是 attachment_ids。max_attachments=0 表示该模型只接受
+        无附件消息，此时 media type 数组和两个字节限制都必须为空或为零。
+      required:
+        - modalities
+        - attachment_media_types
+        - max_attachments
+        - max_attachment_bytes
+        - max_total_attachment_bytes
+      properties:
+        modalities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          contains:
+            const: text
+          items:
+            type: string
+            enum:
+              - text
+              - image
+              - document
+          description: 当前有效 Model 能消费的规范化输入模态；chat.send 始终包含 text。
+        attachment_media_types:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/AttachmentMediaType'
+          description: 经过 Agent、Model、部署和 Attachment Service 策略求交集后的精确 MIME allowlist。
+        max_attachments:
+          type: integer
+          minimum: 0
+          maximum: 32
+        max_attachment_bytes:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        max_total_attachment_bytes:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+      allOf:
+        - if:
+            properties:
+              max_attachments:
+                const: 0
+            required:
+              - max_attachments
+          then:
+            properties:
+              modalities:
+                maxItems: 1
+              attachment_media_types:
+                maxItems: 0
+              max_attachment_bytes:
+                const: 0
+              max_total_attachment_bytes:
+                const: 0
+        - if:
+            properties:
+              max_attachments:
+                minimum: 1
+            required:
+              - max_attachments
+          then:
+            properties:
+              attachment_media_types:
+                minItems: 1
+              max_attachment_bytes:
+                minimum: 1
+              max_total_attachment_bytes:
+                minimum: 1
+              modalities:
+                anyOf:
+                  - contains:
+                      const: image
+                  - contains:
+                      const: document
+      x-runtime-constraints:
+        - max_attachment_bytes must be less than or equal to max_total_attachment_bytes
+        - MIME, count and byte checks use trusted Attachment Service metadata, not Frame metadata
     ModelSummary:
       type: object
       additionalProperties: false
       required:
         - model_id
         - name
+        - input
       properties:
         model_id:
           $ref: '#/components/schemas/ModelId'
@@ -968,6 +1156,8 @@ components:
         max_output_tokens:
           type: integer
           minimum: 1
+        input:
+          $ref: '#/components/schemas/ModelInputPolicy'
     SessionSummary:
       type: object
       additionalProperties: false
@@ -1222,9 +1412,50 @@ components:
                     - result
                 - required:
                     - error
+    AttachmentContent:
+      type: object
+      additionalProperties: false
+      description: |
+        已接受用户消息中的稳定附件快照，用于 JSONL、chat.history 和 UI 恢复。
+        字段来自 Attachment Service 的可信描述，不来自 chat.send。它只允许
+        出现在 role=user 的持久化 Message；不包含 URL、读取句柄、Bearer、
+        对象存储 key 或 Base64。filename 仅用于转义后的 UI 显示，不能解释为路径。
+      required:
+        - type
+        - attachment_id
+        - content_version
+        - filename
+        - media_type
+        - size_bytes
+        - sha256
+      properties:
+        type:
+          const: attachment
+        attachment_id:
+          $ref: '#/components/schemas/AttachmentId'
+        content_version:
+          $ref: '#/components/schemas/AttachmentContentVersion'
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\x00-\x1F\x7F/\\]+$'
+          description: Attachment Service 清理控制字符后的显示名；调用方渲染时仍必须转义。
+        media_type:
+          $ref: '#/components/schemas/AttachmentMediaType'
+        size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        sha256:
+          $ref: '#/components/schemas/Sha256'
     ProjectedMessage:
       type: object
       additionalProperties: false
+      description: |
+        Runtime 对客户端和历史返回的权威 Message。AttachmentContent 只允许出现
+        在 role=user 的 content 中，并表示 chat.send 接受时冻结的不可变版本；
+        assistant/tool Message 不得生成附件引用。
       required:
         - message_id
         - role
@@ -1255,10 +1486,42 @@ components:
               - $ref: '#/components/schemas/ThinkingContent'
               - $ref: '#/components/schemas/ToolCallContent'
               - $ref: '#/components/schemas/ToolResultContent'
+              - $ref: '#/components/schemas/AttachmentContent'
         created_at:
           $ref: '#/components/schemas/Timestamp'
         completed_at:
           $ref: '#/components/schemas/Timestamp'
+      allOf:
+        - if:
+            properties:
+              role:
+                const: user
+            required:
+              - role
+          then:
+            properties:
+              content:
+                type: array
+                minItems: 1
+                maxItems: 33
+                items:
+                  - $ref: '#/components/schemas/TextContent'
+                additionalItems:
+                  $ref: '#/components/schemas/AttachmentContent'
+        - if:
+            properties:
+              role:
+                enum:
+                  - assistant
+                  - tool
+            required:
+              - role
+          then:
+            properties:
+              content:
+                not:
+                  contains:
+                    $ref: '#/components/schemas/AttachmentContent'
     TerminalProjectedMessage:
       allOf:
         - $ref: '#/components/schemas/ProjectedMessage'
@@ -1462,7 +1725,10 @@ components:
         原子提交；随后即使连接断开，run 仍继续。服务端必须先向发起连接写出
         本 ResponseFrame，再向该连接写出该 run 的 run.started；其他观察连接
         不受这一局部排序约束。同一 idempotency_key 的等价重试优先返回原结果，
-        不因原 run 已处于 active 状态而返回 RUN_ACTIVE。
+        不因原 run 已处于 active 状态或附件后来过期而返回 RUN_ACTIVE 或重新
+        校验失败。存在附件时，accepted=true 还表示用户消息已经保存可信附件
+        快照、Session 保留引用和本 run 的受控读取句柄；读取句柄本身不持久化，
+        实际 read lease 在输入装配时打开并在成功、失败或取消后幂等关闭。
       required:
         - run_id
         - user_message_id
@@ -1609,7 +1875,9 @@ components:
             $ref: '#/components/schemas/HistoryItem'
           description: |
             同一页内按 history_seq 从旧到新排列。调用方按 message_id 和 run_id
-            去重并以较新的权威投影覆盖本地状态。
+            去重并以较新的权威投影覆盖本地状态。用户 Message 中的
+            AttachmentContent 是接受时的可信不可变快照，调用方据此恢复文件
+            卡片，不能据此构造对象存储 URL。
         next_cursor:
           type: string
           minLength: 1
@@ -1674,6 +1942,7 @@ components:
     ModelSetResult:
       type: object
       additionalProperties: false
+      description: 目标模型已通过当前 AttachmentContextPlan 校验并持久化为 Session 有效模型。
       required:
         - model
       properties:
@@ -1770,6 +2039,10 @@ components:
       description: |
         当前稳定错误码如下。调用方必须为未知字符串保留 UNKNOWN 分支；新增
         可恢复错误码不改变 Frame 结构，不能导致客户端反序列化失败。
+        INVALID_ATTACHMENT 同时覆盖不存在、越权、未绑定、删除和过期，避免
+        资源枚举；ATTACHMENT_NOT_READY 只在调用服务与 Session 授权通过后返回，
+        通常 retryable=true；ATTACHMENT_NOT_SUPPORTED 表示可信类型、数量或
+        字节数不符合当前有效 ModelInputPolicy，调用方应更换模型或附件。
       x-known-values:
         - INVALID_REQUEST
         - UNAUTHENTICATED
@@ -1782,6 +2055,8 @@ components:
         - RUN_ACTIVE
         - RUN_NOT_FOUND
         - INVALID_ATTACHMENT
+        - ATTACHMENT_NOT_READY
+        - ATTACHMENT_NOT_SUPPORTED
         - MANAGER_AUTH_FAILED
         - MANAGER_UNAVAILABLE
     Error:
@@ -1808,6 +2083,44 @@ components:
           type: integer
           minimum: 0
           description: 仅当 retryable=true 时有效；副作用请求仍必须复用原 idempotency_key。
+      allOf:
+        - if:
+            required:
+              - retry_after_ms
+          then:
+            required:
+              - retryable
+            properties:
+              retryable:
+                const: true
+        - if:
+            properties:
+              code:
+                const: ATTACHMENT_NOT_READY
+            required:
+              - code
+          then:
+            required:
+              - retryable
+              - retry_after_ms
+            properties:
+              retryable:
+                const: true
+        - if:
+            properties:
+              code:
+                enum:
+                  - INVALID_ATTACHMENT
+                  - ATTACHMENT_NOT_SUPPORTED
+            required:
+              - code
+          then:
+            properties:
+              retryable:
+                const: false
+            not:
+              required:
+                - retry_after_ms
     SuccessResponseFrame:
       type: object
       additionalProperties: false
@@ -2554,7 +2867,7 @@ x-method-contracts:
   chat.send:
     requestSchema: '#/components/schemas/ChatSendRequest'
     successPayloadSchema: '#/components/schemas/ChatSendResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, INVALID_ATTACHMENT, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, INVALID_ATTACHMENT, ATTACHMENT_NOT_READY, ATTACHMENT_NOT_SUPPORTED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
   chat.steer:
     requestSchema: '#/components/schemas/ChatSteerRequest'
     successPayloadSchema: '#/components/schemas/ChatSteerResult'
@@ -2578,7 +2891,7 @@ x-method-contracts:
   model.set:
     requestSchema: '#/components/schemas/ModelSetRequest'
     successPayloadSchema: '#/components/schemas/ModelSetResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, MODEL_NOT_ALLOWED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, MODEL_NOT_ALLOWED, ATTACHMENT_NOT_SUPPORTED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
   thinking.set:
     requestSchema: '#/components/schemas/ThinkingSetRequest'
     successPayloadSchema: '#/components/schemas/ThinkingSetResult'
@@ -2679,3 +2992,74 @@ x-websocket:
     '1011': 服务端暂时性内部错误；退避后 resume
     '1013': 消费端过慢；需要重连并通过快照恢复
     '1006': 仅为调用方观察到的异常断开，不能在线上 Close Frame 中发送；退避后 resume
+x-attachments:
+  transport: reference-only
+  websocketField: chat.send.params.attachment_ids
+  websocketCapabilityRequired: false
+  uploadOwner: upstream Attachment Service over HTTP or Object Storage
+  runtimePort: AttachmentResolver
+  contentAdapter: AttachmentInputAssembler
+  acceptedStates:
+    - READY
+  authoritativeUploadStates:
+    - UPLOADING
+    - PROCESSING
+    - READY
+    - BLOCKED
+    - FAILED
+    - EXPIRED
+    - DELETED
+  description: |
+    附件引用是协议 2 的标准可选字段，不通过 capability 开启。浏览器或上层
+    调用方先在上层 Attachment Service 创建上传意图；直接上传 Object Storage
+    时，预签名写入必须限制对象 key、大小、校验和和有效期。只有服务端完成
+    内容嗅探、完整性验证、安全扫描和 session_id 绑定并进入 READY 后，调用方
+    才提交 attachment_id。
+
+    Runtime 不维护 tenant_id/user_id，也不把 attachment_id 当作 Bearer
+    capability。AttachmentResolver 使用 Upgrade 固化的调用服务身份以及当前
+    Session 的 session_id、agent_id、model_id 批量解析全部 ID。Attachment
+    Service 在自身权威数据中完成最终用户归属判断；调用方不能在 Frame 中自报
+    tenant/user。未知、越权、未绑定、删除或过期统一返回 INVALID_ATTACHMENT。
+    只有先通过调用服务和 Session 授权后，才可以用 ATTACHMENT_NOT_READY 披露
+    processing 状态；输入类型、数量或可信字节数超出有效 ModelInputPolicy 时
+    返回 ATTACHMENT_NOT_SUPPORTED。
+
+    首次 chat.send 按“已接受幂等结果查询 -> RUN_ACTIVE 检查 -> 批量原子解析
+    和不可变版本固定 -> ModelInputPolicy 校验 -> Session 保留引用与 run 读取
+    句柄 reservation -> 用户 Message、内部 retention record、幂等结果和
+    active-run 原子提交”的顺序执行。任一附件
+    失败时整体拒绝且不创建 run；接受前错误不占用幂等键。已接受重试直接返回
+    原 run_id 和 user_message_id，不重新解释附件当前状态。
+
+    resolve 返回可信 AttachmentContent 快照、retention claim 及短期、不可
+    序列化的受控读取句柄。只有句柄可以打开绑定固定 content_version 的单消费
+    read lease，不能再次凭裸 attachment_id 查询，从而避免校验与读取之间的
+    替换竞态。lease 支持取消、背压、超时和字节上限，并在成功、失败或取消后
+    幂等关闭。读取句柄、lease、预签名 URL 和凭据不进入 JSONL、Prompt、Frame
+    或日志。Session Store 对客户端只投影 AttachmentContent，同时保存不公开的
+    retention record，或能以 session_id + message_id + attachment_id +
+    content_version 确定性重建 claim ID。进程恢复或后续 turn 只能用该内部
+    retention record 重开精确 content_version 的 read handle，不能按裸 ID
+    选择“当前版本”。
+
+    Attachment Service 保留快照所指的原始不可变版本，至少直到 Runtime
+    Session 删除；可额外缓存派生制品，但派生制品必须使用独立的内部
+    artifact_version、MIME、size 和 digest，不能替代或冒充公开 source sha256。
+    删除控制面先写 DELETING tombstone、阻止新请求并
+    处理 active run，再通过 durable outbox 幂等 release claim；归档或可恢复
+    Session 不释放。紧急安全撤销必须显式终止或拒绝后续 run，不能静默省略
+    历史附件并构造不同 Context。
+
+    Session Context Builder 在 model.set 和首次接受新的 chat.send 前生成下一次
+    模型调用的 AttachmentContextPlan；它包含有效 transcript（经过已持久化
+    compaction 后）中仍会发送的全部历史附件和本次新附件。model.set 对现有
+    plan 不兼容时返回 ATTACHMENT_NOT_SUPPORTED 且不切换；chat.send 对合并后
+    plan 不兼容时在 accepted 前返回同一错误且不创建消息或 run。已接受后才
+    发生的读取、完整性或 Provider 转换失败通过 run.completed(error) 表达。
+
+    AttachmentInputAssembler 在每次模型调用前重新核对实际 length、SHA-256、
+    嗅探 MIME、解压/像素复杂度和有效 ModelInputPolicy，再把稳定引用和受控
+    内容源转换成当前模型支持的 image/document/text 输入；Model Manager Provider 只处理
+    供应商格式与临时供应商文件生命周期。文件内容始终是不可信用户数据，不能
+    提升为 system、tool 或开发者指令。

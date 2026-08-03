@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.4.0` |
+| 文档版本 | `1.5.0` |
 | 状态 | 目标设计对比，CampusClaw v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.5.0` |
-| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.4.0`、协议号 `2` |
+| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.7.0` |
+| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.5.0`、协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -69,6 +69,8 @@ commit:     b015925bc30f6a8363f290b07d5f8588e21422b8
 | 精确 Session 订阅 | [`protocol.md#L583-L588`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/docs/gateway/protocol.md#L583-L588) | 同一 Gateway 连接可用 `sessions.messages.subscribe` 精确订阅一个 Session 的消息和可选 Approval |
 | Chat 事件 | [`logs-chat.ts#L161-L252`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/logs-chat.ts#L161-L252) | Chat 事件携带 `runId/sessionKey/seq`，区分 `status/delta/final/aborted/error` |
 | delta 与 replace | [`logs-chat.ts#L193-L240`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/logs-chat.ts#L193-L240)、[`server-chat.ts#L278-L296`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-chat.ts#L278-L296)、[`#L922-L944`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-chat.ts#L922-L944)、[`client-info.ts#L80-L93`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/client-info.ts#L80-L93) | Chat delta 是标准事件，不要求客户端 capability；正常前缀增长发送 `deltaText`，前缀不一致时发送 `replace`，并可带累计 `message` |
+| Chat 附件 Frame | [`logs-chat.ts#L85-L102`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/packages/gateway-protocol/src/schema/logs-chat.ts#L85-L102)、[`attachment-api.ts#L5-L33`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/ui/src/pages/chat/attachment-api.ts#L5-L33)、[`chat-send-request.ts#L30-L46`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/ui/src/pages/chat/chat-send-request.ts#L30-L46) | UI 把 Data URL 转成 base64 attachment envelope，并随 `chat.send` Request Frame 内联发送 |
+| 附件校验与 staging | [`attachment-normalize.ts#L18-L72`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/attachment-normalize.ts#L18-L72)、[`chat-attachments.ts#L340-L478`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/chat-attachments.ts#L340-L478)、[`chat-send-attachments.ts#L182-L282`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/chat-send-attachments.ts#L182-L282)、[`chat-send-handler.ts#L146-L169`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/chat-send-handler.ts#L146-L169) | 服务端在 ACK 前验证 base64/实际字节、嗅探 MIME 和限制，再按类型内联小图片或 offload/stage；不是只信任客户端元数据 |
 | Tool 事件投影 | [`chat-send-handler.ts#L482-L520`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-methods/chat-send-handler.ts#L482-L520)、[`server-chat.ts#L1478-L1532`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-chat.ts#L1478-L1532) | `tool-events` 注册 run-scoped agent Tool recipient；此外还存在面向 Session 订阅者的 `session.tool` 镜像 |
 | 广播与背压 | [`server-broadcast.ts#L240-L340`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/src/gateway/server-broadcast.ts#L240-L340) | 每个客户端连接独立维护外层 `seq`，按 scope 和精确订阅过滤；慢消费者分支可丢弃 `dropIfSlow` 事件或关闭连接 |
 | 重连恢复 | [`docs/gateway/clients.md#L111-L130`](https://github.com/openclaw/openclaw/blob/b015925bc30f6a8363f290b07d5f8588e21422b8/docs/gateway/clients.md#L111-L130) | 重连后重新订阅、读取 `chat.history`、采用 `inFlightRun`；连接或 run 序列缺口触发权威历史重载 |
@@ -97,6 +99,7 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 | Session 创建 | [`ChatWebSocketHandler.java#L115-L135`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L115-L135) | 建连时立即创建或恢复 Session，一条连接捕获一个 `AgentSession` |
 | 命令 | [`ChatWebSocketHandler.java#L195-L227`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L195-L227) | 使用 `prompt/steer/abort/new_session/set_model/...`，没有统一 request ID 和 Frame |
 | 活动 run | [`ChatWebSocketHandler.java#L252-L273`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L252-L273) | 正在流式输出时拒绝新的 `prompt`；`steer` 和 `abort` 为独立命令 |
+| 附件输入 | [`ChatWebSocketHandler.java#L252-L273`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L252-L273)、[`ws-chat-followups.md#L12-L37`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/docs/plans/ws-chat-followups.md#L12-L37)、[`ImageContent.java#L9-L18`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java#L9-L18) | v1 prompt 只接收字符串；Java 内容模型可内联 base64 图片，但 WebSocket 通用附件仍被列为待设计项 |
 | 累计更新 | [`ChatWebSocketHandler.java#L422-L459`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L422-L459)、[`chat-ws.yaml#L832-L840`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/docs/asyncapi/chat-ws.yaml#L832-L840) | `message_update` 每次发送累计的完整 Message |
 | Tool 事件 | [`ChatWebSocketHandler.java#L435-L486`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java#L435-L486) | 已有独立 `tool_start/tool_update/tool_end`，但使用 v1 特有字段和顶层事件格式 |
 | 可利用的内部 delta | [`MessageUpdateEvent.java#L17-L20`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/agent-core/src/main/java/com/campusclaw/agent/event/MessageUpdateEvent.java#L17-L20)、[`AssistantMessageEvent.java#L44-L164`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java#L44-L164) | Java 内部事件同时含累计 Message 和 `text/thinking/toolcall` 等细粒度事件，但 v1 WebSocket 未映射后者 |
@@ -109,9 +112,9 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 CampusClaw v2 尚未实现；本节描述的全部行为都是目标设计。其规范来源是以下
 两个仓库内制品：
 
-- [Manager 驱动的多 Agent 运行设计 1.5.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.4.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
-- [CampusClaw Chat WebSocket v2 客户端接入指南 1.0.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [Manager 驱动的多 Agent 运行设计 1.7.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.5.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [CampusClaw Chat WebSocket v2 客户端接入指南 1.1.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -206,7 +209,7 @@ Runtime 上下文、JSONL 和 run。代价是需要同时观察很多 Session �
 | 恢复 | 重新订阅、history、in-flight 状态、序列对账 | 仅可恢复已写历史，活动 run 已被 abort | 原子“订阅 + 快照”返回 run/history 水位和冻结配置；客户端先缓冲新事件、读取水位历史，再应用快照与 delta | 原因：消除订阅/快照竞态并恢复快照前已完成 Message/Tool；收益：新观察者也能完整对账；代价：恢复多一次可分页 history 同步 |
 | 帧与背压 | hello policy 给限制；广播有 slow-consumer 分支 | v1 无规范化上限和恢复契约 | 解压重组后的 UTF-8 JSON Message 默认 1 MiB、缓冲 4 MiB；1009/1013 | 原因：每连接资源必须有界且不混淆 wire fragment；收益：防止慢连接拖垮服务；代价：大消息需拆分且客户端必须恢复 |
 | 心跳 | Gateway policy 和客户端协议支持连接保活 | 应用层 JSON `pong` | 原生 WebSocket Ping/Pong，默认 20 秒 | 原因：让协议栈和基础设施识别保活；收益：业务消息更纯粹；代价：调用服务必须正确处理 Pong 和重连 |
-| 附件 | `chat.send.attachments` 可携带附件内容/描述 | v1 消息内附件 | 上层 REST 完成用户授权，WS 只传绑定 session_id 的 `attachment_ids[]` | 原因：用户归属和大对象处理不属于 Runtime；收益：边界清晰且便于扫描；代价：调用服务多一个上传阶段 |
+| 附件 | Request Frame 内联 base64 attachment envelope；服务端在 ACK 前验证实际字节/MIME/限制并 stage/offload | v1 prompt 只接收字符串；通用附件输入仍是 follow-up | 上层 HTTP/Object Storage 上传；WS 只传绑定 session_id 的 ID，Runtime 批量解析不可变版本、read handle 和 retention claim | 原因：ToB Runtime 不拥有用户文件数据面；收益：大对象、扫描、授权、历史保留和 Chat 背压解耦；代价：多一个上传/READY 阶段和跨服务租约一致性 |
 | 权限与审计 | role/scope/capability + session visibility | 没有 Agent 维度的协议授权 | 服务身份 + Agent/Model/Tool 校验；tenant/user 留在上层，凭据不进事件/JSONL | 原因：按所有权拆分授权；收益：Runtime 不复制用户体系；代价：服务间凭据和委托能力成为关键依赖 |
 | Transport 依赖方向 | SDK 客户端依赖 `OpenClawTransport`；服务端 handler 已抽象 `RespondFn`，但连接状态和广播仍直接依赖 WebSocket | `ChatWebSocketHandler` 直接拥有 Session、订阅和断线 abort | `ChatWebSocketAdapter` 依赖服务端 `SessionTransport`，`ManagedSessionTransport` 拥有业务状态机 | 原因：协议适配与 Session 生命周期分离；收益：可单测并保留未来 Adapter 扩展点；代价：需要严格定义连接与订阅状态机 |
 | 协议制品 | TypeBox → 运行时校验、类型和协议 Schema | AsyncAPI 1.0 文档与 Java 手写处理存在偏差 | AsyncAPI 3.1 规范制品，后续 Java 实现必须对齐 | 原因：先固定可评审契约；收益：可生成文档和契约测试；代价：实现前仍没有运行时校验，后续要建设生成链 |
@@ -441,7 +444,7 @@ canonical thinking 内容被某连接的披露策略抑制时，该连接仍收�
 
 收益是带宽、类型和事件职责更清晰；代价是客户端必须维护按
 `message_id + content_index` 合并的状态机，并在终态用完整 Message 对账。
-CampusClaw AsyncAPI 2.4.0 为此进一步规定 start/delta/end、Response
+CampusClaw AsyncAPI 2.5.0 为此进一步规定 start/delta/end、Response
 先于发起连接的
 run 事件、`user_message_id` 乐观消息对账、开放内容快照和 RunRecord 历史；
 完整算法见
@@ -591,20 +594,38 @@ WebSocket 的 Tool 事件只是“向客户端披露执行状态”，不承担 
 
 ### 11.3 附件
 
-CampusClaw v2 不通过 WebSocket 传输附件内容；`chat.send` 只接受已经绑定当前
-`session_id` 的 `attachment_ids[]`。上层服务在此前通过 REST 完成上传、扫描、
-归属与业务授权，Runtime 只校验制品状态、Session 绑定和 Agent 可用性。完整
-流程为：
+OpenClaw 把附件作为 `chat.send` Request Frame 的一部分。其
+`ChatAttachmentSchema` 可以携带 MIME、文件名、content、size 等字段；Web UI
+把 Data URL 转为 base64 envelope 后直接发送。服务端不是盲信这些字段：它先
+规范化 base64，计算实际字节数，嗅探 MIME、检查限制，再在 ACK 前完成
+attachment preparation；小图片可以内联，其他内容按策略 offload/stage。因此
+OpenClaw 的选择是“Gateway 请求拥有本次附件数据，并在请求接受前完成安全
+处理”，适合它的一体化 Chat Gateway 产品边界。
 
-1. 通过 REST 上传；
-2. 上层服务完成大小限制、MIME/安全处理、tenant/user 归属和业务授权；
-3. 上层服务把附件绑定到全局 `session_id`；
-4. WebSocket `chat.send` 只提交 `attachment_ids[]`；
-5. Runtime 只校验附件存在、未过期、Session 绑定和 Agent 可用性。
+CampusClaw v2 采用另一条完整链路：
 
-OpenClaw `chat.send` Schema 则允许携带附件 envelope。CampusClaw 的差异属于
-安全加固和架构改造：收益是 WebSocket 保持轻量、附件可复用且容易审计；代价
-是客户端多一个上传阶段，并要处理制品过期。
+1. 上层 Attachment Service 通过 HTTP/Object Storage 接收文件，完成最终用户
+   授权、内容嗅探、安全扫描和 `session_id` 绑定；
+2. 文件经历 `UPLOADING -> PROCESSING -> READY`，只有 READY 才可首次使用；
+3. WebSocket `chat.send` 只提交不透明 `attachment_ids[]`，不接受 URL、MIME、
+   文件名、size、hash 或 Base64；附件引用是协议 2 固有可选字段，不是 capability；
+4. Runtime 使用 Upgrade 固化的 service principal 和当前 Session 批量、保序、
+   全有或全无地解析 ID，固定 `content_version + sha256`、受控 read handle 和
+   retention claim；
+5. Runtime 先按当前 ModelSummary.input 校验“有效历史 + 新附件”的完整
+   AttachmentContextPlan；model.set 也以当前历史 plan 拒绝不兼容切换；
+   校验通过后再把用户 Message、AttachmentContent 快照、幂等结果和 run 占位
+   原子提交；
+6. AttachmentInputAssembler 通过版本绑定的短期 lease 读取，Provider 才转换成
+   实际模型格式；Session 删除前保留原始内容版本，派生制品使用独立内部
+   digest，删除时经 outbox 幂等 release。
+
+两种方案都在模型调用前验证附件，但信任边界不同：OpenClaw 验证本次 Frame
+携带的实际内容，CampusClaw 验证 Attachment Service 持有的不可变内容版本。
+CampusClaw 的差异是产品约束、安全加固和架构改造，不代表 OpenClaw 的实现
+不安全。收益是大对象上传、断点续传、扫描、最终用户授权、Session 历史保留与
+Chat delta 背压解耦；代价是客户端多一个 READY 阶段，Runtime 与 Attachment
+Service 还要实现 reservation/lease、幂等 retain/release 和崩溃 reconciliation。
 
 ### 11.4 凭据和审计
 
@@ -802,7 +823,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed 
 | 多种 active-run queue mode | 当前产品需要可预测的单主 run | `RUN_ACTIVE` + 显式 steer/abort |
 | 慢消费者丢弃 Chat delta | 单 Session Chat 更重视输出连续性 | 1013 断开 + 原子快照恢复 |
 | Gateway 全局 `stateVersion` | Chat 连接没有全局 presence/health 快照 | 连接 `seq` + run `run_seq` + active snapshot + history |
-| inline 大附件 | 企业附件需要独立归属、扫描和审计 | REST 上传 + attachment ID |
+| Request Frame 内联 base64 附件 | ToB Runtime 不拥有最终用户文件数据面；大对象、扫描和保留需要独立生命周期 | HTTP/Object Storage 上传 + attachment ID + 不可变 read lease |
 
 ### 14.3 相对 Java v1 的改造分类
 
@@ -819,7 +840,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusClaw v2 的 typed 
 | chat.send 返回 user_message_id 并约束响应顺序 | 架构改造 | 前端乐观消息、幂等重试与权威历史需要稳定对账 |
 | run 生命周期从 WebSocket 解耦 | 架构改造 | Pool 持有 active-run 引用、AgentSession/Loop 执行、Hub 维护恢复投影，因此断线可继续执行并支持多观察者 |
 | thinking 同策略投影 | 安全加固 | 防止通过历史/快照旁路 |
-| REST 附件 | 安全加固、架构改造 | 所有权、扫描、流控和审计 |
+| Attachment Service、Resolver、lease 与 retention claim | 安全加固、架构改造 | 将所有权、扫描和大对象数据面留在上层，同时保证 Runtime 的 TOCTOU、幂等接受与 Session 历史可重放 |
 
 ## 15. 未来 Gateway 边界
 
@@ -872,7 +893,13 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
   `tool.completed(done|error|aborted)`，并与终态 Message 对账；
 - 断线期间完成的 Message/RunRecord 历史对账；
 - history 水位分页在 `has_more=true` 时必须返回 next_cursor，false 时不返回；
-- 未绑定当前 session_id 的附件、Manager 认证失败、重组 Message 超限和慢消费者恢复；
+- 未绑定当前 session_id、跨 service principal、不存在或删除的附件统一返回
+  INVALID_ATTACHMENT；NOT_READY 只在授权后披露，Model 输入不兼容明确拒绝；
+- attachment_ids 批量解析全有或全无、固定内容版本与 digest；accepted 幂等重试
+  不重新解析过期附件，read lease、retention claim 和 Session 删除 outbox 可恢复；
+- Frame 不接受附件 URL/MIME/文件名/Base64，JSONL 只保存 AttachmentContent
+  快照和内部 claim 状态，不保存句柄、凭据或供应商 file ID；
+- Manager 认证失败、重组 Message 超限和慢消费者恢复；
 - `SessionTransport` 状态机、单订阅、背压、幂等 close 和断线不终止 run；
 - Java DTO、validator、事件编码与 AsyncAPI example 的契约一致性。
 
@@ -896,6 +923,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.5.0` | 2026-08-03 | 同步 CampusClaw Manager 1.7.0、AsyncAPI 2.5.0 和客户端指南 1.1.0；基于 OpenClaw 固定 commit 补充 base64 attachment envelope、实际字节/MIME 校验与 staging 证据，并对比 CampusClaw 的 HTTP/Object Storage、不可变引用、完整 AttachmentContextPlan、read lease、source/derived digest、retention claim、幂等接受和 Session 删除边界 |
 | `1.4.0` | 2026-08-03 | 同步 CampusClaw Manager 1.5.0、AsyncAPI 2.4.0 和客户端接入指南 1.0.0；明确 OpenClaw Chat delta 与 CampusClaw typed delta 都不依赖 capability，只有 full_thinking 等增强参与协商；补充 user_message_id、响应顺序、固定事件集、redacted thinking、历史水位快照、RunRecord 历史、客户端 reducer 和关闭恢复差异，并修正 Tool 投影与 run 所有权口径 |
 | `1.3.3` | 2026-08-03 | 全文统一为“主体动作、触发条件、可观察结果、机制与原因”的行为先行表述；同步 CampusClaw Manager 1.4.3 与 AsyncAPI 2.3.3，统一既有 Bearer/mTLS 替代认证口径，三态事实和 Schema 行为不变 |
 | `1.3.2` | 2026-08-03 | 同步 CampusClaw Manager 1.4.2 与 AsyncAPI 2.3.2；明确 wss URI 是客户端建连指令，WebSocket 仅在 HTTP 101 后成立，并补充复用同一 TCP/TLS 连接和 HTTP 基础设施的原因 |

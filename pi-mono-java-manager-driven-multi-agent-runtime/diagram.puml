@@ -649,3 +649,113 @@ Suppressed thinking updates use redacted placeholders.
 Request id selects the pending payload decoder.
 end note
 @enduml
+
+@startuml managed_attachment_reference_lifecycle
+title Managed attachment reference and model input lifecycle
+
+' Source evidence (pi-mono fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc):
+' packages/agent/src/agent.ts, prompt(), lines 336-395
+' packages/ai/src/types.ts, ImageContent, lines 345-349
+' Source evidence (pi-mono-java 1f7a5423219edfa4519d8719f1cc8a188ed72873):
+' modules/ai/src/main/java/com/campusclaw/ai/types/UserMessage.java, lines 20-31
+' modules/ai/src/main/java/com/campusclaw/ai/types/ContentBlock.java, lines 17-24
+' modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java, lines 9-18
+' docs/plans/ws-chat-followups.md, lines 12-37
+' Observed behavior: both baselines can carry inline image content but do not
+' define generic attachment references, immutable read handles, or retention claims.
+' Target design: attachment upload and authority stay outside Runtime; WebSocket
+' carries opaque IDs and Runtime accepts only an all-or-nothing immutable batch.
+' Design reason: keep large-object transfer off the Chat control plane, prevent
+' client metadata forgery and TOCTOU, and preserve reproducible Session history.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequence {
+  ArrowColor #334155
+  LifeLineBorderColor #64748B
+  LifeLineBackgroundColor #F8FAFC
+  ParticipantBorderColor #475569
+  ParticipantBackgroundColor #F8FAFC
+  GroupBorderColor #94A3B8
+  GroupBackgroundColor #F8FAFC
+}
+
+actor "End user" as User
+participant "Upstream session service" as Upstream
+participant "Attachment Service" as Attach
+database "Object Storage" as ObjectStore
+participant "ChatWebSocketAdapter" as WS
+participant "ManagedSessionTransport" as Transport
+participant "AttachmentResolver" as Resolver
+database "Runtime Session Store" as Store
+participant "AttachmentInputAssembler" as Assembler
+participant "Model Manager Provider" as Model
+
+User -> Upstream : request file upload
+Upstream -> Attach : create upload intent and bind session_id
+Attach --> Upstream : attachment_id and upload target
+User -> ObjectStore : upload bytes via HTTP
+Upstream -> Attach : finalize upload
+Attach -> ObjectStore : read and verify bytes
+Attach -> Attach : sniff MIME, hash, scan,\nfreeze content_version, mark READY
+Attach --> Upstream : READY snapshot
+
+Upstream -> WS : chat.send(message, attachment_ids,\nidempotency_key)
+WS -> Transport : typed SessionRequest + auth context
+Transport -> Store : lookup ACCEPTED idempotency result
+
+alt accepted result exists with the same payload
+  Store --> Transport : original run_id and user_message_id
+  Transport --> WS : accepted result
+  WS --> Upstream : ResponseFrame before any origin event
+else first attempt
+  Transport -> Transport : acquire Session single-writer guard\nand reject a different active run
+  Transport -> Resolver : resolve batch(service principal,\nsession_id, agent_id, model_id, IDs)
+  Resolver -> Attach : authorize, require READY,\nretain immutable versions
+  Attach --> Resolver : ordered snapshots, read handles,\nretention claims
+  Resolver --> Transport : all attachments or one safe error
+  Transport -> Transport : build history plus new attachment plan;\nvalidate frozen Model input policy
+  Transport -> Store : atomic commit user Message snapshots,\nretention records, idempotency result,\nrun and active-run reservation
+  Store --> Transport : run_id and user_message_id
+  Transport --> WS : accepted result
+  WS --> Upstream : ResponseFrame before run events
+
+  Transport -> Assembler : ordered snapshots and read handles
+  Assembler -> Resolver : open version-bound read leases
+  Resolver -> Attach : stream immutable content with limits
+  Attach -> ObjectStore : read fixed original object version
+  ObjectStore --> Attach : content bytes
+  Attach --> Assembler : bounded byte stream
+  Assembler -> Assembler : verify length, digest and MIME;\nconstruct provider-neutral input
+  Assembler -> Model : text plus ordered attachments
+  Model --> Transport : model stream
+  Assembler -> Resolver : close read leases exactly once
+end
+
+group Session deletion control plane
+  Upstream -> Store : delete session with deletion_id
+  Store -> Store : persist DELETING tombstone;\nreject create, resume and send
+  Store -> Attach : release claims through durable outbox
+  Attach --> Store : idempotent release acknowledgement
+  Store -> Store : delete JSONL and indexes;\nretain non-reusable tombstone
+end
+
+note over Upstream,ObjectStore
+HTTP or Object Storage is the file data plane.
+The WebSocket is only the command and event control plane.
+end note
+
+note over WS,Resolver
+The Frame never carries tenant, user, URL, path,
+MIME, filename, hash, credentials, or Base64.
+The immutable service principal comes from Upgrade auth.
+end note
+
+note over Store,Model
+Only stable AttachmentContent snapshots enter history.
+Read handles, leases, provider file IDs, and credentials
+remain transient. Retention records reopen exact versions.
+File bodies are untrusted user data.
+end note
+@enduml

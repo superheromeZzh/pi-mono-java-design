@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.6.0 |
+| 文档版本 | 1.7.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -35,6 +35,12 @@ Model Manager、Tool Manager 仍分别掌握模型、工具和权限的运行时
 `ManagedSessionTransport`；Transport 返回响应并持续发布 Session 事件。
 Request Frame 可以携带 W3C `traceparent`，connect Response 返回经过客户端
 声明、服务能力和授权共同过滤的有效 features。
+
+文件内容不经 WebSocket 传输。上层 Attachment Service 负责 HTTP/Object
+Storage 上传、内容嗅探、安全扫描、最终用户授权和 `session_id` 绑定；
+`chat.send` 只提交不透明 `attachment_ids[]`。Runtime 通过
+`AttachmentResolver` 把所有 ID 原子解析为不可变内容版本和受控读取句柄，
+再由 `AttachmentInputAssembler` 按有效 Model 输入策略构造本次模型输入。
 
 模型只直接调用以下三个通用工具：
 
@@ -105,6 +111,7 @@ CampusClaw 是 Agent Runtime，不是用户会话产品。上层会话服务负�
 - Managed Prompt 与 pi-mono-java `Context` 的组装；
 - Tool Manager 的逻辑工具发现和执行；
 - Model Manager Provider 的模型选择和流式事件适配；
+- 附件引用、原子接受、不可变内容租约、模型输入装配和 Session 保留语义；
 - 单 JVM 内多个 Agent 的隔离边界；
 - 对 pi-mono-java 的目标适配点和验收要求。
 
@@ -153,6 +160,7 @@ commit:     fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
 | Skill 文件 | [`packages/coding-agent/src/core/skills.ts#L277-L319`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/skills.ts#L277-L319) `loadSkillFromFile()` | 从 `SKILL.md` frontmatter 读取 name 和 description，正文不直接进入初始 Prompt |
 | 显式 Skill 调用 | [`packages/coding-agent/src/core/agent-session.ts#L1296-L1325`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/agent-session.ts#L1296-L1325) `_expandSkillCommand()` | `/skill:name` 读取 Skill 文件正文并加入当前会话 |
 | Tool 注册 | [`packages/coding-agent/src/core/agent-session.ts#L2458-L2491`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/coding-agent/src/core/agent-session.ts#L2458-L2491) `_refreshToolRegistry()` | 内置、Extension 和 SDK Tool 最终形成真实可执行 Tool Registry |
+| 图片输入 | [`packages/agent/src/agent.ts#L336-L395`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/agent/src/agent.ts#L336-L395) `prompt()`、[`packages/ai/src/types.ts#L345-L349`](https://github.com/badlogic/pi-mono/blob/fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc/packages/ai/src/types.ts#L345-L349) `ImageContent` | pi 的 Agent prompt 可接收图片；图片内容以 base64 data 和 MIME type 直接进入消息，没有通用 attachment ID、上传状态或内容租约 |
 
 pi 的这些行为是本设计保留“Context 分层”和“Skill 渐进式加载”的依据。
 Tool Manager 代理模式属于架构改造，不是 pi 已有的动态逻辑工具协议。
@@ -189,6 +197,8 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 | Provider 扩展点 | [`ApiProvider.java#L31-L59`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/provider/ApiProvider.java#L31-L59)、[`ApiProviderRegistry.java#L54-L80`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/provider/ApiProviderRegistry.java#L54-L80) | Spring 可发现统一 ApiProvider，并按 `Api` 分发 |
 | 调用元数据 | [`SimpleStreamOptions.java#L34-L45`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/SimpleStreamOptions.java#L34-L45) | 每次模型调用已有任意 metadata 字段可承载 Session 身份 |
 | 模型流事件 | [`AssistantMessageEvent.java#L44-L164`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java#L44-L164) | 已定义 start、text、thinking、toolcall、done、error 事件 |
+| 当前消息内容 | [`UserMessage.java#L20-L31`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/UserMessage.java#L20-L31)、[`ContentBlock.java#L17-L24`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ContentBlock.java#L17-L24)、[`ImageContent.java#L9-L18`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java#L9-L18) | Java 当前 UserMessage 接受 ContentBlock 列表，但封闭联合只含 text/image/thinking/toolCall，图片仍是 base64；没有通用附件引用或读取句柄 |
+| 附件后续项 | [`docs/plans/ws-chat-followups.md#L12-L37`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/docs/plans/ws-chat-followups.md#L12-L37) | 固定基线把 WebSocket 附件输入列为待设计项，并明确需要在 base64 与独立上传/引用之间选择 |
 
 ### 3.3 OpenClaw Gateway
 
@@ -231,7 +241,7 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 | Agent 元数据服务 | Agent 定义、models、Skill/Tool 绑定和 Agent 权限 | 为目录编译、模型授权和工具授权提供 Agent 视角 |
 | Skill 元数据或制品服务 | Skill 版本、name、description、content 或完整 `SKILL.md` | 提供可物化的 Skill 文档 |
 | Tool Manager | Tool 描述、Schema、状态、source、permission、执行实现 | 发现、授权、校验并执行逻辑工具 |
-| Model Manager | Model descriptor、状态、实际 Provider 路由和模型调用 | 校验 Agent-model 绑定并流式执行 |
+| Model Manager | Model descriptor、状态、有效输入策略、实际 Provider 路由和模型调用 | 校验 Agent-model 绑定，声明可接受模态/MIME/数量/字节上限并流式执行 |
 | Runtime bundle compiler | 固定版本、展开依赖、验证并生成 Agent 目录 | 把元数据投影为 pi-mono-java 资源 |
 | AgentDirectoryResolver | `agent_id` 到受控 cwd 的映射 | 阻止客户端选择任意工作目录 |
 | ManagedAgentSessionFactory | 当前 Agent 的 Prompt、Skill、Model、Tool 和 Session 装配 | 每个 Session 创建独立 Agent |
@@ -241,7 +251,9 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 | ManagedSessionPool | 全局唯一 `session_id` 到 Session 和 active run 的映射 | 内存隔离、恢复、Agent 绑定、运行所有权和淘汰 |
 | ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于连接持续维护恢复投影与游标，并为订阅者生成原子恢复点 |
 | ConnectionAuthAdapter | 调用服务身份与 Manager audience 凭据 | 校验服务间 Bearer 或 mTLS 身份并避免凭据进入 Agent 数据 |
-| Attachment service | REST 上传制品、Session 绑定和短期访问能力 | WebSocket 只引用上层已授权的 `attachment_id` |
+| Attachment Service | 上传状态、可信元数据、不可变内容版本、Session 绑定、扫描结论和读取授权 | 上层经 HTTP/Object Storage 上传；按调用服务身份和 `session_id` 原子解析附件引用 |
+| AttachmentResolver | 当前 Session、调用服务身份、附件 ID 列表、read handle 和 retention claim | 把 ID 批量解析为可信快照与 `AttachmentReadHandle`；只有句柄可打开 lease，不接受裸 ID 二次查询 |
+| AttachmentInputAssembler | Model 有效输入策略和附件受控内容流 | 将附件转成 Provider 中立的图片/文档输入；不把文件内容当作系统或工具指令 |
 | Runtime Session Store | JSONL 消息、Agent/Model 绑定和删除状态 | 按全局 `session_id` 持久化会话，不保存用户或租户身份 |
 
 运行目录是 Manager 数据的模型披露投影，不是授权数据库。目录中的
@@ -738,12 +750,22 @@ ModelEventStream invoke(
 id
 name
 reasoning
-input modalities
+input modalities: text, image, document
+attachment MIME allowlist
+max attachment count
+max bytes per attachment
+max total attachment bytes
 context window
 max output tokens
 ```
 
-真实 Provider、凭据、base URL、header 和路由留在 Model Manager。
+这些字段是 Agent、Model、部署和 Attachment Service 策略求交集后的有效输入
+策略，connect、`models.list` 和 `model.set` 都返回同一种 ModelSummary。客户端
+可据此预检，但 Runtime 仍必须使用 Attachment Service 返回的可信 MIME 和
+大小重新校验。数量和字节上限作用于下一次模型调用的完整
+`AttachmentContextPlan`：当前有效 transcript 中仍会发送的历史附件，加上本次
+新附件，而不是只检查 `attachment_ids[]`。真实 Provider、凭据、base URL、
+header 和路由留在 Model Manager。
 
 ### 8.2 Java Provider
 
@@ -1173,7 +1195,7 @@ session_id
 | `chat.history` | 可选 `cursor`、`limit`、`run_id`、`through_history_seq` | 按服务端披露策略返回按 `history_seq` 排序的 Message/RunRecord 和下一游标；run/水位过滤用于 active-run 恢复 |
 | `session.get` | 无 | 返回 Session、有效 Model、thinking 和 active-run 状态 |
 | `models.list` | 无 | 调用 `listModels(agent_id)`，只返回当前 Agent 可用模型 |
-| `model.set` | `model_id` | 调用 `resolveModel(agent_id, model_id)`；active run 期间拒绝 |
+| `model.set` | `model_id` | 调用 `resolveModel(agent_id, model_id)`；active run 期间拒绝；目标模型不兼容当前 AttachmentContextPlan 时返回 `ATTACHMENT_NOT_SUPPORTED` 并保持原模型 |
 | `thinking.set` | `level` | 设置 Session 默认披露级别；active run 期间拒绝 |
 | `prompt_templates.list` | 可选分页参数 | 返回当前 Agent 可见的模板摘要 |
 | `skills.list` | 无 | 返回当前 Agent 已物化 Skill 的 name、description、location |
@@ -1189,11 +1211,11 @@ idempotency_key 的等价重试必须返回同一 `run_id + user_message_id`，�
 run 当前仍 active，也不能先返回 `RUN_ACTIVE`。Request 超时不证明服务端没有
 执行；重试使用新的 RequestFrame id 和原 idempotency_key。
 
-附件必须先经上层服务的 REST 接口上传。上层服务完成 tenant/user 归属、
-扫描和业务授权，再把绑定当前 `session_id` 的 `attachment_ids` 交给 Runtime。
-Runtime 在接受 `chat.send` 前只校验附件存在、未过期、与当前 `session_id`
-绑定且可供当前 Agent 使用，不解析 tenant/user；客户端路径、URL 和二进制
-内容不能替代 ID。
+附件必须先经上层 Attachment Service 的 HTTP/Object Storage 数据面上传。
+WebSocket 只传绑定当前 `session_id` 的 `attachment_ids[]`；附件引用是协议 2
+的标准可选字段，不是 capability。调用方不能提交 URL、路径、对象存储 key、
+MIME、文件名或 Base64 代替权威元数据。Runtime 的解析、错误优先级、幂等
+提交边界、内容租约和模型输入装配见 9.11 节。
 
 ### 9.4 服务端 SessionTransport
 
@@ -1465,7 +1487,7 @@ session_id
 它们对应不同 AgentSession、Agent、cwd、Prompt、Skill、Model 和 Tool
 调用上下文。Runtime 不接受仅在某个 tenant 或 user 内唯一的短 ID；服务身份
 仍用于连接授权和审计，但不参与 Session key。若多个互不信任的上层服务共享
-Runtime，应在入口或独立授权服务校验 `service_principal + session_id` 访问权，
+Runtime，必须在入口或独立授权服务校验 `service_principal + session_id` 访问权，
 而不是把业务 tenant/user 放回 SessionPool key。
 
 ### 9.10 JSONL 路径
@@ -1507,6 +1529,259 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 [PlantUML 源码](diagram.puml#L263)
 
+### 9.11 附件引用与模型输入
+
+#### 9.11.1 所有权和上传状态
+
+附件使用“HTTP/Object Storage 数据面 + WebSocket 控制面”。上层会话服务或
+最终客户端先向 Attachment Service 申请上传，直接或经预签名 URL 写入对象
+存储，再通知 Attachment Service 完成校验。Runtime 不提供文件上传端点，也不
+接收 WebSocket Binary Frame、Base64、预签名 URL 或对象存储凭据。
+
+Attachment Service 拥有以下权威数据：
+
+- 最终用户、业务租户和调用服务的上传授权；
+- `attachment_id`、当前 `session_id` 绑定和不可变 `content_version`；
+- 内容嗅探后的 MIME、显示文件名、实际字节数和 SHA-256；
+- 病毒扫描、内容安全、隔离、过期、删除和保留状态；
+- 对 Runtime 发放的短期读取句柄和租约。
+
+上传生命周期固定为：
+
+```text
+UPLOADING -> PROCESSING -> READY
+                  |          |
+                  +-> BLOCKED+-> EXPIRED or DELETED
+                  +-> FAILED
+```
+
+只有 `READY` 可以首次用于 `chat.send`。Attachment Service 可以建模
+tenant/user，但 CampusClaw Runtime 不接收、持久化或使用这些字段；Runtime
+只携带已认证的调用服务身份和当前 `session_id` 解析引用。`attachment_id` 是
+不透明资源标识，不是 Bearer capability，知道 ID 本身不构成读取权限。
+
+#### 9.11.2 Runtime 端口和不可变读取句柄
+
+目标 Java 端口使用批量解析，避免部分附件成功后启动 run：
+
+```java
+interface AttachmentResolver {
+    CompletionStage<ResolvedAttachmentSet> resolveForSession(
+        AttachmentResolveCommand command,
+        ConnectionAuthContext authContext,
+        SessionInvocationMetadata metadata);
+
+    CompletionStage<AttachmentReadHandle> reopenRetainedContent(
+        AttachmentRetentionKey retentionKey,
+        ConnectionAuthContext authContext,
+        SessionInvocationMetadata metadata);
+}
+
+record AttachmentResolveCommand(
+    String sessionId,
+    String agentId,
+    String modelId,
+    List<String> attachmentIds) {}
+
+record ResolvedAttachment(
+    String attachmentId,
+    String contentVersion,
+    String filename,
+    String mediaType,
+    long sizeBytes,
+    String sha256,
+    AttachmentReadHandle readHandle,
+    AttachmentRetentionClaim retentionClaim) {}
+
+interface AttachmentReadHandle {
+    CompletionStage<AttachmentReadLease> open(
+        CancellationToken cancellation);
+}
+
+interface AttachmentReadLease extends AutoCloseable {
+    Flow.Publisher<ByteBuffer> content();
+    Instant expiresAt();
+    void close();
+}
+```
+
+`resolveForSession` 必须一次返回与请求顺序相同的完整集合，或整体失败。返回的
+可信元数据来自已扫描的不可变内容版本；调用方在 Frame 中不能覆盖。
+`AttachmentReadHandle` 是 Runtime 内部、短期、不可序列化的能力，绑定调用
+服务、Session 和内容版本。只有句柄可以打开单消费者
+`AttachmentReadLease`；禁止用裸 `attachment_id` 再查询一次，避免“校验版本
+A、读取版本 B”的 TOCTOU。Lease 支持背压、取消、读超时和字节上限，成功、
+失败或取消后都必须恰好关闭一次；`close()` 幂等。
+
+`reopenRetainedContent` 只接受 Runtime Store 中的内部 retention key，并精确
+绑定已接受的 `session_id + attachment_id + content_version + sha256`；它用于
+进程恢复或后续 turn 重建历史 Context。该方法不是按裸 ID 重新 resolve，也不
+允许选择最新版本，因此后续对话不会悄悄读取与原用户 Message 不同的文件。
+
+`traceparent` 可以经 `SessionInvocationMetadata` 传播到 Attachment Service
+遥测，但不能进入附件快照、JSONL 或访问日志中的凭据字段。解析结果不得包含
+长期对象存储凭据；如果内部使用预签名 URL，它只能封装在 read handle 后面，
+不能返回 WebSocket 客户端或模型。
+
+#### 9.11.3 校验和错误优先级
+
+Runtime 在首次接受 `chat.send` 前按以下顺序处理全部附件：
+
+1. 用不可变调用服务身份和当前 `session_id` 批量解析全部 ID；
+2. 校验每项仍为 `READY`、扫描通过、未隔离、未删除或过期；
+3. 由 Session Context Builder 生成“有效 transcript 中仍保留的历史附件 +
+   本次新附件”的完整 `AttachmentContextPlan`，校验其可信 MIME、数量、
+   单文件字节数和总字节数符合当前 ModelSummary.input；
+4. 取得每项的 Session 保留引用和当前 run 读取句柄 reservation；
+5. 将稳定 AttachmentContent 快照与用户消息一起提交。
+
+错误披露遵循先授权、后状态的原则：
+
+| 条件 | 错误 | 语义 |
+|---|---|---|
+| ID 不存在、调用服务无权、未绑定当前 Session、已删除或过期 | `INVALID_ATTACHMENT` | 统一不可重试响应，不泄露其他主体的资源是否存在 |
+| 已确认有权，但仍为 UPLOADING/PROCESSING | `ATTACHMENT_NOT_READY` | `retryable=true`，必须带 `retry_after_ms` |
+| 完整 AttachmentContextPlan 的可信 MIME、数量或字节数不符合当前 Model 有效输入策略 | `ATTACHMENT_NOT_SUPPORTED` | 不创建 run；调用方更换附件、压缩/分支 Context 或 Model |
+| Attachment Service 不可用 | `MANAGER_UNAVAILABLE` | 按统一 Manager 暂时失败策略处理 |
+
+客户端声明的 MIME、文件名、size 或 hash 即使存在也必须拒绝为未知字段，不能
+参与校验。`sha256` 的内容一致性由 Attachment Service 在 READY 前保证；
+Runtime 读取时按句柄绑定的 `content_version + sha256` 识别内容，不自行信任
+对象存储响应头。
+
+#### 9.11.4 幂等与原子接受边界
+
+`chat.send` 的附件顺序和值属于幂等业务负载。服务端处理顺序固定为：
+
+```text
+validate Frame and normalize omitted attachment_ids to []
+  -> look up accepted result by session_id + method + idempotency_key
+  -> if found, compare payload and return original run_id/user_message_id
+  -> reject RUN_ACTIVE for a new key
+  -> resolve all attachments and acquire retain/read reservations
+  -> build the next AttachmentContextPlan and validate frozen Model input policy
+  -> atomically persist user Message + attachment snapshots
+       + idempotency result + run_id + active-run reservation
+  -> write accepted ResponseFrame
+  -> start model input assembly and run execution
+```
+
+同 key 的已接受请求必须先于 `RUN_ACTIVE` 和附件当前状态检查返回原结果；即使
+附件随后过期，也返回原 `run_id + user_message_id`。接受前的
+`INVALID_ATTACHMENT`、`ATTACHMENT_NOT_READY`、`ATTACHMENT_NOT_SUPPORTED`
+或 Manager 暂时失败不占用幂等键。首次请求只有在所有附件都成功解析、保留和
+持久化后才返回 `accepted=true`；不得创建“缺少其中一个附件”的部分 run。
+
+跨 Attachment Service 与 Runtime Store 不要求 XA 事务。Attachment Service
+先发放可撤销 reservation/lease，Runtime 在单一本地事务提交消息、幂等结果和
+run 占位；本地提交失败时释放 reservation，提交成功后确认 Session 保留引用。
+后台 reconciliation 修复确认响应丢失，但不能静默改变已接受 Message 的附件
+集合。
+
+当前协议只允许 `chat.send` 创建带附件的用户消息；`chat.steer` 不接受
+`attachment_ids`。未来若允许 steer 附件，必须复用同一解析、快照、租约和
+幂等提交边界，而不是增加旁路。
+
+`model.set` 在没有 active run 时也必须先对当前有效 transcript 生成
+`AttachmentContextPlan`；目标模型不兼容时返回
+`ATTACHMENT_NOT_SUPPORTED`，且不持久化切换。`models.list` 仍可列出 Agent
+允许的全部模型，因为“模型可用”与“兼容当前 Session 历史”是两层事实。
+下一次新 `chat.send` 会用当前模型再次检查“历史 + 新附件”的合并 plan，并在
+accepted 前失败。只有已经接受后出现的内容读取、完整性或 Provider 转换故障
+才通过 `run.completed(outcome=error)` 表达。
+
+#### 9.11.5 Provider 中立输入装配
+
+接受成功后，`AttachmentInputAssembler` 使用已冻结的 Model 输入策略和已解析
+附件集合构造 Provider 中立输入；后续 turn 则以内部 retention record 精确重开
+历史内容。文本保持第一块，附件按请求顺序追加。它只
+通过 `readHandle.open(cancellation)` 获取有界内容流，并把取消信号、读超时和字节
+上限传播到下游。
+
+```java
+interface AttachmentInputAssembler {
+    CompletionStage<List<ModelInputContent>> assemble(
+        String text,
+        ResolvedAttachmentSet attachments,
+        ModelInputPolicy policy,
+        CancellationToken cancellation);
+}
+```
+
+这里的 `ModelInputContent` 是目标新增的 Provider 中立联合类型，不等同于当前
+Java 已有的 `ContentBlock`。第一版实现只有在对应 Provider adapter 已定义且
+ModelSummary.input 明确允许时才披露 image/document；不能先宣称 document
+支持，再把未知文件降级成 Prompt 文本。
+
+“有效 transcript”由现有 Session tree、分支和已持久化 compaction entry
+确定。仍在下一次 Context 中的 AttachmentContent 必须进入 plan；已经被一次
+显式、可审计的 compaction 替换为文本摘要的旧附件可以不再发送原始内容，但
+retention claim 仍按 Session 生命周期保留。Runtime 不能为了适配新模型临时
+静默丢弃历史附件；调用方必须选择兼容模型，或显式分支/压缩 Context。
+
+Model Manager Provider 再按实际 Provider 决定：
+
+- 图片映射为受支持的 image content；
+- PDF/Office 文档使用受控提取制品或供应商 file API；
+- 文本文件按编码和大小策略转换为文本块；
+- 临时供应商文件在 run 终态后按 Provider 策略回收。
+
+长期对象存储凭据、read handle 和供应商 file ID 都不能进入 Prompt、模型可见
+文本、JSONL 或 WebSocket 事件。文件名和文件正文都是不可信用户数据，不得
+解释为 SYSTEM、Tool description 或权限指令。Tool 若需要读取同一附件，必须
+通过独立、授权明确的工具协议取得内容，不能复用模型输入句柄。
+
+pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固定基线
+的 `ContentBlock` 也没有通用 AttachmentContent。因此
+`AttachmentResolver`、AttachmentContent、输入装配器及 Java Provider 转换
+全部属于目标架构改造，不是现有 pi 行为。
+
+#### 9.11.6 历史、保留与删除
+
+用户 Message 在 JSONL 和 `chat.history` 中保存接受时的稳定快照：
+
+```json
+{
+  "type": "attachment",
+  "attachment_id": "attachment-01",
+  "content_version": "version-01",
+  "filename": "orders.pdf",
+  "media_type": "application/pdf",
+  "size_bytes": 182734,
+  "sha256": "3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f"
+}
+```
+
+快照不包含 URL、Bearer、对象存储 key、Base64、read handle 或供应商 file
+ID。`AttachmentContent` 只允许出现在 role=user 的 Message；Assistant/Tool
+Message 不能伪造附件历史。
+
+Runtime Store 还要保存不向客户端投影的 `AttachmentRetentionRecord`，至少能
+以 `session_id + message_id + attachment_id + content_version` 确定性重建
+claim ID、retain 状态和 release 状态。只保存公开快照不足以可靠删除；read
+handle 和短期 lease 仍不得持久化。
+
+Attachment Service 必须保留 AttachmentContent 快照所指的原始不可变内容，
+直到上层删除 Session 并由 Runtime 释放 Session 保留引用。派生制品可以缓存，
+但必须使用独立的内部 artifact version、MIME、size 和 digest，不能替代或冒充
+公开的 source `sha256`；Assembler 读取原始版本时仍按快照校验 length、MIME
+和 SHA-256。
+普通“用户删除附件列表项”不能让既有 Session 历史变成不可重放。若安全事件
+要求紧急吊销内容，Attachment Service 应显式标记 revoked；尚未读取的 active
+run 必须失败或 abort，历史保留快照和吊销状态，不能静默省略附件后继续生成。
+
+上层通过独立控制面幂等请求删除 Session。Runtime 先写入 DELETING/tombstone
+并拒绝 create/resume/send，再按策略 abort active run、关闭读取 lease，通过
+outbox 幂等释放全部 retention claim，最后清理 JSONL 和索引；tombstone 继续
+阻止 `session_id` 复用。归档或仍可恢复的 Session 不释放 claim。一个内容版本
+被多个 Session 引用时，Attachment Service 只有在最后一个 claim 释放且没有
+合规保留后才可物理删除。删除完成的外部语义采用“release 已可靠写入 outbox”，
+异步物理删除不阻塞控制面响应，但必须可查询最终完成状态。
+
+![附件引用、接受与模型输入生命周期](managed_attachment_reference_lifecycle.svg)
+
+[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L653)
+
 ## 10. pi-mono-java 目标适配点
 
 实现 Managed WebSocket v2 时，Java 先把网络 Adapter 与 Session 逻辑拆开，
@@ -1518,7 +1793,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.4.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.5.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1530,7 +1805,9 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
 | Runtime WebSocket 客户端/SDK | 按客户端接入指南实现 connect、pending request、typed delta reducer、幂等与恢复 | 架构改造 |
 | 浏览器 Web 前端 | 连接上层会话服务而非 Runtime；若上层透传相同 Frame，可复用 message_id/content_index reducer，但不得获得 Runtime 服务凭据 | 安全加固 |
-| REST attachment service | 由上层服务完成用户归属和扫描，返回绑定 session_id 的 attachment_id 供 chat.send 引用 | 安全加固 |
+| Attachment Service / `AttachmentResolver` | 上层完成上传、用户授权和扫描；Runtime 按调用服务身份与 session_id 批量解析不可变版本、read handle 和 retention claim | 安全加固、架构改造 |
+| `AttachmentInputAssembler` / Provider | 以受控 lease 读取内容，校验字节/hash/MIME，并按 ModelSummary.input 转换为 Provider 中立的图片、文档或文本输入 | 架构改造 |
+| Runtime Session Store | 为用户 Message 保存 AttachmentContent 快照，并保存内部 retention record、删除 tombstone 和 release outbox | 架构改造 |
 | Legacy CLI | 保持原来的本地 Provider、Tool、Settings 和资源发现路径 | 兼容要求 |
 
 Managed 路径不得修改共享 `SettingsManager.workingDir` 来表示当前 Agent。
@@ -1583,6 +1860,10 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - WebSocket 断开只取消订阅，不取消模型流或 Tool 调用；
 - 慢消费者使用 1013 断开，通过重连快照恢复，不丢弃 delta；
 - Manager 认证错误清除敏感上游详情后映射为 `MANAGER_AUTH_FAILED`；
+- 附件解析失败发生在 accepted 前，不创建用户消息或 run；输入装配或内容读取在
+  accepted 后失败时，以结构化 `run.completed(outcome=error)` 结束，不回滚历史；
+- run 终态或取消必须关闭所有短期 attachment lease；Session retention claim
+  只在 Session 删除控制面通过 outbox 释放；
 - Agent 目录更新只影响后续新 Session，运行中的 Session 保持创建时快照。
 
 ### 11.4 信任边界
@@ -1602,13 +1883,15 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   委托授权以不可变短期凭据传递，不能由模型参数提供；
 - Upgrade URL、Prompt、JSONL、事件和日志均不保存认证凭据；
 - 实时、快照和历史共用 ThinkingProjectionPolicy；
-- attachment_id 的 tenant/user 所有权由上层服务校验；Runtime 只校验其
-  session_id 绑定、状态和 Agent 可用性；
-- Tool Manager 和 Model Manager 是每次调用的最终权限执行点。
+- attachment_id 的 tenant/user 所有权由上层 Attachment Service 校验；Runtime
+  必须用不可变 service principal 和 session_id 批量解析不可变版本，只通过
+  read handle 读取，并按当前 Model 输入策略重新校验可信 MIME、数量和字节数；
+- Attachment Service、Tool Manager 和 Model Manager 分别是附件、工具和模型
+  每次调用的最终授权/状态执行点。
 
 ## 12. 测试与验收
 
-实现必须通过目录、Context、Manager、多 Agent 和 WebSocket 五层验证；以下
+实现必须通过目录、Context、Manager、多 Agent、WebSocket 和附件生命周期六层验证；以下
 用例共同证明可观察行为与本设计一致。
 
 ### 12.1 目录编译器
@@ -1723,13 +2006,45 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - hidden、summary、full 在实时、快照和历史中保持同一披露结果，未经 Manager
   标记的摘要不会输出；不同投影用 redacted 占位看到连续且可比的
   canonical run_seq；
-- 未绑定当前 session_id、过期或不存在的 attachment_id 返回
-  `INVALID_ATTACHMENT`；用户归属测试在上层会话服务完成；
+- 未绑定当前 session_id、跨 service principal、过期、删除或不存在的
+  attachment_id 统一返回 `INVALID_ATTACHMENT`；只有授权后才可返回
+  `ATTACHMENT_NOT_READY`，Model 不支持或超限返回
+  `ATTACHMENT_NOT_SUPPORTED`；
 - 客户端检测 `seq` 或 `run_seq` 重复、倒退或缺口后重连恢复，不拼接未知缺口；
 - 一个 UTF-8 Text Message 对应一个 JSON Frame；Binary、非法 UTF-8/JSON、
   1 MiB 重组后 Message、4 MiB 缓冲、1003/1007/1009/1013 和 Ping/Pong
   行为可重复验证；
 - Manager 身份交换失败和 Manager 不可用分别返回稳定错误，且错误中无凭据。
+
+### 12.7 附件生命周期
+
+- 批量解析保持 attachment_ids 顺序；重复 ID、任一无效项或部分 retain 失败都
+  整批失败，不创建用户 Message、run 或 accepted 幂等结果；
+- Frame 中提交 tenant_id、user_id、URL、path、MIME、filename、size、hash 或
+  Base64 均因封闭 Schema 被拒绝，Runtime 的 Prompt、JSONL、事件和日志中没有
+  tenant/user、read handle、lease、Token 或对象存储 URL；
+- resolve 后同一 attachment_id 被重新绑定，也只能读取已固定的
+  content_version + sha256，或安全失败，不能二次用裸 ID 取新内容；
+- lease 在成功、异常、取消和超时路径都恰好关闭一次；Publisher 背压、单文件
+  和总流式字节上限有效；实际 length/hash/MIME 不一致、像素/解压炸弹被拒绝；
+- 同一 idempotency key 并发请求只产生一条用户消息、一个 run 和一组 retain；
+  不同附件顺序属于不同负载；accepted 重试在 RUN_ACTIVE、附件过期或删除后仍
+  返回原 run_id/user_message_id，接受前失败可以重试；
+- 在 retain 后/Store commit 前、commit 后/outbox 前注入崩溃，reconciler 能
+  清理孤儿 reservation，且不会丢失 release、重复 run 或改变附件快照；
+- 输入装配保持“一个 TextContent + 请求顺序的附件”；图片可映射到现有
+  ImageContent，document/text 的 Provider 中立类型和转换在实现前有显式契约，
+  不支持时由有效 Model 输入策略拒绝；
+- model.set 对当前有效 transcript 的完整 AttachmentContextPlan 做校验；不兼容
+  时保持原模型。新 chat.send 在 accepted 前校验“历史 + 新附件”，compaction
+  只有通过持久化 entry 才能改变 plan，不能为适配模型静默丢附件；
+- 原始 read lease 的 length/MIME/SHA-256 与公开快照一致；任何派生制品使用
+  独立 artifact version/digest，不能用源文件 sha256 校验不同字节；
+- Session 删除先写 tombstone、拒绝新 run、处理 active run，再经 outbox 幂等
+  release；多 Session 引用在最后一个 claim 释放前不物理删除，归档/恢复仍能
+  以相同 digest 重建模型输入；
+- 紧急安全撤销显式 abort 或拒绝后续 run，并保留历史快照与审计状态，不静默
+  删除附件后以不同 Context 继续执行。
 
 ## 13. 设计验收标准
 
@@ -1758,6 +2073,9 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - traceparent 只进入遥测和下游 Manager 调用，有效 features 可发现但不构成授权；
 - run 生命周期独立于连接，重连通过原子快照和 run_seq 恢复；
 - 同一披露策略覆盖实时、快照和历史；
+- 附件以 HTTP/Object Storage 数据面上传、WebSocket 只传 ID；Runtime 批量解析
+  不可变版本与受控句柄，幂等接受边界、Model 输入策略、历史快照、retention
+  claim 和 Session 删除 release 均有可观察契约；
 - 认证凭据不进入 Agent 数据和协议事件；
 - Runtime JSONL 路径包含 agent_id，但物理目录不改变 session_id 唯一主键；
 - Managed 和 Legacy 路径职责明确；
@@ -1767,6 +2085,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.7.0 | 2026-08-03 | 定义 HTTP/Object Storage 上传与 WebSocket 附件引用边界；新增 AttachmentResolver、不可变 read handle/lease、完整 AttachmentContextPlan、Model 切换校验、幂等原子接受、AttachmentContent 历史、source/derived digest 边界、retention claim、删除 outbox、安全撤销和附件生命周期图，并同步 AsyncAPI 2.5.0、客户端指南 1.1.0 |
 | 1.6.0 | 2026-08-03 | 增加 AgentRuntimeTemplate 规范性增补及优先级；明确不可变 revision/exact pinning，并把 Prompt Template 的 AsyncAPI/Client 同步列为落地门禁 |
 | 1.5.0 | 2026-08-03 | 新增客户端接入指南和客户端交互图；将 typed structured delta 固化为协议 2 语义，仅保留 full_thinking 可选能力；补齐 user_message_id、Response/Event 顺序、固定事件集、redacted thinking 序列占位、历史水位快照、Message/Tool reducer、RunRecord 历史、线协议大小与关闭恢复规则，并同步 AsyncAPI 2.4.0 |
 | 1.4.3 | 2026-08-03 | 全文统一为“调用方或组件动作、服务端处理、可观察结果、约束与原因”的行为先行表述；统一既有 Bearer/mTLS 替代认证口径，保持 Frame、Schema 和源码证据不变，并同步 AsyncAPI 2.3.3 |
