@@ -1,991 +1,569 @@
-# pi-mono Java 集中式 GaussDB 会话记忆系统 SR 设计
+# pi-mono Java 集中式 GaussDB 会话存储 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.6
+> 版本：v0.7
 > 日期：2026-08-03
 > 状态：设计评审稿
 > pi 源码基线：[`f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`](https://github.com/badlogic/pi-mono/tree/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee)
-> Java 源码基线：无；本文 Java 内容均为 target-only design
-> 数据库约束：集中式 GaussDB，单分片高可用部署
+> Java 源码基线：无；本文 Java/GaussDB 内容均为 target-only design
+> 数据库约束：集中式 GaussDB
 > JDBC 约束：openGauss JDBC `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`
 
 ## 1. 结论
 
-Java 版本使用集中式 GaussDB 取代 pi 当前 coding-agent 的本地 JSONL 会话文件，数据库成为会话记忆的唯一持久化事实源。当前 pi-mono SQLite backend 是数据库行为基线；openGauss/GaussDB 实现必须保留以下可观察语义：
+GaussDB Schema 以 pi-mono 当前 SQLite Schema 为唯一基线，执行物理对齐，而不再采用“业务语义对齐、数据库结构另行设计”的方式。
 
-- entry 通过 `id` 和 `parentId` 组成不可变会话树。
-- 当前 leaf 决定活动分支，context 只使用 root-to-leaf 路径。
-- `compaction` 和 `branch_summary` 是会话 entry，不是跨会话长期记忆。
-- 新格式 compaction 使用自包含的 `retainedTail`；旧格式继续读取 `firstKeptEntryId`。
-- `message`、`custom_message`、摘要 entry 和扩展 projector 决定进入模型的消息。
-- 模型、思考级别和启用工具从 SQLite `readPathToRootOrCompaction()` 返回的路径推导。
-- `branch_entries` 和 `branch_tips` 是可重建的 root-to-tip 缓存，`session_entries.parent_id` 始终是权威树关系。
-- bounded branch query 支持 stop、type、order 和 limit，缓存损坏时回退权威 parent chain 并修复。
-- 会话搜索保留当前 SQLite 的大小写不敏感子串匹配、`cwd` 过滤和删除后不可见语义。
+对齐规则如下：
 
-Java 目标仍新增 operation id、request hash、revision、expected leaf、行锁和物理外键。这些只是并发、幂等和完整性强化，不得改变单线程合法请求的 SQLite 结果。
+- 表名与 SQLite 完全一致。
+- 列名、可空性、主键、唯一索引、普通索引和 migration 顺序完全一致。
+- `sessions`、`session_entries`、`session_sequences`、`branch_entries`、`branch_tips`、`session_materialized`、`entry_materialized` 和 `migrations` 均一对一保留。
+- 只允许删除 SQLite 专属的 `WITHOUT ROWID`，并把 SQLite `INTEGER` sequence 映射为 GaussDB `BIGINT`。
+- timestamp、metadata 和 JSON payload 继续保存为 TEXT，避免改变序列化、排序和搜索输入。
+- 不增加 revision、operation、request hash、expected leaf、幂等表、额外搜索表、外键、CHECK、触发器或其他 GaussDB 专属结构。
+- 事务内的 SQL 顺序、active leaf、materialized projection 和 branch cache 行为与 SQLite 一致。
 
-### 1.1 对齐边界
+这意味着 GaussDB 只替换存储引擎，不改变 SQLite Schema 所表达的数据模型。
 
-| 类型 | 对齐规则 |
-|---|---|
-| 事实与投影 | `sessions`、`session_entries`、sequence、materialized state、branch cache 和搜索均有 openGauss 对应 |
-| 读取语义 | open、page、branch query、context、label、name、stats、fork 和 search 与当前 SQLite 同结果 |
-| 写入原子性 | SQLite 同一 append 内的 entry、sequence、summary、leaf、branch cache 和 search 在 GaussDB 也必须同一事务 |
-| 可接受差异 | 物理表/列名、非搜索 JSON 的 SQL 类型、索引实现、JDBC 边界、外键、revision 和幂等记录 |
-| 不可隐式差异 | compaction 路径边界、leaf 目标、fork 选择、搜索命中集、损坏 entry 错误和投影统计 |
-
-本 SR 只设计会话内记忆，不设计多租户、跨会话事实抽取、向量召回、Runtime Checkpoint、Agent 控制面或 Artifact 内容存储。pi 基线中也没有内建的跨会话记忆抽取和注入流程。
-
-![Java centralized GaussDB memory architecture](./diagrams/memory/memory-architecture.svg)
+![SQLite-aligned GaussDB architecture](./diagrams/memory/memory-architecture.svg)
 
 [查看 PlantUML 源码](./diagrams/memory/diagram.puml#L1)
 
-## 2. 范围与约束
+## 2. 范围与非目标
 
 ### 2.1 本期范围
 
-- 会话创建、打开、列出、删除和 fork。
-- entry 追加、显式 leaf 移动、标签和会话名称。
-- compaction、branch summary 和确定性 context rebuild。
-- bounded branch query、root-to-tip 缓存、缓存校验和递归修复。
-- 大小写不敏感子串搜索和 `cwd` 过滤。
-- JSONL v1-v3 与当前 pi SQLite 会话库导入。
-- 数据库事务、幂等重试、并发冲突、投影重建和受控 JSONL 导出。
-- Java Application Service、Repository、JDBC Adapter 和 GaussDB 表边界。
+- 按 SQLite migration `001_initial.sql` 和 `002_branch_tips.sql` 建立 GaussDB Schema。
+- 保持 SessionStorage 和 SessionRepository 的 create、open、list、delete、fork、append、branch query 和 context 行为。
+- 保持 entry sequence、materialized state、label projection、active leaf 和 branch cache 的事务一致性。
+- 支持 JSONL/SQLite 数据导入和受控导出。
+- 使用指定 openGauss JDBC 驱动访问集中式 GaussDB。
 
 ### 2.2 本期不包括
 
-- `tenant_id`、`TenantContext`、RLS、租户配额或跨租户授权。
-- 跨会话长期 Memory Store、Memory Item、Embedding、抽取和召回。
-- Run、Step、Pending Tool Call、Checkpoint、Checkpoint Blob 和执行恢复。
-- Agent Definition、Agent Version、Environment、Tool Binding 和 Credential。
-- 文件内容、文件操作独立投影及对象存储生命周期；文件摘要仍保留在 entry payload 中。
-- 让数据库执行摘要生成、prompt 编排、工具调用或 LLM provider 调用。
-- 用向量检索替代活动会话路径。
+- revision、乐观锁、expected leaf 或 stale snapshot 协议。
+- operation id、request hash、持久化幂等结果或写操作审计表。
+- SQLite Schema 中不存在的外键、CHECK、级联删除、触发器或投影表。
+- 多租户、RLS、向量检索、跨会话长期记忆和 Runtime Checkpoint。
+- 用 GaussDB 全文检索结构替代 SQLite FTS5；该问题不能仅靠语法或类型适配解决。
+- 分布式分片键或 `DISTRIBUTE BY`。
 
-### 2.3 已确认产品约束
+### 2.3 运行约束
 
-| 约束 | 设计影响 |
-|---|---|
-| Java GUI/API 服务 | 所有会话操作统一进入 `MemorySessionApplicationService` |
-| 不考虑多租户 | 业务表只使用 `session_id` 作为会话作用域，不增加租户列 |
-| 集中式 GaussDB | 使用单分片事务、外键、行锁、JSONB 和递归 CTE |
-| SQL 能力基线 | 以 Centralized V2.0-3.x 官方语法设计，并在实际服务端版本复验 |
-| openGauss JDBC 定制版本 | 锁定指定依赖，不回退到 PostgreSQL JDBC 或其他公开版本 |
-| 数据库是最终事实源 | JSONL 只用于导入、导出和恢复，不进行长期双写 |
-| 允许并发请求重试 | 写命令使用 operation id、revision 和 expected leaf |
+SQLite backend 使用一个进程内 `SerialOperationQueue` 串行化数据库操作。目标 Java 适配器保留相同的单写入者语义，不在数据库层新增并发协议。
 
-集中式在本设计中表示一个逻辑分片及其高可用副本，不表示单机测试实例。当前不引入分布键；若未来容量超过单分片能力，按 `session_id` 迁移到分布式形态并重新设计外键和跨分片约束。
+如果未来需要多个服务实例并发写同一 session，必须另立设计版本；不能在本版本中隐式增加 revision、行锁协议或幂等表。
 
-## 3. pi 源码事实
+数据库兼容模式必须保留空字符串，不得把空字符串转换为 NULL；文本比较和索引排序必须使用与 SQLite 默认 `BINARY` 接近的大小写敏感二进制 collation。这些是部署前提，不增加表、列或索引。
 
-本节仅记录基线提交中观察到的行为。Java/GaussDB 尚无对应实现，后续章节均为 target-only design。
+## 3. pi SQLite 源码事实
 
-### 3.1 当前 coding-agent 仍使用 JSONL
+本节只记录基线提交中观察到的实现。后续 GaussDB 内容是对该实现的直接移植。
 
-`packages/coding-agent/src/core/session-manager.ts` 的生产会话格式版本为 v3。entry 包括 `message`、`thinking_level_change`、`model_change`、`compaction`、`branch_summary`、`custom`、`custom_message`、`label` 和 `session_info`。`_appendEntry()` 把 entry 追加到内存和 JSONL，并将 leaf 指向新 entry。
+### 3.1 Migration 和核心表
 
-普通 `branch()` 和 `resetLeaf()` 只更新进程内 `leafId`；只有后续追加 entry 才会把新分支写入 JSONL。因此，旧 JSONL 无法恢复“移动 leaf 后尚未追加”的最终位置。
+SQLite `applyMigrations()` 先建立 `migrations(id, applied_at)`，再按顺序执行：
 
-源码证据：
+1. `001_initial.sql`
+2. `002_branch_tips.sql`
 
-- [`SessionEntry` 和 JSONL v3](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/coding-agent/src/core/session-manager.ts#L30-L153)
-- [`_persist()` / `_appendEntry()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/coding-agent/src/core/session-manager.ts#L1015-L1049)
-- [`branch()` / `resetLeaf()` / `branchWithSummary()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/coding-agent/src/core/session-manager.ts#L1354-L1405)
+`001_initial.sql` 建立：
 
-### 3.2 新 harness 定义存储抽象和完整 entry 集合
+- `sessions`
+- `session_entries`
+- `session_sequences`
+- `branch_entries`
+- `session_materialized`
+- `entry_materialized`
 
-`packages/agent` 的新 harness 定义 `SessionStorage` 和 `SessionRepository`，把会话语义与 JSONL、内存或 SQLite 介质分开。其 `SessionTreeEntry` 在旧 coding-agent 类型基础上增加：
-
-- `active_tools_change`：保存活动工具名。
-- `leaf`：保存显式导航的 `targetId`。
-- `compaction.retainedTail`：把保留消息直接存入 compaction entry。
-
-`Session.setLeafId()` 通过 `SessionStorage.appendEntry()` 持久化 leaf entry；`SessionRepository` 统一 create、open、list、delete 和 fork。
+`002_branch_tips.sql` 建立 `branch_tips`，清空旧 branch cache，并删除已冗余的 `idx_branch_entries_session_branch`。
 
 源码证据：
 
-- [`SessionTreeEntry`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/types.ts#L382-L451)
-- [`SessionStorage`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/types.ts#L558-L572) / [`SessionRepository`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/repository.ts#L22-L35)
-- [`Session` append 和 moveTo](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/session.ts#L227-L420)
+- [`migrations.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations.ts#L1-L55)
+- [`001_initial.sql`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql#L1-L59)
+- [`002_branch_tips.sql`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations/002_branch_tips.sql#L1-L12)
 
-### 3.3 Context rebuild 和 compaction
+### 3.2 Session、entry 和 sequence
 
-新 harness 从 `readPathToRootOrCompaction()` 返回的路径推导 model、thinking level 和 active tools，再应用 context entry transform。该路径在最新 compaction 或其 `firstKeptEntryId` 处截断，不是无条件的完整 root-to-leaf 路径：
+`sessions.active_leaf_id` 保存当前 leaf。`session_entries` 以 `(session_id, id)` 为主键，并以 `(session_id, entry_seq)` 保证 append 顺序唯一。`session_sequences` 为每个 session 保存下一条 sequence。
 
-- 无 compaction 时保留活动路径。
-- 最新 compaction 含 `retainedTail` 时，context 使用 compaction、其自带 retained tail 和 compaction 后续 entry。
-- 旧 compaction 不含 `retainedTail` 时，使用 `firstKeptEntryId` 保留旧格式边界。
-- compaction entry 投影为 summary message，并追加其 `retainedTail`。
-- `custom` 默认不进入 context，只有已注册 projector 才能产生消息。
-
-默认 compaction 设置是启用、保留 16,384 tokens 给 prompt/output、保留最近 20,000 tokens。触发条件是 `contextTokens > contextWindow - reserveTokens`。准备阶段避免从 tool result 中间切割，支持 split turn，并把近期消息物化为 `retainedTail`。
+entry payload 是 type-specific JSON TEXT。base 字段 `id`、`parentId`、`timestamp` 和 `type` 分别保存在固定列中，读取时重新组合为 `SessionTreeEntry`。
 
 源码证据：
 
-- [`buildSessionContext()` / `Session.getBranch()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/session.ts#L41-L206)
-- [`SQLite readPathToRootOrCompaction()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L171-L269)
-- [`shouldCompact()` / `prepareCompaction()` / `compact()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/compaction/compaction.ts)
+- [`session-entries.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-entries.ts#L1-L217)
+- [`session-sequences.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-sequences.ts#L1-L16)
+- [`sessions.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/sessions.ts#L1-L40)
 
-### 3.4 pi SQLite 是数据库行为参考
+### 3.3 Append transaction
 
-`packages/storage/sqlite-node` 已实现新 harness 的数据库后端，但当前 coding-agent runtime 尚未接入它。其观察行为是：
+SQLite `appendEntry()` 在同一事务中：
 
-- `sessions.active_leaf_id` 保存当前 leaf。
-- `session_entries` 使用 `(session_id, id)` 主键和 session 内唯一 `entry_seq`。
-- `Session.setLeafId()` 追加 `leaf` entry；leaf entry 的 `targetId` 成为当前 leaf，而 leaf marker 自身不进入目标分支的 context path。
-- entry、序号、物化统计、当前 leaf 和 branch path 在一个 SQLite 事务内更新。
-- `branch_entries` 缓存多条 root-to-tip 路径，`branch_tips` 保存 tip 与 branch 的一对一关系。两表都是可丢弃投影，权威 parent chain 在 `session_entries`。
-- bounded branch query 优先使用 branch cache，缓存缺失或无效时从 parent chain 重建。
-- malformed entry 在 read entry、page、branch 和 context 路径中返回 `invalid_entry`，不再静默跳过。
-- `session_search_fts` 只在显式创建 SQLite search adapter 时建立；它对 payload 做大小写不敏感 trigram 子串搜索，并通过 trigger 与 canonical append/delete 同事务。
+1. 读取下一 sequence。
+2. 插入 `session_entries`。
+3. 更新 `session_sequences`。
+4. 更新 `session_materialized`。
+5. 插入需要的 `entry_materialized` 行。
+6. 更新 `sessions.active_leaf_id`。
+7. 更新 `branch_entries` 和 `branch_tips`。
+
+任一步失败，整个 append 回滚。
 
 源码证据：
 
-- [`001_initial.sql`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql#L1-L59) / [`002_branch_tips.sql`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations/002_branch_tips.sql#L1-L12)
-- [`appendEntry()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L367-L418)
+- [`SqliteSessionConnection.appendEntry()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L367-L418)
+- [`appendEntryToBranchCache()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts#L265-L326)
+
+### 3.4 Materialized projection
+
+`session_materialized.payload` 保存 append-log summary，包括 name、messageCount、tokens、cost、currentModel 和 currentThinkingLevel。`entry_materialized` 当前只保存 label projection，并保留 label 设置和清除的 append 顺序。
+
+源码证据：
+
+- [`session-materialized.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts#L1-L355)
+
+### 3.5 Branch cache 和 Context
+
+`branch_entries` 和 `branch_tips` 是可重建的 root-to-tip 缓存；`session_entries.parent_id` 是权威 parent chain。缓存缺失或损坏时，从 canonical parent links 重建。
+
+`readPathToRootOrCompaction()` 返回 compaction-trimmed path。model、thinking level、active tools 和 context messages 都从该路径推导。
+
+源码证据：
+
 - [`branch-cache.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts#L1-L326)
-- [`search-backend.ts`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/search-backend.ts#L32-L124)
-- [`SQLite FTS5 search parity tests`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/test/harness/sqlite-node.test.ts#L49-L164)
+- [`readPathToRootOrCompaction()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L171-L276)
+- [`buildSessionContext()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/session.ts#L41-L150)
 
-### 3.5 Branch summary 和 fork
+### 3.6 Optional SQLite FTS5
 
-branch summary 从旧 leaf 向上收集到与目标路径的最深 common ancestor，然后按时间顺序生成摘要。`moveTo()` 先持久化目标 leaf；有 summary 时再把 `branch_summary` 挂到目标 entry 一侧。
+`session_search_fts` 不属于 `001` 或 `002` migration。只有显式创建 SQLite search adapter 时，`ensureSearchSchema()` 才建立 FTS5 virtual table 和三个 trigger。
 
-fork 的默认 position 是 `before`：目标必须是 user message，并使用其 parent 作为有效 leaf。`at` 则包含目标 entry。SQLite repo 把选定路径复制到新会话。
+该 virtual table 依赖 SQLite FTS5、external content 和 SQLite rowid。GaussDB 没有可以通过表名、语法或字段类型直接等价替换的结构。因此本版本不在 GaussDB Schema 中创建 `session_search_fts` 或其他搜索表，也不声称完成 FTS5 物理设计对齐。
+
+如产品需要无额外表的搜索，可组合 pi 已有的 scanning search；这不改变本 SR 的数据库 Schema，但也不声称复制 FTS5 的 trigram、短查询和 BM25 排序语义。
 
 源码证据：
 
-- [`collectEntriesForBranchSummary()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/compaction/branch-summarization.ts#L70-L100)
-- [`readSessionEntriesForFork()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/repository.ts#L49-L71)
-- [`SqliteSessionRepository.fork()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/repo.ts#L171-L194)
+- [`ensureSearchSchema()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/search-backend.ts#L32-L59)
+- [`createScanningSessionSearch()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/agent/src/harness/session/search.ts#L11-L48)
 
-### 3.6 观察行为、目标选择和理由
+## 4. Schema 一对一映射
 
-| 主题 | 观察到的 pi 行为 | Java/GaussDB 目标 | 分类与理由 |
+| SQLite 表 | GaussDB 表 | 列对齐 | 允许的适配 |
 |---|---|---|---|
-| 事实源 | coding-agent 使用 JSONL；新 harness 支持可插拔存储 | GaussDB `session_entry` | 架构改造：提供事务和并发访问 |
-| leaf | 旧 runtime 只在内存移动；新 harness/SQLite 写 `leaf` entry | 采用 `leaf` entry + `agent_session.active_leaf_entry_id` | pi 新存储语义对齐 |
-| compaction | 新 harness 支持 `retainedTail`，兼容 `firstKeptEntryId` | 两种格式均可读取 | 兼容约束 |
-| active path | SQLite 使用 `branch_entries + branch_tips` 缓存 root-to-tip 路径 | 保留对应缓存表，递归 CTE 只用于缺失/损坏修复 | SQLite 行为对齐 |
-| bounded branch query | 缓存支持 stop/type/order/limit | 提供同等 Repository 查询 | SQLite 行为对齐 |
-| malformed entry | SQLite 当前读取失败并返回 `invalid_entry` | context、page 和 branch query 失败并报告 entry | SQLite 行为对齐 |
-| entry payload | `session_entries.payload` 是 JSON TEXT，也是 FTS external content | 保留 SQLite-compatible JSON TEXT | 搜索输入与解码行为对齐 |
-| search | 可选 FTS5 trigram adapter，支持子串和 cwd 过滤 | 可选 search projection，保证命中集和 cwd 过滤对齐 | 产品能力对齐；索引技术是架构差异 |
-| 并发 | pi 主要依赖单进程顺序控制 | 行锁 + revision + expected leaf | 可靠性强化 |
-| 多租户 | pi 无租户概念 | 不增加租户模型 | 产品约束 |
-| 长期记忆 | pi 无内建跨会话抽取和召回 | 本 SR 不新增 | 产品范围约束 |
+| `migrations` | `migrations` | `id`, `applied_at` | 无类型变化 |
+| `sessions` | `sessions` | `id`, `created_at`, `cwd`, `parent_session_id`, `metadata`, `active_leaf_id` | 无类型变化 |
+| `session_entries` | `session_entries` | `session_id`, `id`, `entry_seq`, `parent_id`, `type`, `timestamp`, `payload` | sequence 使用 `BIGINT` |
+| `session_sequences` | `session_sequences` | `session_id`, `next_seq` | sequence 使用 `BIGINT` |
+| `branch_entries` | `branch_entries` | `session_id`, `branch_id`, `entry_id`, `entry_seq` | sequence 使用 `BIGINT` |
+| `branch_tips` | `branch_tips` | `session_id`, `tip_id`, `branch_id` | 无类型变化 |
+| `session_materialized` | `session_materialized` | `session_id`, `payload` | payload 保持 TEXT |
+| `entry_materialized` | `entry_materialized` | `session_id`, `entry_seq`, `type`, `payload` | sequence 使用 `BIGINT` |
 
-## 4. Java 目标行为
+目标 Schema 不包含任何第九张业务表。
 
-### 4.1 创建和打开
+### 4.1 类型映射
 
-创建会话时，在同一事务中写入 `agent_session`、`session_sequence`、空的 `session_materialized` 和 committed create operation。初始 `active_leaf_entry_id=NULL`、`revision=0`、`next_append_seq=1`。
-
-打开会话只读取 header/head、`session_materialized` 和 `entry_materialized`，不预加载全部 entry。context、branch query 和 append-order 分页分别通过 Repository 查询，与当前 `SqliteSessionConnection.open()` 对齐。
-
-### 4.2 追加 entry
-
-普通 append 在一个短事务中：
-
-1. 识别或建立 `session_write_operation`。
-2. 锁定 `agent_session`。
-3. 校验 expected revision 和 expected leaf。
-4. 从 `session_sequence` 分配 `next_append_seq` 并插入不可变 `session_entry`。
-5. 按 SQLite projector 规则更新 `session_materialized` 和 `entry_materialized`。
-6. 更新 `agent_session.active_leaf_entry_id`、revision 和 sequence。
-7. 维护 `branch_entry + branch_tip`；必要时从 parent chain 修复。
-8. 搜索功能启用时同事务更新 `session_search_document`。
-9. 保存稳定响应并提交。
-
-LLM、工具、网络调用和文件操作不在该事务中执行。
-
-### 4.3 显式 leaf 移动
-
-`moveTo(targetId)` 验证目标属于当前会话，然后追加一个 `leaf` entry：
-
-- `leaf.parentId` 是移动前 current leaf。
-- `leaf.payload.targetId` 是目标 entry，允许为 `null`。
-- `agent_session.active_leaf_entry_id` 更新为目标，而不是 leaf marker。
-- leaf marker 进入追加日志和审计，但不进入模型 context path。
-
-有 branch summary 时，同一提交事务内先写 leaf marker，再写 parent 为目标 entry 的 `branch_summary`，最终 current leaf 指向 summary entry。该目标侧挂载与 pi 一致；单事务提交是 Java 可靠性强化。
-
-### 4.4 Context rebuild
-
-Context rebuild 获取稳定的 SQLite 等价 branch path 及 session revision：
-
-1. 使用 `branch_entry` 查找 leaf 对应的 root-to-tip cache，并校验连续 parent chain。
-2. 从最新 compaction 向前计算起点；`retainedTail` 从 compaction 开始，旧格式从 `firstKeptEntryId` 开始。
-3. 缓存缺失或失效时，从 `session_entry.parent_entry_id` 递归获取权威路径，修复缓存后应用同样的 compaction trim。
-4. 从返回的 trimmed path 推导 model、thinking level 和 active tools。
-5. 投影 message、custom message、compaction 和 branch summary；`custom` 仅通过注册 projector 产生消息。
-
-返回的 `ContextSnapshot` 包含 `sessionId`、`revision`、`leafEntryId`、trimmed path 标识及最终 runtime context。
-
-### 4.5 Compaction 和 branch summary
-
-Coordinator 从不可变 `ContextSnapshot` 准备摘要输入，在数据库事务外调用模型。提交摘要时重新锁定 `agent_session`：
-
-- revision 和 leaf 均相同：写入摘要 entry 和投影，更新 session head。
-- 任一不同：不保存过期结果，返回 `STALE_CONTEXT_SNAPSHOT`。
-
-重试必须读取新 snapshot 并重新计算 cut point 或 common ancestor，不能复用旧的 `firstKeptEntryId`、`retainedTail` 或目标路径。
-
-### 4.6 Fork
-
-fork 在源 session revision 稳定时读取选定路径，再创建新 session：
-
-- 未指定 entry 时复制源 session 的全部追加 entry，与 pi repo 行为一致。
-- `before` 只接受 user message，并以其 parent 为有效 leaf。
-- `at` 包含目标 entry。
-- 复制 entry 保留原 entry id 和 timestamp，在新 session 中重新分配 `append_seq`。
-- 新 session 的 `parent_session_id` 指向源 session。
-- fork 事务写入新 header/head、entries、sequence、materialized projections、branch cache、search projection 和 operation；源 session 不变。
-
-## 5. 目标架构和 JDBC
-
-### 5.1 组件职责
-
-| 组件 | 职责 |
-|---|---|
-| Agent Runtime | 驱动 turn、工具和 LLM，不直接访问数据库 |
-| `MemorySessionApplicationService` | 编排 session、append、move、fork、context 和迁移 |
-| `ContextRebuilder` | 将 SQLite 等价的 compaction-trimmed path 确定性投影为 runtime context |
-| `CompactionCoordinator` | 准备 snapshot、生成摘要、提交 compaction |
-| `BranchSummaryCoordinator` | 计算分支差异、生成摘要、提交目标侧 entry |
-| `SessionRepository` | header/head、列表、materialized summary 和 fork 查询 |
-| `EntryRepository` | entry 追加、append-order 分页、路径和 entry projection |
-| `BranchCacheRepository` | root-to-tip cache、bounded branch query、校验和递归修复 |
-| `SessionSearchRepository` | 子串搜索、`cwd` 过滤和 search projection |
-| `WriteOperationRepository` | 幂等操作、稳定响应和冲突识别 |
-| `GaussDbJdbcAdapter` | JDBC 事务、SQLState 映射、JSONB 编解码 |
-| GaussDB | 会话事实源、状态与查询投影 |
-
-![Append, move, and summary transaction](./diagrams/memory/memory-write-transaction.svg)
-
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L67)
-
-### 5.2 Java 模块边界
-
-```text
-memory.api
-  MemorySessionApplicationService
-  command/*
-  view/*
-
-memory.domain
-  SessionHeader
-  SessionHead
-  SessionSequence
-  SessionMaterializedState
-  SessionEntry
-  ContextSnapshot
-  MemoryError
-  SessionEntryCodec
-
-memory.application
-  ContextRebuilder
-  CompactionCoordinator
-  BranchSummaryCoordinator
-  SessionImportService
-
-memory.infrastructure.gaussdb
-  GaussDbSessionRepository
-  GaussDbEntryRepository
-  GaussDbBranchCacheRepository
-  GaussDbSessionSearchRepository
-  GaussDbWriteOperationRepository
-  GaussDbTransactionManager
-  JsonbJdbcCodec
-  GaussDbSqlStateMapper
-```
-
-领域层和 Application Service 不导入 openGauss 类型。只有 `memory.infrastructure.gaussdb` 可以依赖驱动特有类。
-
-### 5.3 驱动与连接契约
-
-| 项目 | 固定选择 |
-|---|---|
-| Maven 坐标 | `org.opengauss:opengauss-jdbc:6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1` |
-| 驱动类 | `org.opengauss.Driver` |
-| URL | `jdbc:opengauss://host:port/database` |
-| Java 边界 | `DataSource`、`Connection`、`PreparedStatement`、`ResultSet` |
-| JSONB | 统一通过 `JsonbJdbcCodec` 绑定和读取 |
-| Schema | 显式版本化迁移，不允许 ORM 自动创建或变更 |
-
-定制版本来自内部制品仓库，不允许解析失败后自动回退到其他 openGauss JDBC 或 PostgreSQL JDBC。应用依赖树排除 `org.postgresql:postgresql`，避免同一 JVM 中的驱动冲突。
-
-JDBC 版本不等同于 GaussDB 服务端版本。部署清单必须分别记录服务端版本、驱动 JAR 文件摘要和 Maven 坐标。
-
-连接 URL、用户名、密码、TLS、连接超时、statement timeout、连接池大小和健康检查参数由部署配置提供，不写入领域对象或数据库 metadata。启动流程先加载驱动，再建立连接并校验 `memory_schema_version`；应用账号无 DDL 权限。
-
-`JsonbJdbcCodec` 是唯一允许使用驱动特有 JSON/OTHER 类型的适配器。具体绑定 API必须以该定制 JAR 的实际公开类型为准，不从其他 openGauss 版本推断。
-
-### 5.4 Schema 迁移
-
-- 每个发布包携带顺序、不可变 SQL migration。
-- 独立迁移身份执行 DDL；运行身份只执行 DML。
-- `memory_schema_version` 每个 migration 一行，记录 migration id、顺序版本和 SHA-256，与 SQLite `migrations` 的逐文件记录对齐。
-- 应用启动只验证版本，不自动升级。
-- migration 失败必须整体回滚；不支持事务的 DDL 必须在发布脚本中明确补偿步骤。
-
-## 6. 逻辑数据模型
-
-| pi SQLite | openGauss/GaussDB | 对齐说明 |
+| SQLite 声明 | GaussDB 声明 | 理由 |
 |---|---|---|
-| `migrations` | `memory_schema_version` | 逐 migration 记录，目标额外保存顺序版本和 SHA-256 |
-| `sessions` | `agent_session` | header、nullable metadata、active leaf 一致；目标额外保存 revision |
-| `session_entries` | `session_entry` | 相同复合主键、append sequence、parent、type、timestamp 和 payload |
-| `session_sequences` | `session_sequence` | 每 session 一行 next sequence |
-| `session_materialized` | `session_materialized` | 相同 append-log summary payload |
-| `entry_materialized` | `entry_materialized` | 相同 append-order label projection |
-| `branch_entries` | `branch_entry` | 相同 root-to-tip 路径成员缓存 |
-| `branch_tips` | `branch_tip` | 相同 tip/branch 一对一关系 |
-| `session_search_fts` | `session_search_document` | 命中集对齐；索引技术不直接复制 FTS5 |
-| 无 | `session_write_operation` | openGauss 幂等和并发扩展 |
-
-SQLite 的 metadata 和 materialized payload 虽然物理类型也是 TEXT，但公开行为是解析后的对象；目标 JSONB 以结构等价作为契约。`session_entries.payload` 是例外，因为 FTS5 直接索引原始文本，所以目标继续使用 TEXT。
-
-### 6.1 `agent_session`
-
-对应 SQLite `sessions`，保存会话 id、created time、cwd、parent session、nullable metadata 和 active leaf。`revision` 是 openGauss 并发扩展，与该行一起锁定；它不改变 SQLite 的业务返回。
-
-`parent_session_id` 保留逻辑引用而不声明外键，以对齐 SQLite 删除父会话后子会话仍保留原 parent id 的可观察行为。这是对齐约束，不应自动 `SET NULL`。
-
-### 6.2 `session_sequence`
-
-一对一对应 SQLite `session_sequences`。`next_append_seq` 在已锁定 `agent_session` 的事务内读取和递增，不依赖 `MAX(append_seq)`。
-
-### 6.3 `session_materialized`
-
-一对一对应 SQLite 同名表。`payload JSONB` 保存 name、messageCount、cachedTokens、uncachedTokens、totalTokens、costTotal、currentModel 和 currentThinkingLevel。这些字段按全部 append log 累计，不是活动分支的 context 事实。
-
-Java projector 必须复用 pi `applyEntryToMaterializedState()` 的相同规则。重建时按 `append_seq` 重放，不从活动 branch 统计。
-
-### 6.4 `entry_materialized`
-
-对应 SQLite 同名表，保存 append-order 的 entry-level projection。v1 只写 `projection_type='label'`，包括设置和清除 label 的历史行；open 时按 `append_seq` 重放得到当前 `labelsById`。不用仅保存当前非空值的 `session_label` 替代，避免与 SQLite 投影形态分叉。
-
-### 6.5 `session_entry`
-
-不可变会话事实表。固定列保存身份、树关系、类型、顺序和时间；`payload TEXT` 保存与 SQLite `encodeEntry()` 相同的 type-specific JSON 文本及未知扩展字段。读取时先解析并验证 payload，再通过固定列重建完整 `SessionTreeEntry`。
-
-entry payload 使用 TEXT 是有意的 SQLite 对齐约束：搜索索引的 external content 正是该原始文本。Java `SessionEntryCodec` 必须输出与 `JSON.stringify(entryToPayload(entry))` 等价的 UTF-8 字符序列；SQLite 导入保留源 payload 原文。对外契约比较解码后的 JSON 结构和搜索结果，不承诺把 JSON 字段顺序或空白作为公共 API；但投影重建不得先把 payload 转成 JSONB 再序列化，因为这会改变 SQLite 的子串搜索输入。
-
-`operation_id` 把本次写入关联到幂等命令。普通 append 写一条 entry；带摘要的 move 可在同一 operation 下写 leaf marker 和 branch summary 两条 entry。
-
-### 6.6 `branch_entry` 和 `branch_tip`
-
-两表对应 SQLite `branch_entries` 和 `branch_tips`：
-
-- 每个 branch id 表示一条 root-to-tip 缓存路径，共享前缀在不同 branch 中重复存储。
-- `branch_tip` 保证一个 tip 对应一个 branch，一个 branch 只有一个 tip。
-- 线性 append 扩展当前 tip；从旧 parent 分叉时复制该 parent 之前的缓存前缀。
-- 校验失败时删除对应 branch，通过 recursive parent query 重建。
-- 两表只是投影；导入和恢复不把它们当作事实源。
-
-### 6.7 `session_write_operation`
-
-保存写命令的幂等键、规范化请求 SHA-256、状态和稳定响应。`started`、entry、session head、投影和最终 `committed` 在同一事务内，因此回滚后不会留下可见半完成行。
-
-### 6.8 `session_search_document`
-
-完整 SQLite 对齐 profile 安装 search migration 后，每个 entry 一行保存由 canonical `session_entry.payload` 派生的 FTS5-compatible normalization。append/delete 与该投影同事务；投影写失败必须回滚 canonical entry 变更。不提供 search 的精简部署可不安装该 migration，但不得标记为完整 SQLite 对齐。
-
-当前对齐基线要求 SQLite FTS5 `trigram remove_diacritics 1` 的 quoted phrase 行为：trim 后空 query 返回空集合；`"auth"`、`"AUTH"` 和 `"uth"` 命中同一 payload；不足一个 trigram 的 query 不命中；`cwd` 过滤和删除后不可见保持一致。`SqliteFts5TrigramNormalizer` 在 Java 中统一处理 query 和 payload，并由真实 SQLite oracle 语料锁定 Unicode case fold、去重音符、引号、标点和最小长度边界。
-
-GaussDB/openGauss `tsvector + GIN` 可用于全文索引，但其 parser 不能直接证明与 SQLite FTS5 trigram 等价。v1 对预归一化文本执行参数化子串匹配；任何 GIN 加速必须在 parity suite 通过后才可启用，并保留相同的 post-filter。
-
-### 6.9 数据关系
-
-![Session event plane data model](./diagrams/memory/memory-data-model.svg)
-
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L135)
-
-## 7. 集中式 GaussDB DDL 草案
-
-以下是完整 SQLite 对齐 profile 的 target-only migration v1，其中 `session_search_document` 可拆为显式 search migration。上线前必须在实际集中式 GaussDB 版本和指定 JDBC JAR 上执行兼容性测试。
-
-```sql
-CREATE TABLE memory_schema_version (
-    component           VARCHAR(64)  NOT NULL,
-    schema_version      INTEGER      NOT NULL,
-    migration_id        VARCHAR(128) NOT NULL,
-    migration_checksum  CHAR(64)     NOT NULL,
-    installed_at        TIMESTAMPTZ  NOT NULL,
-    PRIMARY KEY (component, schema_version),
-    UNIQUE (component, migration_id),
-    CHECK (schema_version > 0),
-    CHECK (LENGTH(migration_checksum) = 64)
-);
-
-CREATE TABLE agent_session (
-    session_id            VARCHAR(128) NOT NULL,
-    created_at            TIMESTAMPTZ  NOT NULL,
-    cwd                   TEXT         NOT NULL,
-    parent_session_id     VARCHAR(128),
-    metadata              JSONB,
-    active_leaf_entry_id  VARCHAR(128),
-    revision              BIGINT       NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id),
-    CHECK (revision >= 0)
-);
-
-CREATE TABLE session_write_operation (
-    operation_id    VARCHAR(128) NOT NULL,
-    session_id      VARCHAR(128) NOT NULL,
-    operation_type  VARCHAR(32)  NOT NULL,
-    request_hash    CHAR(64)     NOT NULL,
-    status          VARCHAR(16)  NOT NULL,
-    result_payload  JSONB,
-    started_at      TIMESTAMPTZ  NOT NULL,
-    committed_at    TIMESTAMPTZ,
-    PRIMARY KEY (operation_id),
-    UNIQUE (session_id, operation_id),
-    CHECK (operation_type IN (
-        'create', 'append', 'move', 'compaction',
-        'branch_summary', 'fork', 'delete', 'import'
-    )),
-    CHECK (
-        (status = 'started'
-            AND result_payload IS NULL
-            AND committed_at IS NULL)
-        OR
-        (status = 'committed'
-            AND result_payload IS NOT NULL
-            AND committed_at IS NOT NULL)
-    )
-);
-
-CREATE TABLE session_entry (
-    session_id       VARCHAR(128) NOT NULL,
-    entry_id         VARCHAR(128) NOT NULL,
-    parent_entry_id  VARCHAR(128),
-    append_seq       BIGINT       NOT NULL,
-    entry_type       VARCHAR(64)  NOT NULL,
-    event_time       TIMESTAMPTZ  NOT NULL,
-    payload          TEXT         NOT NULL,
-    operation_id     VARCHAR(128) NOT NULL,
-    PRIMARY KEY (session_id, entry_id),
-    UNIQUE (session_id, append_seq),
-    FOREIGN KEY (session_id)
-        REFERENCES agent_session (session_id)
-        ON DELETE CASCADE,
-    FOREIGN KEY (session_id, parent_entry_id)
-        REFERENCES session_entry (session_id, entry_id),
-    FOREIGN KEY (session_id, operation_id)
-        REFERENCES session_write_operation (session_id, operation_id),
-    CHECK (append_seq > 0),
-    CHECK (parent_entry_id IS NULL OR parent_entry_id <> entry_id),
-    CHECK (entry_type IN (
-        'message',
-        'thinking_level_change',
-        'model_change',
-        'active_tools_change',
-        'compaction',
-        'branch_summary',
-        'custom',
-        'custom_message',
-        'label',
-        'session_info',
-        'leaf'
-    ))
-);
-
-CREATE TABLE session_sequence (
-    session_id       VARCHAR(128) NOT NULL,
-    next_append_seq  BIGINT       NOT NULL,
-    PRIMARY KEY (session_id),
-    FOREIGN KEY (session_id)
-        REFERENCES agent_session (session_id)
-        ON DELETE CASCADE,
-    CHECK (next_append_seq > 0)
-);
-
-CREATE TABLE session_materialized (
-    session_id  VARCHAR(128) NOT NULL,
-    payload     JSONB        NOT NULL,
-    PRIMARY KEY (session_id),
-    FOREIGN KEY (session_id)
-        REFERENCES agent_session (session_id)
-        ON DELETE CASCADE,
-    CHECK (JSONB_TYPEOF(payload) = 'object')
-);
-
-CREATE TABLE entry_materialized (
-    session_id      VARCHAR(128) NOT NULL,
-    append_seq      BIGINT       NOT NULL,
-    projection_type VARCHAR(64)   NOT NULL,
-    payload         JSONB         NOT NULL,
-    PRIMARY KEY (session_id, append_seq, projection_type),
-    FOREIGN KEY (session_id, append_seq)
-        REFERENCES session_entry (session_id, append_seq)
-        ON DELETE CASCADE,
-    CHECK (projection_type IN ('label')),
-    CHECK (JSONB_TYPEOF(payload) = 'object')
-);
-
-CREATE TABLE branch_entry (
-    session_id  VARCHAR(128) NOT NULL,
-    branch_id   VARCHAR(128) NOT NULL,
-    entry_id    VARCHAR(128) NOT NULL,
-    append_seq  BIGINT       NOT NULL,
-    PRIMARY KEY (session_id, branch_id, entry_id),
-    FOREIGN KEY (session_id, entry_id)
-        REFERENCES session_entry (session_id, entry_id)
-        ON DELETE CASCADE
-);
-
-CREATE TABLE branch_tip (
-    session_id  VARCHAR(128) NOT NULL,
-    tip_id      VARCHAR(128) NOT NULL,
-    branch_id   VARCHAR(128) NOT NULL,
-    PRIMARY KEY (session_id, tip_id),
-    UNIQUE (session_id, branch_id),
-    FOREIGN KEY (session_id, tip_id)
-        REFERENCES session_entry (session_id, entry_id)
-        ON DELETE CASCADE
-);
-
-CREATE TABLE session_search_document (
-    session_id       VARCHAR(128) NOT NULL,
-    entry_id         VARCHAR(128) NOT NULL,
-    normalized_text  TEXT         NOT NULL,
-    PRIMARY KEY (session_id, entry_id),
-    FOREIGN KEY (session_id, entry_id)
-        REFERENCES session_entry (session_id, entry_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX idx_agent_session_created
-    ON agent_session (created_at DESC, session_id);
-
-CREATE INDEX idx_agent_session_parent
-    ON agent_session (parent_session_id);
-
-CREATE INDEX idx_agent_session_cwd_created
-    ON agent_session (cwd, created_at DESC, session_id);
-
-CREATE INDEX idx_session_entry_parent
-    ON session_entry (session_id, parent_entry_id);
-
-CREATE INDEX idx_session_entry_type_seq
-    ON session_entry (session_id, entry_type, append_seq);
-
-CREATE INDEX idx_session_write_operation_session
-    ON session_write_operation (session_id, started_at);
-
-CREATE INDEX idx_entry_materialized_type_seq
-    ON entry_materialized (session_id, projection_type, append_seq);
-
-CREATE INDEX idx_branch_entry_branch_seq
-    ON branch_entry (session_id, branch_id, append_seq);
-
-CREATE INDEX idx_branch_entry_entry
-    ON branch_entry (session_id, entry_id);
-
-INSERT INTO memory_schema_version (
-    component,
-    schema_version,
-    migration_id,
-    migration_checksum,
-    installed_at
-) VALUES (
-    'session-memory',
-    1,
-    '001_sqlite_alignment.sql',
-    '0000000000000000000000000000000000000000000000000000000000000000',
-    CURRENT_TIMESTAMP
-);
-```
-
-`migration_checksum` 中的 64 个 `0` 仅是设计稿占位值。发布 migration 必须用最终 SQL 文件的实际 SHA-256 替换；启动校验不得接受占位值。
-
-DDL 有意不包含：
-
-- `tenant_id` 和任何多租户约束。
-- `session_leaf_event`；`leaf` entry 已承担不可变导航事实。
-- 独立的 `session_label` 和 `session_file_operation`；当前 SQLite 使用 generic `entry_materialized` 且不物化 file operation。
-- entry payload 上的 JSONB GIN 索引；canonical payload 有意使用 TEXT，子串搜索使用专用 normalization projection。
-- 分布式 `DISTRIBUTE BY`；当前数据库明确为集中式。
-
-`session_write_operation.session_id` 有意不建立 session 外键，使 create 可以先占用幂等键，并使 delete 后仍能返回稳定结果。被 entry 引用的 operation 与 session entry 同生命周期；未被 entry 引用的 create/delete operation，以及 session 删除后成为孤立记录的 operation，按幂等保留期清理。`session_entry` 的复合外键保证 entry 与 operation 的 session 一致。
-
-entry 的 type-specific 引用，例如 `leaf.targetId`、`label.targetId`、`compaction.firstKeptEntryId` 和 `branch_summary.fromId`，由 `SessionEntryCodec` 在写入前校验属于同一 session。entry projection、branch cache 和 search projection 另外使用数据库外键保护。`active_leaf_entry_id` 与 SQLite 一样使用逻辑引用；open/read 必须显式校验非空 leaf 存在，不建立会阻塞 session cascade delete 的循环外键。
-
-## 8. 路径查询与 Context rebuild
-
-### 8.1 Branch cache 优先读取
-
-读取先获得 `agent_session.revision` 和 `active_leaf_entry_id`。leaf 为 null 时返回空路径；否则先按 `(session_id, entry_id)` 找到一个 cached branch，再按 `append_seq` 顺序读取。
-
-Repository 必须校验：
-
-- cache 包含请求 leaf，且 leaf sequence 与请求一致；
-- 首行是 root，或者是已计算的 compaction start entry；
-- 每一行 `parent_entry_id` 等于前一行 `entry_id`；
-- cache 中每个 entry 在 canonical `session_entry` 中存在。
-
-bounded branch query 在路径边界确定后再应用 `entry_type/customType` 过滤和 limit，并保留 SQLite `newestFirst` 默认、`oldestFirst`、`stopAtType` 和 `stopAtId` 语义。
-
-### 8.2 Recursive repair
-
-cache 缺失或校验失败时，使用权威 parent chain 修复：
-
-```sql
-WITH RECURSIVE canonical_path AS (
-    SELECT
-        e.session_id,
-        e.entry_id,
-        e.parent_entry_id,
-        e.append_seq,
-        e.entry_type,
-        e.event_time,
-        e.payload,
-        0 AS depth
-    FROM agent_session s
-    JOIN session_entry e
-      ON e.session_id = s.session_id
-     AND e.entry_id = s.active_leaf_entry_id
-    WHERE s.session_id = ?
-
-    UNION ALL
-
-    SELECT
-        parent.session_id,
-        parent.entry_id,
-        parent.parent_entry_id,
-        parent.append_seq,
-        parent.entry_type,
-        parent.event_time,
-        parent.payload,
-        child.depth + 1
-    FROM canonical_path child
-    JOIN session_entry parent
-      ON parent.session_id = child.session_id
-     AND parent.entry_id = child.parent_entry_id
-)
-SELECT
-    session_id,
-    entry_id,
-    parent_entry_id,
-    append_seq,
-    entry_type,
-    event_time,
-    payload
-FROM canonical_path
-ORDER BY depth DESC;
-```
-
-递归结果必须检测 cycle、缺失 parent、最大深度和 statement timeout。合法结果在 savepoint 内替换旧 branch cache 并写入新 `branch_tip`；修复失败不得破坏 canonical entry。
-
-### 8.3 Context 投影
-
-```text
-cachedPath = validatedBranchCacheOrRecursiveRepair(activeLeaf)
-trimmedPath = trimPathToRootOrCompaction(cachedPath)
-state = deriveModelThinkingAndTools(trimmedPath)
-contextEntries = defaultContextEntryTransform(trimmedPath)
-messages = project(contextEntries)
-```
-
-`trimPathToRootOrCompaction()` 和 `defaultContextEntryTransform()` 必须与 pi 同源 parity test 对齐。`project(compaction)` 输出 summary message 后紧接 stored `retainedTail`。`leaf`、label、session info、model/thinking/tools change 不直接产生模型消息。
-
-### 8.4 Search 命中集对齐
-
-空白 query 在 Repository 边界直接返回空集合。v1 使用参数化子串查询保证 SQLite FTS5 trigram 用例的命中集：
-
-```sql
-SELECT
-    s.session_id,
-    e.entry_id,
-    e.event_time
-FROM session_search_document d
-JOIN session_entry e
-  ON e.session_id = d.session_id
- AND e.entry_id = d.entry_id
-JOIN agent_session s
-  ON s.session_id = d.session_id
-WHERE POSITION(? IN d.normalized_text) > 0
-  AND (? IS NULL OR s.cwd = ?)
-ORDER BY e.event_time, s.session_id, e.entry_id;
-```
-
-传入第一个参数前，Repository trim query 并调用与写路径相同的 `SqliteFts5TrigramNormalizer`；没有产生 trigram 时直接返回空集合。返回的 entry id 集合和 `cwd` 过滤必须与 SQLite 一致。SQLite BM25 与 openGauss 排序分数不作数值等价承诺；Java API 使用上述稳定 tie-break，score 可为空。如后续使用 `tsvector/GIN`，必须先用归一化子串条件做 parity post-filter。
-
-![Database context rebuild](./diagrams/memory/memory-context-rebuild.svg)
-
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L265)
-
-## 9. 事务、并发和幂等
-
-### 9.1 通用写事务
-
-![Write transaction sequence](./diagrams/memory/memory-write-transaction.svg)
-
-[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L67)
-
-```text
-BEGIN
-  INSERT session_write_operation(status = started)
-    ON CONFLICT (operation_id) DO NOTHING
-
-  if operation already exists:
-    verify session_id, operation_type, request_hash
-    if committed:
-      return stored result after transaction completes
-
-  SELECT agent_session
-    WHERE session_id = ?
-    FOR UPDATE
-
-  verify expected_revision
-  verify expected_leaf_entry_id
-  validate all referenced entries
-  read and advance session_sequence
-  INSERT immutable session_entry row(s)
-  update session_materialized/entry_materialized
-  update agent_session active leaf and revision
-  extend or rebuild branch_entry/branch_tip
-  update session_search_document when search is enabled
-  UPDATE session_write_operation to committed
-COMMIT
-```
-
-相同 operation id、相同 request hash 的 retry 返回首次成功结果。operation id 已存在但 session、type 或 request hash 不同，返回 `IDEMPOTENCY_KEY_REUSE`。唯一键冲突由数据库等待首次事务完成：首次事务回滚后 retry 可重新建立 operation。
-
-`request_hash` 是规范化命令 JSON 的 SHA-256：包含 command type、session id、expected revision、expected leaf 和全部业务 payload；排除 operation id、trace id、认证信息及其他传输 metadata。规范化使用 UTF-8、对象 key 字典序和稳定的数字/空值编码。
-
-### 9.2 Revision 语义
-
-- revision 初始为 0。
-- 每个成功修改会话状态的 Application Service 命令递增一次。
-- 一个 branch-summary 命令即使写 leaf marker 和 summary 两条 entry，也只递增一次。
-- 只读查询、列表和导出不改变 revision。
-- expected revision 或 expected leaf 不匹配返回 `REVISION_CONFLICT`。
-- 摘要结果提交时快照不匹配返回更具体的 `STALE_CONTEXT_SNAPSHOT`。
-
-### 9.3 投影一致性和重建
-
-投影与 entry 在同一事务中更新。`ProjectionRebuilder` 在维护窗口内按 `append_seq` 重放 entry 到临时表，校验计数和摘要后原子切换或覆盖 `session_materialized`、`entry_materialized`、branch cache 和 search projection。重建不改 entry、active leaf、revision 或 operation。
-
-损坏 payload 的策略：
-
-- 新写入在事务前由 `SessionEntryCodec` 拒绝，返回 `INVALID_ENTRY`。
-- 已持久化损坏 entry 在 read、page、branch query 和 context rebuild 中返回 `INVALID_ENTRY`，不返回部分结果。
-- 该行为与当前 SQLite `decodeEntryRows()` 和 `readEntry()` 对齐；不支持旧基线中的静默 skip。
-
-## 10. Java 接口和错误
-
-### 10.1 Application Service
+| 标识符 `TEXT` | `TEXT` | 不增加 SQLite 没有的长度约束 |
+| entry/materialized type `TEXT` | `TEXT` | 保留原始字符串语义 |
+| sequence `INTEGER` | `BIGINT` | 保留 SQLite INTEGER 的 64 位范围 |
+| timestamp `TEXT` | `TEXT` | 保留 ISO 字符串原值和词法排序 |
+| metadata/payload `TEXT` | `TEXT` | 保留 JSON 原文和解码行为 |
+| cwd `TEXT` | `TEXT` | 保留路径原文 |
+
+### 4.2 明确禁止的结构
+
+- `memory_schema_version`
+- `agent_session`
+- `session_entry`
+- `session_sequence`
+- `branch_entry`
+- `branch_tip`
+- `session_write_operation`
+- `session_search_document`
+- `revision`
+- `operation_id`
+- migration checksum
+- SQLite Schema 中不存在的外键、CHECK、cascade 和 trigger
+
+![SQLite-aligned data model](./diagrams/memory/memory-data-model.svg)
+
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L113)
+
+## 5. Java 和 JDBC 边界
+
+### 5.1 Java 接口
+
+Java 继续实现 pi 的 `SessionStorage` 和 `SessionRepository` 契约，不增加数据库专属命令字段。
 
 ```java
 interface MemorySessionApplicationService {
     SessionView createSession(CreateSessionCommand command);
     SessionView openSession(String sessionId);
     List<SessionSummary> listSessions(SessionListQuery query);
-    void deleteSession(DeleteSessionCommand command);
+    void deleteSession(String sessionId);
     SessionView forkSession(ForkSessionCommand command);
     AppendResult appendEntry(AppendEntryCommand command);
     MoveResult moveTo(MoveToCommand command);
     ContextSnapshot loadContext(LoadContextQuery query);
     EntryPage pageEntries(EntryPageQuery query);
     List<SessionEntryView> findEntriesOnBranch(BranchEntryQuery query);
-    List<SessionSearchHit> searchSessions(SessionSearchQuery query);
 }
 ```
 
-这是公共领域契约，不暴露 JDBC、SQLState、JSONB driver object 或数据库行类型。
+command 不包含 operation id、expected revision 或 expected leaf。并发模型与 SQLite 一样由 Repository 串行队列约束。
 
-### 10.2 命令并发字段
+### 5.2 模块职责
 
-| 命令 | operation id | expected revision | expected leaf |
-|---|---:|---:|---:|
-| create | 必须 | 固定为 0 | 固定为 null |
-| append | 必须 | 必须 | 必须，可为 null |
-| move / branch summary | 必须 | 必须 | 必须，可为 null |
-| compaction commit | 必须 | snapshot revision | snapshot leaf |
-| fork | 必须 | 源 session revision | 源 session leaf |
-| delete | 必须 | 必须 | 必须，可为 null |
-| import | 必须 | 固定为 0 | 固定为 null |
-
-delete 对已删除 session 的同 operation retry 返回首次稳定结果；`session_write_operation` 不随 session 删除，并在幂等保留期结束后清理。
-
-### 10.3 稳定错误
-
-| 错误 | 触发条件 |
+| 组件 | 职责 |
 |---|---|
-| `NOT_FOUND` | session 或目标 entry 不存在 |
-| `INVALID_ENTRY` | payload、类型、引用、路径或 projection 无效 |
-| `INVALID_FORK_TARGET` | before 目标不是 user message，或目标不可达 |
-| `REVISION_CONFLICT` | expected revision/leaf 与 session head 不一致 |
-| `IDEMPOTENCY_KEY_REUSE` | operation id 对应不同规范化请求 |
-| `STALE_CONTEXT_SNAPSHOT` | 摘要生成期间 revision 或 leaf 变化 |
-| `STORAGE_ERROR` | JDBC、超时、连接或无法分类的数据库错误 |
+| `MemorySessionApplicationService` | 编排 session 操作，不直接拼 SQL |
+| `GaussDbSessionRepository` | create、open、list、delete、fork |
+| `GaussDbSessionStorage` | entry、head、projection、branch query |
+| `GaussDbMigrationRunner` | 按 SQLite migration id 和顺序执行适配后的 SQL |
+| `GaussDbTransactionManager` | 提供与 SQLite transaction callback 等价的事务边界 |
 
-`GaussDbSqlStateMapper` 负责把唯一键、外键、锁超时、事务回滚、连接故障和 statement timeout 映射为稳定错误，不把数据库错误文本直接返回客户端。
+### 5.3 JDBC 约束
 
-## 11. 迁移、发布和运维
-
-### 11.1 JSONL 导入
-
-1. 解析 header 和 v1-v3 entry。
-2. 为 header 创建 session。
-3. 按文件顺序分配 `append_seq`，保留原 timestamp。
-4. 把 base 字段写入固定列，其余字段写入 payload。
-5. 校验 parent、firstKept、fromId、label target 和 leaf target。
-6. 重建 materialized summary、label entry projection、branch cache 和 search projection。
-7. current leaf 默认取最后 entry；如果文件含新 harness leaf entry，则按 leaf target 计算。
-8. 生成 entry 数、内容 hash、孤儿和解析错误报告。
-
-旧 coding-agent JSONL 不记录“最后一次只移动 leaf”的状态，导入器不得伪造该 leaf；报告中标记 `UNRECOVERABLE_LEAF_MOVE`。
-
-### 11.2 SQLite 导入
-
-- 以 `sessions`、`session_entries` 和 `active_leaf_id` 为事实来源。
-- 按 `entry_seq` 导入，保留 entry id、parent、timestamp 和 payload。
-- 导入 `leaf` 和 `retainedTail`。
-- `branch_entries`、`branch_tips`、`session_materialized`、`entry_materialized` 和 `session_search_fts` 不直接复制，但必须从 canonical session/entry 重建为等价 openGauss 投影。
-- 校验源 active leaf 与重放 leaf entry 得到的状态；不一致时停止该 session 导入。
-- 对比源/目标 materialized payload、每条 branch tip 的 root-to-tip entry id 集合和 search 命中集。
-
-### 11.3 导出和回滚
-
-按 `append_seq` 重建 JSONL header 和完整 entry。数据库保持唯一写入事实源，不启用长期双写。迁移切换前保留原 JSONL/SQLite 只读副本；回滚通过受控导出或切回未被修改的源副本完成。
-
-### 11.4 发布阶段
-
-| 阶段 | 完成条件 |
+| 项目 | 固定选择 |
 |---|---|
-| M0 | migration、权限、JDBC compatibility suite 通过 |
-| M1 | 历史数据影子导入，entry/hash/context parity 通过 |
-| M2 | 生产请求同时计算旧/新 read result，只返回旧结果并记录差异 |
-| M3 | 切换 GaussDB 读取；写入只进入 GaussDB |
-| M4 | 停止旧存储写入，保留受控导出和恢复副本 |
+| Maven 坐标 | `org.opengauss:opengauss-jdbc:6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1` |
+| 驱动类 | `org.opengauss.Driver` |
+| URL | `jdbc:opengauss://host:port/database` |
+| Java API | `DataSource`, `Connection`, `PreparedStatement`, `ResultSet` |
+| JSON | 作为 String 绑定和读取，不使用驱动特有 JSONB object |
 
-### 11.5 指标和告警
+应用账号执行 DML；migration 身份执行 DDL。定制 JDBC 的实际行为必须通过 compatibility suite 验证，不能从其他 openGauss JDBC 版本推断。
 
-- append、move、compaction commit 延迟和失败率。
-- revision conflict、stale snapshot 和 idempotency hit 数量。
-- context path 深度、查询耗时、rebuild 耗时和输出消息数。
-- branch cache hit/repair/invalid 数、每 branch 行数和分支前缀写放大。
-- search 查询耗时、扫描行数、命中数和 SQLite/GaussDB 命中集差异。
-- JSONB metadata/materialized payload、TEXT entry payload、session entry 数和单次 import 大小。
-- projection rebuild 差异和 migration parity 失败。
-- JDBC pool exhausted、连接失败、锁等待和 statement timeout。
+## 6. GaussDB DDL
 
-## 12. 安全
+DDL 分为 bootstrap、`001_initial.sql` 和 `002_branch_tips.sql`。migration id 与 SQLite 完全一致。
 
-虽然不设计多租户，仍执行以下安全强化：
+### 6.1 Bootstrap：`migrations`
 
-- 数据库连接强制 TLS，凭据来自部署 secret，不写入 metadata、payload 或日志。
-- 运行账号最小权限，禁止 DDL、用户管理和任意 schema 访问。
-- payload 禁止 API key、OAuth token、cookie 和完整 authorization header。
-- prompt、summary、tool result 和 file path 默认不进入普通日志；诊断日志脱敏并限制长度。
-- 限制单 entry payload、retained tail、summary、路径深度、导入文件和单 session entry 数。
-- JDBC 使用参数化 SQL；表名、列名和排序字段不从请求直接拼接。
-- 备份、导出和临时文件使用平台加密与访问审计。
+```sql
+CREATE TABLE IF NOT EXISTS migrations (
+    id          TEXT PRIMARY KEY,
+    applied_at  TEXT NOT NULL
+);
+```
 
-## 13. 测试与验收
+应用仍按 `SELECT id FROM migrations ORDER BY applied_at, id` 判断已执行 migration。每个 migration 和对应 `migrations` insert 在同一事务中完成。
 
-### 13.1 pi parity
+### 6.2 `001_initial.sql`
 
-- 所有 11 种 entry 的编码、解码、分页和回放。
-- 无 compaction、单次/重复 compaction、`retainedTail` 和旧 `firstKeptEntryId`。
-- split turn、tool result 不能作为 cut point、previous summary 增量更新。
-- branch common ancestor、旧路径摘要、目标侧 summary 挂载。
-- custom 默认不进入 context，custom projector 和 custom message 正确投影。
-- model、thinking level 和 active tools 从 SQLite 等价的 compaction-trimmed path 推导。
-- fork 默认 before、显式 at、非法目标和 entry id 保留。
-- bounded branch query 的 stopAtType、stopAtId、type、customType、order 和 limit 组合。
-- branch cache 缺失、断链、错误 tip 和循环时的失败/修复结果。
-- search 对 `auth`/`AUTH`/`uth`、不足 3 个 Unicode code point 的查询、组合/预组字符、中文、引号、标点、空查询和 `cwd` 过滤的命中集对齐。
+```sql
+CREATE TABLE IF NOT EXISTS sessions (
+    id                 TEXT PRIMARY KEY,
+    created_at         TEXT NOT NULL,
+    cwd                TEXT NOT NULL,
+    parent_session_id  TEXT,
+    metadata           TEXT,
+    active_leaf_id     TEXT
+);
 
-### 13.2 数据库事务
+CREATE INDEX IF NOT EXISTS idx_sessions_created_at
+    ON sessions (created_at DESC);
 
-- append 的 entry、sequence、materialized state、leaf、branch cache、search、operation 原子提交或回滚。
-- move 写 leaf marker，但 `agent_session.active_leaf_entry_id` 指向 target。
-- 带 summary 的 move 在一次命令中写两个 entry，只增加一次 revision。
-- 同 operation 并发 retry 只产生一组 entry。
-- 相同 operation id 不同 hash 返回 `IDEMPOTENCY_KEY_REUSE`。
-- revision/leaf 冲突、锁等待、statement timeout 和连接中断。
-- projection 重建结果与在线投影一致。
-- branch/search 投影写失败时 canonical append/delete 也回滚。
+CREATE INDEX IF NOT EXISTS idx_sessions_cwd
+    ON sessions (cwd);
 
-### 13.3 JDBC compatibility suite
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions (parent_session_id);
 
-必须使用精确版本 `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`，不允许用其他版本代测：
+CREATE TABLE IF NOT EXISTS session_entries (
+    session_id  TEXT   NOT NULL,
+    id          TEXT   NOT NULL,
+    entry_seq   BIGINT NOT NULL,
+    parent_id   TEXT,
+    type        TEXT   NOT NULL,
+    timestamp   TEXT   NOT NULL,
+    payload     TEXT   NOT NULL,
+    PRIMARY KEY (session_id, id)
+);
 
-- `org.opengauss.Driver` 加载和 `jdbc:opengauss:` URL。
-- TLS、认证、连接池 validation query 和 failover 后重连。
-- JSONB metadata/materialized state 的 insert、update、null 和读取；TEXT entry payload 的 Unicode、大对象和原文保持。
-- 递归 CTE、复合外键、`SELECT ... FOR UPDATE` 和事务回滚。
-- 窗口函数、savepoint 和 branch cache 前缀 batch insert。
-- 大小写折叠子串匹配；`tsvector/GIN` 只做可选加速，不代替命中集 parity。
-- prepared statement、batch insert、JSONB 中的 cost 数值和 TIMESTAMPTZ。
-- 唯一键、外键、锁超时、statement timeout 和连接错误的 SQLState 映射。
-- schema migration 的事务性及重复执行保护。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_session_seq
+    ON session_entries (session_id, entry_seq);
 
-### 13.4 迁移
+CREATE INDEX IF NOT EXISTS idx_session_entries_session_parent
+    ON session_entries (session_id, parent_id);
 
-- JSONL v1、v2、v3、新 harness leaf 和 retained tail。
-- 当前 pi SQLite session、active leaf、labels、materialized state、branch tips 和 search 命中集。
-- 缺失 parent、非法 firstKept、错误 leaf target、坏 JSON 和重复 entry。
-- entry 数、规范化 hash、活动路径、context messages 和最终 state parity。
-- 旧 JSONL 未持久化 leaf move 的限制报告。
+CREATE INDEX IF NOT EXISTS idx_session_entries_session_type
+    ON session_entries (session_id, type);
 
-### 13.5 验收标准
+CREATE TABLE IF NOT EXISTS session_sequences (
+    session_id  TEXT PRIMARY KEY,
+    next_seq    BIGINT NOT NULL
+);
 
-- 相同合法活动树输入产生与 pi harness 等价的 context messages 和状态。
-- 任意成功写命令后，entry、sequence、materialized state、leaf、branch cache、search 和 operation 不存在部分可见状态。
-- SQLite 和 GaussDB 对同一 branch query/search corpus 产生同一 entry id 命中集；排序 score 如有差异必须单独标注且不影响稳定 tie-break。
-- 服务重启后可恢复显式 leaf move。
-- 并发 retry 不产生重复 entry，过期摘要不能覆盖新分支。
-- 文档中所有 DDL 在目标集中式 GaussDB 和指定 JDBC JAR 上通过 compatibility suite。
-- 迁移 parity 不一致的 session 不允许进入切换清单。
+CREATE TABLE IF NOT EXISTS branch_entries (
+    session_id  TEXT   NOT NULL,
+    branch_id   TEXT   NOT NULL,
+    entry_id    TEXT   NOT NULL,
+    entry_seq   BIGINT NOT NULL,
+    PRIMARY KEY (session_id, branch_id, entry_id)
+);
 
-## 14. 设计取舍
+CREATE INDEX IF NOT EXISTS idx_branch_entries_session_branch
+    ON branch_entries (session_id, branch_id);
 
-| ID | 问题 | 选择 | 分类 |
-|---|---|---|---|
-| TD-MEM-01 | 持久化介质 | 集中式 GaussDB | 架构改造 |
-| TD-MEM-02 | JDBC | 锁定指定 openGauss JDBC 定制版本 | 产品约束 |
-| TD-MEM-03 | leaf 审计 | 使用 pi `leaf` entry，不建独立 leaf event 表 | pi 新 harness 对齐 |
-| TD-MEM-04 | current state | active leaf 保存在 `agent_session`，sequence 和 materialized state 按 SQLite 拆表 | SQLite 表行为对齐 |
-| TD-MEM-05 | active path | 保留 branch entry/tip cache，递归 CTE 仅用于修复 | SQLite 表行为对齐 |
-| TD-MEM-06 | compaction | `retainedTail` 为主，兼容 firstKept | 兼容约束 |
-| TD-MEM-07 | 并发 | session 行锁 + revision + expected leaf + idempotency | 可靠性强化 |
-| TD-MEM-08 | 损坏 entry | read/page/branch/context 失败，不静默跳过 | 当前 SQLite 行为对齐 |
-| TD-MEM-09 | 多租户 | 不建模 | 产品范围约束 |
-| TD-MEM-10 | 跨会话记忆 | 不建模，不增加向量索引 | 产品范围约束 |
-| TD-MEM-11 | 原始 payload | 固定树列 + SQLite-compatible type-specific JSON TEXT | SQLite 搜索输入对齐 |
-| TD-MEM-12 | 摘要事务 | 模型调用在事务外，提交时校验 snapshot | 架构改造 |
-| TD-MEM-13 | entry projection | 保留 generic append-order `entry_materialized`，v1 只投影 label | SQLite 表行为对齐 |
-| TD-MEM-14 | search | 命中集对齐 trigram 子串语义，索引实现可不同 | 产品能力对齐 + 架构差异 |
+CREATE INDEX IF NOT EXISTS idx_branch_entries_session_branch_seq
+    ON branch_entries (session_id, branch_id, entry_seq);
 
-## 15. 官方能力依据
+CREATE INDEX IF NOT EXISTS idx_branch_entries_session_entry
+    ON branch_entries (session_id, entry_id);
+
+CREATE TABLE IF NOT EXISTS session_materialized (
+    session_id  TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entry_materialized (
+    session_id  TEXT   NOT NULL,
+    entry_seq   BIGINT NOT NULL,
+    type        TEXT   NOT NULL,
+    payload     TEXT   NOT NULL,
+    PRIMARY KEY (session_id, entry_seq, type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entry_materialized_session_type_seq
+    ON entry_materialized (session_id, type, entry_seq);
+```
+
+与 SQLite `001_initial.sql` 相比只做两类调整：删除 `WITHOUT ROWID`，sequence 使用 `BIGINT`。
+
+### 6.3 `002_branch_tips.sql`
+
+```sql
+CREATE TABLE IF NOT EXISTS branch_tips (
+    session_id  TEXT NOT NULL,
+    tip_id      TEXT NOT NULL,
+    branch_id   TEXT NOT NULL,
+    PRIMARY KEY (session_id, tip_id),
+    UNIQUE (session_id, branch_id)
+);
+
+DELETE FROM branch_tips;
+DELETE FROM branch_entries;
+
+DROP INDEX IF EXISTS idx_branch_entries_session_branch;
+```
+
+该 migration 与 SQLite 保持相同的清空和 drop 顺序，不把 branch cache 当作迁移事实源。
+
+## 7. 查询与事务对齐
+
+### 7.1 Create
+
+一个 create transaction 依次插入：
+
+1. `sessions`
+2. `session_sequences(next_seq = 1)`
+3. `session_materialized` 空 summary
+
+不插入额外的 operation、state 或 audit row。
+
+### 7.2 Append
+
+![SQLite-aligned append transaction](./diagrams/memory/memory-write-transaction.svg)
+
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L57)
+
+```text
+BEGIN
+  SELECT next_seq FROM session_sequences WHERE session_id = ?
+  INSERT session_entries
+  UPDATE session_sequences SET next_seq = next_seq + 1
+  UPDATE session_materialized
+  INSERT entry_materialized rows when required
+  UPDATE sessions SET active_leaf_id = ?
+  update branch_entries and branch_tips
+COMMIT
+```
+
+SQL 顺序与 SQLite `appendEntry()` 一致。GaussDB 实现不得在这条路径中插入 revision、operation 或 search projection。
+
+### 7.3 Leaf
+
+`leaf` 是普通 `session_entries` row。append 后：
+
+- leaf marker 保留在 append log。
+- `sessions.active_leaf_id` 设置为 `leaf.targetId`，而不是 leaf marker id。
+- `targetId = null` 时 active leaf 为 null。
+
+### 7.4 Branch cache
+
+GaussDB 直接使用 `branch_entries` 和 `branch_tips`：
+
+- root append 建立新 branch 和 tip。
+- 线性 append 扩展 tip。
+- 从旧 parent 分叉时复制共享前缀。
+- 缓存缺失或无效时，从 `session_entries.parent_id` 递归重建。
+- 修复使用 savepoint，但不引入额外表或状态列。
+
+### 7.5 Context
+
+![SQLite-aligned context rebuild](./diagrams/memory/memory-context-rebuild.svg)
+
+[查看 PlantUML 源码](./diagrams/memory/diagram.puml#L222)
+
+```text
+leaf = sessions.active_leaf_id
+fullPath = validatedBranchCacheOrParentChain(leaf)
+path = trimPathToRootOrCompaction(fullPath)
+state = deriveModelThinkingAndTools(path)
+messages = project(defaultContextEntryTransform(path))
+```
+
+GaussDB 不改变 compaction、`retainedTail`、`firstKeptEntryId` 或 custom projector 语义。
+
+### 7.6 Delete
+
+SQLite 没有外键或 cascade，Repository 按以下顺序删除：
+
+1. `branch_tips`
+2. `branch_entries`
+3. `session_entries`
+4. `entry_materialized`
+5. `session_materialized`
+6. `session_sequences`
+7. `sessions`
+
+GaussDB 保持相同的显式删除顺序，不使用 `ON DELETE CASCADE` 替代。
+
+源码证据：[`SqliteSessionBackend.delete()`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/repo.ts#L153-L168)
+
+## 8. 数据迁移
+
+### 8.1 SQLite 到 GaussDB
+
+由于表名和列名一致，迁移按表直接复制：
+
+1. 复制 `sessions`。
+2. 复制 `session_entries`，保持 `entry_seq`、timestamp 和 payload 原文。
+3. 复制 `session_sequences`。
+4. 复制 `session_materialized` 和 `entry_materialized`。
+5. 复制或重建 `branch_entries` 和 `branch_tips`。
+6. 不复制源 `migrations` 行；由目标 migration runner 在实际执行适配后的 `001_initial.sql` 和 `002_branch_tips.sql` 时写入同名 id。
+
+必须校验：
+
+- 每表行数。
+- `(session_id, id)` 和 `(session_id, entry_seq)` 集合。
+- active leaf。
+- materialized payload 原文或解析后结构。
+- 每个 tip 的 root-to-tip entry id 顺序。
+- context messages 和 Session state。
+
+### 8.2 JSONL 导入
+
+JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审计表。导入后按相同 projector 重建 materialized rows 和 branch cache。
+
+### 8.3 回滚
+
+切换前保留 SQLite 只读副本。GaussDB 可按相同表和列导出回 SQLite-compatible 数据集；不启用长期双写。
+
+## 9. 测试与验收
+
+### 9.1 Schema parity
+
+- 表名集合严格等于 8 张 SQLite 核心表。
+- 每张表列名、可空性和列顺序一致。
+- 主键、唯一索引、普通索引名称及列顺序一致。
+- `002_branch_tips.sql` 执行后删除 `idx_branch_entries_session_branch`。
+- 不存在 revision、operation、search document 或其他额外表/列。
+
+### 9.2 行为 parity
+
+- create、open、list、delete、fork。
+- 所有 11 种 entry 的 append、读取和分页。
+- sequence 分配与唯一冲突。
+- materialized name、label、stats、model 和 thinking state。
+- leaf move、branch fork、branch cache repair。
+- bounded branch query 的 stop、filter、order 和 limit。
+- compaction、retainedTail、legacy firstKept 和 context messages。
+- malformed entry 的错误行为。
+
+### 9.3 Transaction parity
+
+- append 任一步失败时所有 7 类写入一起回滚。
+- branch cache repair savepoint 失败时不破坏旧 cache。
+- delete 任一步失败时整个 delete 回滚。
+- migration SQL 和 `migrations` insert 同事务。
+
+### 9.4 JDBC compatibility suite
+
+必须使用指定定制 JDBC JAR 验证：
+
+- 驱动加载、URL、TLS、认证和连接池。
+- `CREATE TABLE/INDEX IF NOT EXISTS`、`DROP INDEX IF EXISTS`。
+- TEXT primary key、复合 primary key 和 composite unique index。
+- BIGINT sequence 的绑定与读取。
+- Unicode、大 payload 和 JSON TEXT 原文保持。
+- recursive CTE、window function、savepoint 和 transaction rollback。
+- SQLState 到稳定 storage error 的映射。
+
+### 9.5 验收标准
+
+- SQLite 和 GaussDB Schema diff 只包含已批准的类型差异及 `WITHOUT ROWID` 删除。
+- 相同数据产生相同的 session metadata、entry、active leaf、projection、branch query 和 context。
+- GaussDB Schema 中没有 SQLite 基线之外的业务表、列、约束、索引或 trigger。
+- 所有 DDL 在目标集中式 GaussDB 和指定 JDBC JAR 上通过 compatibility suite。
+
+## 10. 安全与运维
+
+安全措施不改变 Schema：
+
+- JDBC 强制 TLS，凭据来自部署 secret。
+- 运行账号最小权限，migration 账号和 DML 账号分离。
+- SQL 全部参数化。
+- payload 和 metadata 默认不写普通日志。
+- 限制单 entry payload、单 session entry 数和递归路径深度。
+- 监控事务失败、锁等待、连接失败、branch cache repair 和 migration 失败。
+
+## 11. 设计决策
+
+| ID | 决策 | 分类 |
+|---|---|---|
+| TD-MEM-01 | 表名和列名完全使用 SQLite Schema | SQLite 物理对齐 |
+| TD-MEM-02 | 删除 `WITHOUT ROWID` | GaussDB 语法适配 |
+| TD-MEM-03 | sequence `INTEGER` 映射为 `BIGINT` | GaussDB 类型适配 |
+| TD-MEM-04 | 所有 SQLite TEXT 列继续使用 TEXT | SQLite 类型语义对齐 |
+| TD-MEM-05 | timestamp、metadata、payload 保持 TEXT | SQLite 值语义对齐 |
+| TD-MEM-06 | 不增加外键、CHECK、cascade 或 trigger | 禁止额外设计 |
+| TD-MEM-07 | 不增加 revision 或幂等 operation | 禁止额外设计 |
+| TD-MEM-08 | 不建立 GaussDB 搜索投影表 | FTS5 无直接语法/类型映射 |
+| TD-MEM-09 | Repository 保持 SQLite 串行写模型 | SQLite 运行行为对齐 |
+
+## 12. 官方能力依据
 
 - [GaussDB 实例类型：集中式与分布式](https://support.huaweicloud.com/intl/en-us/productdesc-gaussdb/gaussdb_01_013.html)
+- [SQLite `WITHOUT ROWID`](https://www.sqlite.org/withoutrowid.html)
+- [SQLite 数据类型](https://www.sqlite.org/datatype3.html)
+- [SQLite FTS5](https://www.sqlite.org/fts5.html)
+- [GaussDB `CREATE TABLE`](https://support.huaweicloud.com/intl/en-us/centralized-devg-v8-gaussdb/gaussdb-42-0573.html)
+- [GaussDB 数值类型](https://support.huaweicloud.com/intl/en-us/centralized-devg-v3-gaussdb/gaussdb-42-0329.html)
+- [GaussDB 字符类型](https://support.huaweicloud.com/intl/en-us/centralized-devg-v8-gaussdb/gaussdb-42-0335.html)
+- [GaussDB `CREATE INDEX`](https://support.huaweicloud.com/centralized-devg-v8-gaussdb/gaussdb-42-0552.html)
+- [GaussDB `DROP INDEX`](https://support.huaweicloud.com/intl/en-us/centralized-devg-v8-gaussdb/gaussdb-42-0607.html)
+- [GaussDB 事务控制](https://support.huaweicloud.com/intl/en-us/centralized-devg-v8-gaussdb/gaussdb-42-0468.html)
 - [GaussDB Centralized V2.0-3.x `WITH RECURSIVE`](https://support.huaweicloud.com/intl/en-us/centralized-devg-v3-gaussdb/gaussdb-42-0649.html)
 - [openGauss 6.0 JDBC 驱动类与兼容说明](https://docs.opengauss.org/en/docs/6.0.0/docs/DeveloperGuide/jdbc-package-driver-class-and-environment-class.html)
 - [openGauss 6.0 JDBC 驱动加载](https://docs.opengauss.org/en/docs/6.0.0/docs/DeveloperGuide/loading-the-driver-jdbc.html)
-- [openGauss JSON/JSONB 类型](https://docs.opengauss.org/en/docs/latest/sql_reference/json_jsonb_types.html)
-- [openGauss JSON/JSONB 函数和操作符](https://docs.opengauss.org/en/docs/latest/sql_reference/json_jsonb_functions_and_operators.html)
-- [openGauss 全文检索基础匹配](https://docs.opengauss.org/en/docs/6.0.0/docs/SQLReference/basic-text-matching.html)
-- [openGauss 使用 GIN 创建全文索引](https://docs.opengauss.org/en/docs/latest/sql_reference/creating_index.html)
-- [GaussDB Centralized V2.0-8.x 文本搜索操作符](https://support.huaweicloud.com/intl/en-us/centralized-devg-v8-gaussdb/gaussdb-42-2028.html)
 
-这些公开文档只能证明标准产品能力。定制 JDBC 版本 `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1` 的二进制兼容性必须由第 13.3 节测试确认。
+公开文档只能证明标准能力。定制 JDBC 版本和实际服务端仍必须通过第 9.4 节测试。
 
-## 16. 版本记录
+## 13. 版本记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| v0.6 | 2026-08-03 | 更新 pi 基线至 `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`；将 openGauss/GaussDB 目标改为当前 SQLite 行为对齐；保留 sequence、materialized projection、branch entry/tip cache、bounded branch query 和 search；entry payload 改为 SQLite-compatible JSON TEXT，搜索由 SQLite FTS5 oracle 锁定；context 改为 compaction-trimmed path 语义；保留 revision/idempotency 作为明确可靠性扩展 |
-| v0.5 | 2026-07-30 | 更新 pi 基线至 `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`；收敛为单租户会话内记忆；采用新 harness/SQLite 的 `leaf`、`active_tools_change` 和 `retainedTail`；数据库固定为集中式 GaussDB；锁定 openGauss JDBC 定制版本；以 state、operation 和可重建投影替代旧租户及 leaf event 模型 |
-| v0.4 | 2026-07-20 | 将 SR 边界收敛为 Session Event Plane；基于主流 Agent 数据库调研明确拆分控制面、Runtime Checkpoint、跨会话长期记忆和 Artifact；为 Entry、Leaf Event、Write Operation 补齐复合外键与会话 revision 顺序；修正幂等操作先建记录再写结果的事务状态模型 |
-| v0.3 | 2026-07-17 | 将 pi 源码基线更新为 `216e672e7c9fc65682553394b74e483c0c9e47f7`，重新核对记忆相关实现和源码锚点；确认 model runtime facade 变更未改变记忆语义 |
-| v0.2 | 2026-07-16 | 为 DDL 草案中的全部表和字段补充数据库 COMMENT；不改变表结构和行为设计 |
-| v0.1 | 2026-07-15 | 以 pi commit `dcfe36c79702ec240b146c45f167ab75ecddd205` 为基线，建立 Java ToB GaussDB 持久化、租户隔离、事务一致性、幂等和迁移设计；明确 Java target-only 差异 |
+| v0.7 | 2026-08-03 | 将 GaussDB 从“SQLite 行为对齐 + 可靠性扩展”收敛为 SQLite 物理 Schema 对齐；表名、列名、主键、索引和 migration id 与 SQLite 一致；删除 revision、operation、checksum、额外搜索投影、外键和 CHECK；仅删除 `WITHOUT ROWID` 并把 sequence `INTEGER` 映射为 `BIGINT` |
+| v0.6 | 2026-08-03 | 更新 pi 基线至 `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`；对齐 sequence、materialized projection、branch cache、bounded branch query、search 和 compaction-trimmed context；保留 revision/idempotency 扩展 |
+| v0.5 | 2026-07-30 | 更新 pi 基线至 `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`；采用新 harness leaf、active tools 和 retainedTail；数据库固定为集中式 GaussDB |
+| v0.4 | 2026-07-20 | 将 SR 边界收敛为 Session Event Plane，拆分控制面、Runtime Checkpoint、长期记忆和 Artifact |
+| v0.3 | 2026-07-17 | 更新 pi 源码基线并核对记忆实现 |
+| v0.2 | 2026-07-16 | 为 DDL 表和字段补充数据库说明 |
+| v0.1 | 2026-07-15 | 建立 Java ToB GaussDB 持久化、事务和迁移设计 |
