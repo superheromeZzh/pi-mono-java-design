@@ -1,16 +1,20 @@
 @startuml memory-architecture
 !pragma layout smetana
 title Java Centralized GaussDB Session Memory
+skinparam backgroundColor #FFFFFF
 skinparam componentStyle rectangle
 
 ' Source evidence:
-' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
-' - packages/agent/src/harness/types.ts: SessionStorage and SessionRepo
+' - badlogic/pi-mono@f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
+' - packages/agent/src/harness/types.ts: SessionStorage
+' - packages/agent/src/harness/session/repository.ts: SessionRepository
 ' - packages/agent/src/harness/session/session.ts: Session and buildSessionContext
-' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: SqliteSessionStorage
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: SqliteSessionConnection
+' - packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts: CachedBranch and rebuildCachedBranch
+' - packages/storage/sqlite-node/src/sqlite/search-backend.ts: ensureSearchSchema and search
 ' Observed behavior: pi separates session semantics from storage in the new harness.
 ' Design reason: keep context semantics in Java and make GaussDB the durable source.
-' Java divergence: JDBC transactions, revisions, and idempotency are target-only.
+' Java divergence: JDBC revisions and idempotency are target-only; session storage behavior aligns with SQLite.
 ' Product constraint: this design has no tenant model or cross-session memory.
 
 package "Agent Application" {
@@ -25,6 +29,8 @@ package "Agent Application" {
 package "GaussDB JDBC Adapter" {
   [Session Repository] as sessionRepo
   [Entry Repository] as entryRepo
+  [Branch Cache Repository] as branchRepo
+  [Session Search Repository] as searchRepo
   [Write Operation Repository] as operationRepo
   [JSONB JDBC Codec] as jsonCodec
 }
@@ -38,10 +44,14 @@ memory --> branch : prepare and commit
 migration --> memory : import and export
 memory --> sessionRepo : header and state
 memory --> entryRepo : immutable entries
+memory --> branchRepo : cached branch queries
+memory --> searchRepo : substring search
 memory --> operationRepo : idempotent writes
 entryRepo --> jsonCodec : payload mapping
 sessionRepo --> db
 entryRepo --> db
+branchRepo --> db
+searchRepo --> db
 operationRepo --> db
 compact --> memory : summary result
 branch --> memory : summary result
@@ -56,11 +66,13 @@ end note
 
 @startuml memory-write-transaction
 title Append Move And Summary Transactions
+skinparam backgroundColor #FFFFFF
 
 ' Source evidence:
-' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - badlogic/pi-mono@f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
 ' - packages/agent/src/harness/session/session.ts: appendTypedEntry and moveTo
-' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: setLeafId and appendEntry
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: appendEntry and readPathToRootOrCompaction
+' - packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts: appendEntryToBranchCache
 ' - packages/agent/src/harness/compaction/compaction.ts: prepareCompaction and compact
 ' Observed behavior: pi stores leaf markers and generates summaries before append.
 ' Design reason: commit entry, projections, leaf state, and operation atomically.
@@ -79,7 +91,7 @@ group short database transaction
     db --> memory : stored result
     memory --> runtime : stored result
   else new operation
-    memory -> db : lock session state
+    memory -> db : lock session head
     memory -> db : verify revision and leaf
     alt append
       memory -> db : insert immutable entry
@@ -88,7 +100,9 @@ group short database transaction
       memory -> db : insert leaf marker
       memory -> db : set current leaf to target
     end
-    memory -> db : update projections and revision
+    memory -> db : update sequence and materialized state
+    memory -> db : extend or repair branch cache
+    memory -> db : update search projection and revision
     memory -> db : commit stable result
     memory --> runtime : success
   end
@@ -96,7 +110,7 @@ end
 
 == Compaction or branch summary ==
 runtime -> memory : prepare summary
-memory -> db : read active path, revision, and leaf
+memory -> db : read cached branch, revision, and leaf
 db --> memory : immutable snapshot
 memory -> model : generate outside transaction
 model --> memory : summary result
@@ -110,7 +124,8 @@ else snapshot unchanged
   else branch summary
     memory -> db : insert leaf marker and branch summary
   end
-  memory -> db : update projections, leaf, revision, and operation
+  memory -> db : update all SQLite-aligned projections
+  memory -> db : update leaf, revision, and operation
   db --> memory : committed
   memory --> runtime : success
 end
@@ -128,34 +143,41 @@ skinparam classBorderColor #53657D
 skinparam classBackgroundColor #F7F9FC
 
 ' Source evidence:
-' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - badlogic/pi-mono@f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
 ' - packages/agent/src/harness/types.ts: SessionTreeEntry and SessionStorage
-' - packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql
+' - packages/storage/sqlite-node/src/sqlite/migrations/001_initial.sql and 002_branch_tips.sql
 ' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: appendEntry
+' - packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts: CachedBranch and appendEntryToBranchCache
+' - packages/storage/sqlite-node/src/sqlite/search-backend.ts: ensureSearchSchema
 ' Observed behavior: pi stores an immutable entry tree plus current leaf state.
 ' Design reason: separate stable session headers, mutable state, facts, and projections.
 ' Java divergence: foreign keys, revisions, and write operations are target-only.
-' Architecture change: recursive CTE replaces SQLite branch path materialization.
+' Observed behavior: SQLite branch tables are derived caches, and canonical parent links remain authoritative.
+' Design reason: preserve SQLite branch-query behavior while allowing recursive cache repair.
+' Design reason: retain entry payload text because SQLite FTS indexes the original payload column.
+' Architecture change: a normalized search projection replaces SQLite FTS5 virtual and shadow tables.
 
 class "agent_session" as agent_session <<table>> {
   session_id : varchar(128) [PK]
   --
-  session_format_version : integer
+  created_at : timestamptz
   cwd : text
-  parent_session_id : varchar(128) [FK]
-  metadata : jsonb
+  parent_session_id : varchar(128) [logical]
+  metadata : jsonb [nullable]
+  active_leaf_entry_id : varchar(128) [logical]
+  revision : bigint
 }
 
-class "agent_session_state" as session_state <<table>> {
+class "session_sequence" as session_sequence <<table>> {
   session_id : varchar(128) [PK, FK]
   --
-  current_leaf_entry_id : varchar(128) [FK]
-  revision : bigint
   next_append_seq : bigint
-  session_name : text
-  message_count : bigint
-  total_tokens : bigint
-  cost_total : numeric
+}
+
+class "session_materialized" as session_materialized <<projection>> {
+  session_id : varchar(128) [PK, FK]
+  --
+  payload : jsonb
 }
 
 class "session_entry" as session_entry <<table>> {
@@ -165,7 +187,7 @@ class "session_entry" as session_entry <<table>> {
   parent_entry_id : varchar(128) [FK]
   append_seq : bigint [UQ]
   entry_type : varchar(64)
-  payload : jsonb
+  payload : text
   operation_id : varchar(128) [FK]
 }
 
@@ -179,54 +201,80 @@ class "session_write_operation" as write_operation <<table>> {
   result_payload : jsonb
 }
 
-class "session_label" as session_label <<projection>> {
+class "entry_materialized" as entry_materialized <<projection>> {
   session_id : varchar(128) [PK, FK]
-  target_entry_id : varchar(128) [PK, FK]
+  append_seq : bigint [PK, FK]
   --
-  source_label_entry_id : varchar(128) [FK]
-  label : text
+  projection_type : varchar(64) [PK]
+  payload : jsonb
 }
 
-class "session_file_operation" as file_operation <<projection>> {
+class "branch_entry" as branch_entry <<cache>> {
   session_id : varchar(128) [PK, FK]
-  source_entry_id : varchar(128) [PK, FK]
-  operation_type : varchar(16) [PK]
-  file_path : text [PK]
+  branch_id : varchar(128) [PK]
+  entry_id : varchar(128) [PK, FK]
+  append_seq : bigint
 }
 
-agent_session ||--|| session_state : owns current state
+class "branch_tip" as branch_tip <<cache>> {
+  session_id : varchar(128) [PK, FK]
+  tip_id : varchar(128) [PK, FK]
+  --
+  branch_id : varchar(128) [UQ]
+}
+
+class "session_search_document" as search_document <<projection>> {
+  session_id : varchar(128) [PK, FK]
+  entry_id : varchar(128) [PK, FK]
+  --
+  normalized_text : text
+}
+
+agent_session ||--|| session_sequence : owns append sequence
+agent_session ||--|| session_materialized : owns summary projection
 agent_session ||--o{ session_entry : owns immutable tree
 write_operation ..> agent_session : targets session id
 session_entry ||--o{ session_entry : parent
 write_operation ||--o{ session_entry : commits
-session_entry ||--o{ session_label : derives label
-session_entry ||--o{ file_operation : derives file operations
-session_state "1" --> "0..1" session_entry : current leaf target
+session_entry ||--o{ entry_materialized : derives entry projection
+session_entry ||--o{ branch_entry : caches path membership
+session_entry ||--o| branch_tip : may be cached tip
+session_entry ||--o| search_document : derives search text
+branch_tip ..> branch_entry : identifies cached branch
+agent_session ..> session_entry : logical active leaf
 
 note bottom of session_entry
 Leaf navigation is an entry.
-The state points to leaf.targetId,
+The session head points to leaf.targetId,
 not to the leaf marker itself.
+Payload text preserves SQLite search input.
 end note
 
-note bottom of session_state
-Model, thinking level, and active tools
-are derived from the active path.
+note bottom of branch_entry
+Branch rows are rebuildable caches.
+Parent links remain authoritative.
+end note
+
+note bottom of session_materialized
+Payload follows SQLite projector rules.
+It is append-log summary, not context state.
 end note
 
 @enduml
 
 @startuml memory-context-rebuild
 title Centralized GaussDB Context Rebuild
+skinparam backgroundColor #FFFFFF
 
 ' Source evidence:
-' - badlogic/pi-mono@fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc
+' - badlogic/pi-mono@f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
 ' - packages/agent/src/harness/session/session.ts: defaultContextEntryTransform
 ' - packages/agent/src/harness/session/session.ts: sessionEntryToContextMessages
 ' - packages/agent/src/harness/types.ts: CompactionEntry
-' Observed behavior: pi rebuilds context from the active path and latest compaction.
-' Design reason: fetch the full path so branch-scoped model, thinking, and tools remain visible.
-' Java divergence: GaussDB obtains the path with a recursive CTE and a durable leaf.
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: readPathToRootOrCompaction
+' Observed behavior: pi derives context from the compaction-trimmed branch path.
+' Design reason: preserve current SQLite cache, repair, and context-boundary semantics.
+' Java divergence: GaussDB adds a durable revision and uses recursive CTE only to repair the cache.
 
 actor "Agent Runtime" as runtime
 participant "Memory Service" as memory
@@ -234,19 +282,19 @@ database "Centralized GaussDB" as db
 participant "Context Rebuilder" as rebuild
 
 runtime -> memory : loadContext(sessionId)
-memory -> db : read state revision and current leaf
-memory -> db : recursive root-to-leaf query
-db --> memory : full active path
-memory -> rebuild : path, revision, and leaf
-rebuild -> rebuild : derive model, thinking, and active tools
-rebuild -> rebuild : locate latest compaction
-alt no compaction
-  rebuild -> rebuild : project full active path
-else compaction has retainedTail
-  rebuild -> rebuild : summary plus stored tail plus newer entries
-else legacy compaction
-  rebuild -> rebuild : summary plus firstKept boundary plus newer entries
+memory -> db : read session revision and active leaf
+memory -> db : read and validate cached branch
+alt cache valid
+  db --> memory : cached root-to-tip path
+else cache missing or invalid
+  memory -> db : recursive canonical parent query
+  memory -> db : replace branch cache in savepoint
+  db --> memory : repaired root-to-tip path
 end
+memory -> rebuild : path, revision, and leaf
+rebuild -> rebuild : trim at latest compaction boundary
+rebuild -> rebuild : derive model, thinking, and active tools
+rebuild -> rebuild : project messages and retained tail
 rebuild -> rebuild : apply custom projectors
 rebuild --> memory : context snapshot
 memory --> runtime : context snapshot
