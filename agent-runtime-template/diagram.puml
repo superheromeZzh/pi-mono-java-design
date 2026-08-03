@@ -250,6 +250,7 @@ end note
 ' Observed behavior: current Java Session creation performs synchronous restore and resource initialization for every cold Session.
 ' Java divergence: each target agent-service Pod atomically opens current, loads each immutable bundle revision once, and pins each resident Session to an exact revision.
 ' Target-only architecture: .campusagent revisions, activation records, RuntimeSessionStore, per-Pod connection generations, publish events, exact-key single-flight, and Template leases are new.
+' Target-only architecture: the bundle root is case-sensitive and rejects Agent ID case-fold collisions.
 ' Design reason: remove repeated cold initialization while persisting authoritative Session state in a database and keeping active Run ownership inside one IP-affined Pod.
 !theme plain
 skinparam backgroundColor white
@@ -268,7 +269,7 @@ actor "Metadata publisher" as Publisher
 actor "mate-service" as SessionCaller
 participant "Trusted gateway\nuser-IP affinity" as Gateway
 participant "Bundle compiler" as Compiler
-database "Immutable bundle repository" as BundleRepo
+database "Immutable bundle repository\ncase-sensitive Agent root" as BundleRepo
 queue "Publish event bus" as EventBus
 participant "Per-Pod template registry" as Registry
 participant "Periodic reconciler" as Reconciler
@@ -281,6 +282,7 @@ participant "Tool Manager" as ToolManager
 
 == Compile and publish ==
 Publisher -> Compiler: compile fixed Agent, Skill, and disclosure revisions
+Compiler -> Compiler: validate ID grammar, case-fold uniqueness, and root semantics
 Compiler -> Compiler: normalize, validate, hash, and write staging
 Compiler -> BundleRepo: install immutable revision directory
 Compiler -> BundleRepo: open desired AVAILABLE artifact for activation

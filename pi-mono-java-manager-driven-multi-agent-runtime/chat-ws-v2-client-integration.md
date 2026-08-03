@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.2.0 |
+| 文档版本 | 1.3.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.6.0 |
-| Manager 设计 | [`README.md`](README.md)，1.8.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.7.0 |
+| Manager 设计 | [`README.md`](README.md)，1.9.0 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -87,7 +87,7 @@ DISCONNECTED
 
 ![客户端接入与恢复流程](frontend_websocket_client_integration.svg)
 
-[PlantUML 源码：`frontend_websocket_client_integration`](diagram.puml#L592)
+[PlantUML 源码：`frontend_websocket_client_integration`](diagram.puml#L602)
 
 ## 3. 最短可运行流程
 
@@ -141,8 +141,8 @@ JSON RequestFrame：
     "min_protocol": 2,
     "max_protocol": 2,
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "agent_id": "agent-a",
-    "model_id": "model-a",
+    "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
+    "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
     "client": {
       "id": "mate-service",
       "version": "1.0.0",
@@ -156,6 +156,13 @@ JSON RequestFrame：
 提供 `session_id + agent_id + model_id`。结构化 typed delta 是协议 2 的固定
 消息语义，客户端无需为 typed delta 声明 capability。
 
+`agent_id` 必须匹配 `^agent_[0-9A-Za-z]{24}$`，`model_id` 必须匹配
+`^model_[0-9A-Za-z]{24}$`；两者均为大小写敏感、总长 30 的不透明
+资源 ID。调用方应保留 Agent 元数据服务和 CampusModel/model-service
+返回的原值，不自行生成、转小写、解析后缀或依赖排序特征。
+`model_id` 是 CampusModel 资源 ID，不是 `claude-sonnet-4-6` 等
+Provider 模型名；两者的映射由 Model Manager 保存。
+
 连接成功响应为：
 
 ```json
@@ -167,10 +174,10 @@ JSON RequestFrame：
     "protocol": 2,
     "connection_id": "conn-01",
     "connection_generation": 1,
-    "agent_id": "agent-a",
+    "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "model": {
-      "model_id": "model-a",
+      "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
       "name": "Model A",
       "reasoning": true,
       "input": {
@@ -230,7 +237,9 @@ JSON RequestFrame：
 1. ResponseFrame `id` 等于 `connect-1`；
 2. `ok=true`；
 3. `protocol=2`；
-4. 返回的 `agent_id/session_id` 与请求一致；
+4. 返回的 `agent_id/session_id` 与请求按原始大小写完全一致；`mode=create` 或
+   resume 显式请求切换 Model 时，`model.model_id` 也必须与请求完全一致；
+   resume 省略 `model_id` 时，接受服务端保存且通过 Schema 的有效值并更新本地状态；
 5. `features.methods` 包含准备调用的方法，并且必须包含恢复所需的
    `chat.history`；
 6. `features.events` 按规范顺序包含全部八类 Chat 事件；它是不可拆分的
@@ -319,13 +328,13 @@ EventFrame。同 Pod 中一个 Session 只有一个活动读写连接，没有�
 最小无工具回答的事件顺序如下。每一行都是一个独立 WebSocket Text Message：
 
 ```jsonl
-{"type":"event","event":"run.started","seq":1,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","run_seq":1,"timestamp":"2026-07-30T08:00:00Z","model_id":"model-a","thinking":"hidden"}}
-{"type":"event","event":"message.started","seq":2,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":2,"timestamp":"2026-07-30T08:00:00Z","role":"assistant"}}
-{"type":"event","event":"message.updated","seq":3,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":3,"content_index":0,"timestamp":"2026-07-30T08:00:01Z","update":{"type":"text_start"}}}
-{"type":"event","event":"message.updated","seq":4,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":4,"content_index":0,"timestamp":"2026-07-30T08:00:01Z","update":{"type":"text_delta","delta":"订单已发货"}}}
-{"type":"event","event":"message.updated","seq":5,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":5,"content_index":0,"timestamp":"2026-07-30T08:00:02Z","update":{"type":"text_end"}}}
-{"type":"event","event":"message.completed","seq":6,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":6,"timestamp":"2026-07-30T08:00:02Z","message":{"message_id":"message-01","role":"assistant","status":"completed","content":[{"type":"text","text":"订单已发货"}],"created_at":"2026-07-30T08:00:00Z","completed_at":"2026-07-30T08:00:02Z"}}}
-{"type":"event","event":"run.completed","seq":7,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","run_seq":7,"timestamp":"2026-07-30T08:00:03Z","outcome":"done","stop_reason":"stop","usage":{"input_tokens":230,"output_tokens":48,"total_tokens":278}}}
+{"type":"event","event":"run.started","seq":1,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","run_seq":1,"timestamp":"2026-07-30T08:00:00Z","model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","thinking":"hidden"}}
+{"type":"event","event":"message.started","seq":2,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":2,"timestamp":"2026-07-30T08:00:00Z","role":"assistant"}}
+{"type":"event","event":"message.updated","seq":3,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":3,"content_index":0,"timestamp":"2026-07-30T08:00:01Z","update":{"type":"text_start"}}}
+{"type":"event","event":"message.updated","seq":4,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":4,"content_index":0,"timestamp":"2026-07-30T08:00:01Z","update":{"type":"text_delta","delta":"订单已发货"}}}
+{"type":"event","event":"message.updated","seq":5,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":5,"content_index":0,"timestamp":"2026-07-30T08:00:02Z","update":{"type":"text_end"}}}
+{"type":"event","event":"message.completed","seq":6,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","message_id":"message-01","run_seq":6,"timestamp":"2026-07-30T08:00:02Z","message":{"message_id":"message-01","role":"assistant","status":"completed","content":[{"type":"text","text":"订单已发货"}],"created_at":"2026-07-30T08:00:00Z","completed_at":"2026-07-30T08:00:02Z"}}}
+{"type":"event","event":"run.completed","seq":7,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-01","run_seq":7,"timestamp":"2026-07-30T08:00:03Z","outcome":"done","stop_reason":"stop","usage":{"input_tokens":230,"output_tokens":48,"total_tokens":278}}}
 ```
 
 客户端看到 `run.completed` 后清除 active run，并进入 `READY_IDLE`。
@@ -657,7 +666,7 @@ WebSocket Close 不等于 Abort。普通网络断开时，同 Pod 内 Runtime �
     "min_protocol": 2,
     "max_protocol": 2,
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "agent_id": "agent-a",
+    "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
     "client": {
       "id": "mate-service",
       "version": "1.0.0",
@@ -678,7 +687,7 @@ connect 响应中返回新 generation 与 active-run 快照：
     "run_id": "run-01",
     "run_seq": 14,
     "history_seq": 41,
-    "model_id": "model-a",
+    "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
     "thinking": "hidden",
     "message_snapshot": {
       "message_id": "message-01",
@@ -1004,6 +1013,10 @@ WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 
 - `features.events` 不缺少任何一类基础 Chat 事件；
 - `features.methods` 只包含规范的八个 Chat/Session/Model 方法，客户端不调用
   `prompt_templates.list` 或 `skills.list`；
+- 发送 connect 前可本地校验 `agent_`/`model_` 加 24 位大小写字母
+  数字；错误前缀、长度、标点或空格不发送；
+- 客户端把 Agent/Model ID 作为不透明原值缓存和比较，不改写大小写，不用
+  Provider 模型名替换 `model_id`；
 - pending map 用 RequestFrame `id` 关联 method 和 payload decoder；
 - 并发响应乱序和 EventFrame 插入不会破坏请求关联；
 - `chat.send` 响应先建立 `run_id/user_message_id`，再处理 run 事件；所有改变
@@ -1079,6 +1092,7 @@ Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecor
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.3.0 | 2026-08-03 | 将 `agent_id` 收敛为 `^agent_[0-9A-Za-z]{24}$`、`model_id` 收敛为 `^model_[0-9A-Za-z]{24}$`；明确资源 ID 大小写敏感、不透明、由各自管理服务生成，客户端不解析后缀或用 Provider 模型名代替，并按 create/resume 语义核对响应 ID；同步 AsyncAPI 2.7.0 和 Manager 1.9.0 |
 | 1.2.0 | 2026-08-03 | 统一 CampusAgent / agent-service 及规范 URL；将直连边界收窄为 mate-service/已授权服务端，认证复用既有内部网关；将方法集收敛为八个，补齐纯附件、text-only steer、Tool 脱敏/截断、Response-before-Event、单连接 generation 接管、数据库权威历史、IP 粘性限制和 Pod 重启 interrupted 恢复；同步 AsyncAPI 2.6.0 和 Manager 1.8.0 |
 | 1.1.0 | 2026-08-03 | 增加可直接实施的附件上传状态机、完整 AttachmentContextPlan/Model 切换预检、仅 ID 的 chat.send、批量原子接受、错误动作、幂等重试、AttachmentContent 历史、source digest 与 Session 保留/删除说明；同步 AsyncAPI 2.5.0 和 Manager 1.7.0 |
 | 1.0.0 | 2026-08-03 | 首版；给出客户端角色、建连、connect、chat.send、typed delta reducer、redacted thinking、命令、水位历史、快照恢复、错误、关闭码和 TypeScript dispatcher 的完整接入路径 |

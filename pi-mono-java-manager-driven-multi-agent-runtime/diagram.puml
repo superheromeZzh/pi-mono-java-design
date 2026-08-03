@@ -9,6 +9,8 @@ title Metadata to CampusAgent Runtime Directory
 ' Java divergence: the target compiler materializes only one controlled Agent directory.
 ' Target design: the Managed loader reads .campusagent only; legacy code keeps .campusclaw.
 ' Target design: RuntimeSessionStore persists Session state in a shared database.
+' Target design: Agent and Model IDs use resource prefixes plus 24 alphanumeric characters.
+' Design reason: raw case-sensitive Agent IDs require a case-sensitive root and collision guard.
 ' Design reason: keep Agent-specific disclosure local while Managers remain runtime authorities.
 
 skinparam backgroundColor #FFFFFF
@@ -39,12 +41,12 @@ rectangle "Resolved metadata input" as Input {
 }
 
 rectangle "Runtime bundle compiler" as Compiler {
-  rectangle "Validate versions,\ndependency closure,\nnames and permissions" as Validate
+  rectangle "Validate versions, IDs,\ndependency closure,\ncase-fold conflicts and policy" as Validate
   rectangle "Render prompt and\nSkill resources" as Render
   rectangle "Publish Agent directory\natomically" as Publish
 }
 
-rectangle "Controlled Agent directory\n<agent-runtime-root>/<agent-id>/" as AgentDirectory {
+rectangle "Controlled Agent directory\ncase-sensitive file system\n<agent-runtime-root>/<agent-id>/" as AgentDirectory {
   file ".campusagent/SYSTEM.md\nAgent instructions\nDirect Agent tool summaries" as SystemFile
   file ".campusagent/skills/<skill-name>/SKILL.md\nFrontmatter and Skill content" as SkillFile
   file ".campusagent/skills/<skill-name>/references/tools.json\nDirect Skill tool summaries" as SkillToolsFile
@@ -73,6 +75,14 @@ note right of SkillToolsFile
 Only tool_id, name and description.
 Schemas stay in Tool Manager.
 Child Skill tools are not merged.
+end note
+
+note left of AgentDirectory
+agent_id = agent_ + 24 alphanumeric characters
+model_id = model_ + 24 alphanumeric characters
+Compare IDs byte-for-byte.
+Reject Agent ID case-fold collisions.
+Verify directory and manifest identity.
 end note
 @enduml
 

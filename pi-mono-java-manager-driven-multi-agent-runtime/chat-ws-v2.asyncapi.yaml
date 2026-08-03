@@ -3,7 +3,7 @@ id: urn:campusagent:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusAgent 会话 WebSocket API
-  version: 2.6.0
+  version: 2.7.0
   description: |
     调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
     安全 WebSocket。
@@ -128,8 +128,8 @@ components:
               min_protocol: 2
               max_protocol: 2
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
-              agent_id: agent-a
-              model_id: model-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
               client:
                 id: mate-service
                 version: 1.0.0
@@ -143,7 +143,7 @@ components:
               mode: resume
               min_protocol: 2
               max_protocol: 2
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               client:
                 id: campusagent-sdk
@@ -199,10 +199,10 @@ components:
               protocol: 2
               connection_id: conn-01
               connection_generation: 3
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               model:
-                model_id: model-a
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
                 name: 模型 A
                 reasoning: true
                 input:
@@ -252,7 +252,7 @@ components:
                 run_id: run-01
                 run_seq: 14
                 history_seq: 41
-                model_id: model-a
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
                 thinking: hidden
                 message_snapshot:
                   message_id: message-01
@@ -407,12 +407,12 @@ components:
             event: run.started
             seq: 1
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               run_seq: 1
               timestamp: '2026-07-30T08:00:00Z'
-              model_id: model-a
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
               thinking: hidden
         - name: 2 Assistant Message 开始
           payload:
@@ -420,7 +420,7 @@ components:
             event: message.started
             seq: 2
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
@@ -433,7 +433,7 @@ components:
             event: message.updated
             seq: 3
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
@@ -448,7 +448,7 @@ components:
             event: message.updated
             seq: 4
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
@@ -464,7 +464,7 @@ components:
             event: message.updated
             seq: 5
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
@@ -479,7 +479,7 @@ components:
             event: message.completed
             seq: 6
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               message_id: message-01
@@ -500,7 +500,7 @@ components:
             event: run.completed
             seq: 7
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-01
               run_seq: 7
@@ -517,7 +517,7 @@ components:
             event: tool.started
             seq: 100
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-tool-01
               run_seq: 3
@@ -534,7 +534,7 @@ components:
             event: tool.completed
             seq: 101
             payload:
-              agent_id: agent-a
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
               session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
               run_id: run-tool-01
               run_seq: 4
@@ -570,18 +570,38 @@ components:
         后不得复用；推荐使用 UUIDv7 或 ULID，不接受仅在某个 tenant 或 user
         内唯一的短 ID。
     AgentId:
-      allOf:
-        - $ref: '#/components/schemas/Identifier'
+      type: string
+      minLength: 30
+      maxLength: 30
+      pattern: '^agent_[0-9A-Za-z]{24}$'
+      example: agent_011CZkYqphY8vELVzwCUpqiQ
       description: |
-        调用方在 connect 中提供 agent_id。服务端通过 Agent Manager 校验，并在
-        创建 CampusAgent Runtime Session 时固定绑定；恢复时，不一致的值导致请求失败。
+        Agent 元数据服务签发的、大小写敏感且不透明的资源 ID。agent-service
+        只按本 Schema 解析并将完整值交给 Agent Manager 校验，不负责签发。
+        调用方不得解析 24 位后缀、推断生成时间或其他业务含义，也不得依赖
+        字典序进行新旧或优先级排序。调用方在 connect 中提供 agent_id，并在
+        创建 CampusAgent Runtime Session 时固定绑定；恢复时，不一致的值导致
+        请求失败。该 ID 不是授权凭据，逐请求授权仍由 Manager 执行。本前缀和
+        正则是 CampusAgent 自身的协议约束，不代表
+        Anthropic API 对资源 ID 的官方正则定义。
     ModelId:
-      allOf:
-        - $ref: '#/components/schemas/Identifier'
+      type: string
+      minLength: 30
+      maxLength: 30
+      pattern: '^model_[0-9A-Za-z]{24}$'
+      example: model_011CZq2GkV8aD4NwP7sLmXfR
       description: |
-        调用方在创建 Session 时提供 model_id，或在恢复和 model.set 时请求
-        切换。服务端通过 Model Manager 校验允许集合；active run 存在时不执行
-        切换，每个 run 固化实际使用的模型。
+        model-service 签发的、大小写敏感且不透明的 CampusModel Manager 资源
+        ID。agent-service 只按本 Schema 解析并将完整值交给 Model Manager
+        校验，不负责签发。该资源在 Model Manager 内映射为私有
+        provider_model_id/descriptor；
+        Anthropic 等 Provider 自身的模型 ID 不是 `model_...` 资源 ID，也不直接
+        暴露为本字段。调用方不得解析 24 位后缀、推断 Provider 或其他业务含义，
+        也不得依赖字典序进行新旧或优先级排序。调用方在创建 Session 时提供
+        model_id，或在恢复和 model.set 时请求切换；active run 存在时不执行
+        切换，每个 run 固化实际使用的模型。该 ID 不是授权凭据，Agent-model
+        允许关系仍由 Model Manager 校验。本前缀和正则是 CampusAgent 自身
+        的协议约束，不代表 Anthropic API 对资源 ID 的官方正则定义。
     MessageId:
       allOf:
         - $ref: '#/components/schemas/Identifier'
@@ -3097,6 +3117,28 @@ components:
         - $ref: '#/components/schemas/ToolCompletedEvent'
         - $ref: '#/components/schemas/MessageCompletedEvent'
         - $ref: '#/components/schemas/RunCompletedEvent'
+x-resource-identifiers:
+  description: |
+    AgentId 采用“资源前缀 + 不透明后缀”的呈现方式，设计参考 Anthropic
+    Managed Agents Create Agent API 的资源 ID 示例；CampusAgent 只借鉴这种
+    API 可读性，不继承或推断 Anthropic 的长度、字符集、生成算法和排序语义。
+    本文件中的固定长度与正则完全属于 CampusAgent 协议。
+  reference:
+    name: Anthropic Managed Agents Create Agent API
+    url: https://platform.claude.com/docs/en/api/beta/agents/create
+  caseSensitive: true
+  opaqueSuffix: true
+  suffixOrdering: prohibited
+  resources:
+    agent_id:
+      issuer: Agent metadata service
+      consumer: agent-service and Agent Manager
+      schema: '#/components/schemas/AgentId'
+    model_id:
+      issuer: model-service
+      consumer: agent-service and Model Manager
+      schema: '#/components/schemas/ModelId'
+      semantics: CampusModel resource mapped internally to a private provider_model_id and descriptor
 x-method-contracts:
   description: |
     RequestFrame.id 关联到下列 method 和成功 payload。调用方应在 pending map 中

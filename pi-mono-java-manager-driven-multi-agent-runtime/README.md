@@ -2,12 +2,13 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.8.0 |
+| 文档版本 | 1.9.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8` |
+| Anthropic Agent ID 参考证据 | 官方 TypeScript SDK `3b45cd3b69c956ac63384fdb09ce1d8109f3fa80`，只用于观察 Agent ID 示例 |
 | 运行形态 | 多副本部署、每 Pod 单 JVM、多 Agent、WebSocket 会话；可信网关按用户 IP 保持 Pod 亲和 |
 | Template 规范性增补 | [`AgentRuntimeTemplate` 不可变运行模板设计](../agent-runtime-template/README.md)（关联设计基线 `2b2aee5ad11867f53af7fc379426e5fec6fd1d17`） |
 
@@ -238,6 +239,30 @@ thinking 披露策略在握手后全部固定，减少跨 Agent 路由和审计�
 `OpenClawTransport` 是客户端端口；CampusAgent 的 `SessionTransport` 是
 服务端逻辑会话通道，属于借鉴依赖倒置思想后的架构改造，不宣称为同一接口。
 
+### 3.4 Anthropic Managed Agents ID 形式参考
+
+Anthropic Managed Agents 的官方 Create Agent 请求不接收 `id`，创建
+响应由服务端增加 Agent ID。Create Agent 顶层响应及官方 TypeScript SDK 在固定
+commit `3b45cd3…` 的 retrieve 示例中使用
+`agent_011CZkYpogX7uDKUyvBTophP`；其他官方生成型 API 示例还把
+`agent_011CZkYqphY8vELVzwCUpqiQ` 用作 Agent 引用。二者都呈现为
+`agent_` 加 24 位大小写字母数字，但示例资源角色不能混同：
+
+- [Anthropic Create Agent API](https://platform.claude.com/docs/en/api/beta/agents/create)；
+- [Anthropic Get Agent API](https://platform.claude.com/docs/en/api/beta/agents/retrieve)；
+- [官方 SDK `Agents.create/retrieve` 与 Agent `id`](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L14-L155)；
+- [官方 SDK `AgentCreateParams`](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L888-L952)；
+- [官方 SDK `BetaManagedAgentsModel`](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L701-L721)。
+
+这只是官方示例的可观察形式。Anthropic 公开 SDK 仍将 Agent `id`
+声明为普通 `string`，没有公布 regex、生成算法、时间有序性或客户端
+自行生成规则。Anthropic 当前列举的 `model.id` 使用
+`claude-sonnet-4-6` 等 Provider 模型名，但公开类型仍允许其他 string，且不使用
+`model_` 作为 Campus 资源前缀。因此，下文对 `agent_id` 和
+`model_id` 的精确 regex 是 Campus 平台自己冻结的目标契约：前者
+参考 Anthropic 的资源前缀形式，后者是 CampusModel/model-service 的
+架构决策，都不构成对 Anthropic 未来 ID 格式的兼容承诺。
+
 ## 4. 目标组件与权威边界
 
 上层服务创建或恢复 Session 时，Resolver 选择目录，Factory 组装 Agent，
@@ -281,11 +306,11 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 
 | 元数据字段 | 运行目录或运行时目标 | 消费者 | 规则 |
 |---|---|---|---|
-| `AGENT.id` | `<agent-runtime-root>/<agent-id>` | AgentDirectoryResolver、Manager、SessionPool | 作为不透明 ID；目录解析必须限制在受控根目录 |
+| `AGENT.id` | `<agent-runtime-root>/<agent-id>` | AgentDirectoryResolver、Manager、SessionPool | 必须匹配 `^agent_[0-9A-Za-z]{24}$`；作为大小写敏感的不透明 ID，目录解析必须限制在受控根目录 |
 | `AGENT.version` | 发布校验与审计 | Runtime bundle compiler、元数据服务 | 部署时固定；目录层级不增加版本目录 |
 | `AGENT.enabled` | 发布与建 Session 校验 | 编译器、ManagedSessionPool | 非启用 Agent 不发布或拒绝建 Session |
 | `AGENT.system_prompt` | `.campusagent/SYSTEM.md` 的 `<agent_instructions>` | SystemPromptBuilder | 按固定字段顺序渲染 |
-| `AGENT.models` | Agent 模型允许集合 | Model Manager | 不投影为本地文件；每次选择和调用重新校验 |
+| `AGENT.models` | Agent 模型允许集合 | Model Manager | 每个元素必须匹配 `^model_[0-9A-Za-z]{24}$`；不投影为本地文件，每次选择和调用重新校验 |
 | `AGENT.binding_tools` | SYSTEM 的 `<agent_tools>` | 模型 | 只写 Agent 直接绑定的 tool_id、name、description |
 | `AGENT.binding_skills` | `.campusagent/skills/<skill-name>` 集合 | Managed SkillLoader、模型 | 展开完整 Skill 依赖闭包并逐个物化 |
 | `AGENT.permission` | Agent Tool 策略 | Tool Manager | 参与发布校验和运行时最终授权 |
@@ -304,6 +329,38 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 
 ### 5.2 路径解析
 
+目标资源 ID 契约为：
+
+```text
+agent_id = agent_ + 24 characters from [0-9A-Za-z]
+model_id = model_ + 24 characters from [0-9A-Za-z]
+```
+
+两者总长度均为 30，大小写敏感并作为不透明字符串比较。Agent
+元数据服务生成 `agent_id`，CampusModel/model-service 生成 `model_id`；
+`agent-service` 只执行语法校验、授权解析和精确匹配，不重新生成、
+不转换大小写，也不解析后缀中的时间、排序或分片含义。
+二者都只是资源地址，不是凭据；格式正确、资源存在或出现在 Prompt 中均不
+授予访问权，Manager 仍须根据当前调用上下文逐次执行授权。
+本文中的具体值只演示线协议形状；Campus 签发方必须在自己的资源命名空间内
+保证唯一，不能因为外部系统 ID 形状相同就把它视为同一资源。
+
+由于 `agent_id` 直接形成 `<agent-runtime-root>/<agent-id>` 目录名，Managed
+Profile 的编译和运行根目录必须位于大小写敏感文件系统；服务启动和发布前必须
+验证这一能力，不满足时 fail closed。作为纵深防御，Agent 元数据服务和发布索引
+还要为每个 ID 保留 locale-independent ASCII lowercase collision key，只用于拒绝
+case-fold 冲突，绝不能把它当作规范 ID。Resolver 打开目录后必须将请求值、真实
+目录项和 manifest 中的 `agent.id` 按原始 ASCII 字节再次比较，不能只依赖
+`Path.exists()`；因此语法合法的大小写改写也不能落到另一个 Agent 的 cwd。
+
+`model_id` 是 Model Manager 资源 ID，不是 Provider 模型名。Model Manager
+内部可将 `model_011CZq2GkV8aD4NwP7sLmXfR` 映射为
+`claude-sonnet-4-6` 等 Provider descriptor；WebSocket 和 Agent 元数据只接受
+`model_` 资源 ID。不合法前缀、长度或字符在调用 Manager 前即以
+`INVALID_REQUEST` 拒绝；大小写改写后的值仍可能语法合法，但绝不能归一化为
+原 ID，只能按改写后的原值解析。语法合法但资源不存在或不允许时，返回
+`AGENT_NOT_FOUND` 或 `MODEL_NOT_ALLOWED`。
+
 在选择 Agent 目录时，调用方只提交 `agent_id`，不提交 cwd；
 `AgentDirectoryResolver` 将它验证为安全的单路径段并解析到受控根目录，
 解析失败时拒绝当前 connect 或目录解析请求。编译器对 `skill.name` 执行相同
@@ -311,10 +368,13 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 
 1. 拒绝空值、NUL、`/`、`\`、`.` 和 `..`；
 2. 确保标识只形成一个路径段；
-3. 对目标路径规范化，并验证仍位于配置的根目录内；
-4. 拒绝指向根目录外的符号链接；
-5. 使用受控根目录内的临时同级目录生成；
-6. 全量校验成功后原子替换 `<agent-id>` 目录。
+3. 验证运行根目录大小写敏感，并拒绝与已有 Agent 的 ASCII lowercase collision
+   key 冲突；
+4. 对目标路径规范化，并验证仍位于配置的根目录内；
+5. 拒绝指向根目录外的符号链接；
+6. 打开后校验目录项和 manifest `agent.id` 与请求 ID 字节完全一致；
+7. 使用受控根目录内的临时同级目录生成；
+8. 全量校验成功后原子替换 `<agent-id>` 目录。
 
 WebSocket 不接收 cwd。服务端只执行：
 
@@ -567,7 +627,7 @@ AgentLoop 在每轮模型调用时才构造最终 Context。connect 成功响应
 
 ![Managed Session 与 Context 组装](managed_session_context_assembly.svg)
 
-[PlantUML 源码](diagram.puml#L79)
+[PlantUML 源码](diagram.puml#L89)
 
 创建顺序：
 
@@ -678,7 +738,7 @@ validation.
 
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
-[PlantUML 源码](diagram.puml#L193)
+[PlantUML 源码](diagram.puml#L203)
 
 Agent 直接工具路径：
 
@@ -755,7 +815,7 @@ ModelEventStream invoke(
 `ModelDescriptor` 至少提供 Java 构造 `Model` 所需的公开能力：
 
 ```text
-id
+model_id (Java accessor: modelId)
 name
 reasoning
 input modalities: text, image, document
@@ -775,6 +835,12 @@ max output tokens
 新附件，而不是只检查 `attachment_ids[]`。真实 Provider、凭据、base URL、
 header 和路由留在 Model Manager。
 
+这里的 `ModelDescriptor.modelId()` 始终是匹配
+`^model_[0-9A-Za-z]{24}$` 的 CampusModel 资源 ID。Provider 内部的
+`provider_model_id`、alias、部署路由和版本是 Model Manager 私有字段，不进入
+`ModelDescriptor`、WebSocket、Session record 或 Prompt，也不得覆盖公共
+`model_id`。
+
 ### 8.2 Java Provider
 
 `ManagedAgentSessionFactory` 根据 Model Manager 返回的 descriptor 构造 Java
@@ -790,18 +856,22 @@ ModelManagerClient
 Java 为 Manager model 构造运行时 `Model`：
 
 ```text
-id       = ModelDescriptor.id
+id       = ModelDescriptor.modelId  // Campus model_ resource ID, never provider_model_id
 name     = ModelDescriptor.name
 api      = MODEL_MANAGER
 provider = CUSTOM
 capability fields = ModelDescriptor
 ```
 
+`ModelManagerApiProvider` 把这个 Campus `model_id` 原样交给 Model Manager；只有
+Manager 内部才能解析出 Provider descriptor。Java `Model.id` 在 Managed Profile
+中只是 Manager 路由键，不得承载或回显 Provider 模型名。
+
 Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 
 ```json
 {
-  "agent_id": "agent-a",
+  "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
   "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 }
@@ -819,7 +889,7 @@ Model Manager 持续返回文本、thinking、ToolCall 和终态事件；Provide
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L528)
+[PlantUML 源码](diagram.puml#L538)
 
 具体映射如下：
 
@@ -1017,9 +1087,9 @@ Frame，且该 Frame 只能是：
     "mode": "create",
     "min_protocol": 2,
     "max_protocol": 2,
-    "agent_id": "agent-a",
+    "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "model_id": "model-a",
+    "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
     "client": {
       "id": "mate-service",
       "version": "1.0.0",
@@ -1073,9 +1143,19 @@ Session ID。`mode=create` 必须提供 `session_id + agent_id + model_id`；
     "protocol": 2,
     "connection_id": "conn-01",
     "connection_generation": 1,
-    "agent_id": "agent-a",
+    "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
     "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    "model": {"model_id": "model-a", "name": "Model A"},
+    "model": {
+      "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
+      "name": "Model A",
+      "input": {
+        "modalities": ["text"],
+        "attachment_media_types": [],
+        "max_attachments": 0,
+        "max_attachment_bytes": 0,
+        "max_total_attachment_bytes": 0
+      }
+    },
     "session": {"state": "idle", "thinking": "hidden"},
     "limits": {
       "max_message_bytes": 1048576,
@@ -1180,8 +1260,8 @@ CampusAgent 的六类核心标识固定为：
 |---|---|---|
 | `connection_id` | ChatWebSocketAdapter | 当前物理连接；重连后变化，不持有 Session 或 run |
 | `session_id` | 上层会话服务 | Runtime 部署内全局唯一的持久上下文；跨连接和多个 run 保持，删除后不复用 |
-| `agent_id` | Agent Manager | Session 创建时固定绑定，恢复时必须一致 |
-| `model_id` | Model Manager | Session 保存当前值，每个 run 固化实际使用值 |
+| `agent_id` | Agent Manager | 由 Agent 元数据服务生成，匹配 `^agent_[0-9A-Za-z]{24}$`；Session 创建时固定绑定，恢复时必须大小写完全一致 |
+| `model_id` | Model Manager | 由 CampusModel/model-service 生成，匹配 `^model_[0-9A-Za-z]{24}$`；Session 保存当前值，每个 run 固化实际使用值 |
 | `message_id` | CampusAgent | 一条持久化消息；完整 Message 统一使用该字段，不使用裸 `id` |
 | `run_id` | CampusAgent | 一次模型和工具执行；断线期间及重连后保持 |
 
@@ -1300,7 +1380,7 @@ Response Frame 后才订阅 `events()`；Publisher 先重放 cursor 后的暂存
 
 ![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
 
-[PlantUML 源码](diagram.puml#L463)
+[PlantUML 源码](diagram.puml#L473)
 
 ### 9.5 流式事件和 Message 投影
 
@@ -1533,8 +1613,8 @@ session_id
 主键：
 
 ```text
-01ARZ3NDEKTSV4RRFFQ69G5FAV -> agent-a
-01BX5ZZKBKACTAV9WEVGEMMVRZ -> agent-b
+01ARZ3NDEKTSV4RRFFQ69G5FAV -> agent_011CZkYqphY8vELVzwCUpqiQ
+01BX5ZZKBKACTAV9WEVGEMMVRZ -> agent_011CZkYqphY8vELVzwCUpqiR
 ```
 
 它们对应不同 AgentSession、Agent、cwd、Prompt、Skill、Model 和 Tool
@@ -1568,7 +1648,7 @@ run 终态和最终 Message 必须先按 Session 的 `history_seq` 顺序提交�
 
 ![Managed WebSocket Session 协议](managed_websocket_session_protocol.svg)
 
-[PlantUML 源码](diagram.puml#L271)
+[PlantUML 源码](diagram.puml#L281)
 
 ### 9.11 附件引用与模型输入
 
@@ -1829,7 +1909,7 @@ tombstone 继续
 
 ![附件引用、接受与模型输入生命周期](managed_attachment_reference_lifecycle.svg)
 
-[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L710)
+[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L720)
 
 ## 10. pi-mono-java 目标适配点
 
@@ -1842,7 +1922,7 @@ tombstone 继续
 | WebSocket Upgrade route | 规范路径为 `/agent-service/v1/ws/chat`；不解析业务 query；信任并校验既有内部网关认证结果，创建不可变 ConnectionAuthContext；浏览器由 `mate-service` 承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.6.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.7.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、每 Pod 维护单活动连接 generation、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件 claim；Managed Profile 不生成 Session JSONL | 架构改造 |
 | `ManagedRunHub` | 新增；同 Pod 维护 partial Message、active tools、终态、run_seq 和原子恢复订阅；Pod 重启时通过 Store 收束为 interrupted | 架构改造 |
@@ -1875,6 +1955,10 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - Skill 依赖循环或 name 冲突；
 - Skill 文档输入模式不唯一；
 - frontmatter 与元数据不一致；
+- `AGENT.id` 不匹配 `^agent_[0-9A-Za-z]{24}$`，或 `AGENT.models`
+  中任一值不匹配 `^model_[0-9A-Za-z]{24}$`；
+- `agent-runtime-root` 不是大小写敏感文件系统，或 `AGENT.id` 与已有资源的
+  ASCII lowercase collision key 冲突；
 - 路径越界或符号链接越界；
 - 绑定对象缺失、未启用、版本冲突或有效权限为 deny；
 - Tool 摘要缺少 tool_id、name 或 description。
@@ -1889,7 +1973,8 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - Upgrade 调用服务未通过既有内部网关私钥/JWT 认证，或网关
   认证上下文不完整；
 - 首帧不是 connect、超时或协议版本不兼容；
-- agent_id 非法或 Agent 目录不存在；
+- agent_id 或 model_id 的资源前缀、长度或字符集非法；
+- 语法合法的 Agent 目录或 Model 资源不存在；
 - SYSTEM 或 Skill 目录不可读；
 - `mode=create` 缺少上层分配的 session_id、agent_id 或 model_id；
 - `mode=resume` 的 Session 不存在或已删除；
@@ -1957,6 +2042,8 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - 空 binding_tools 不生成 references；
 - 递归 Skill 正确物化，子 Tool 不向父文件传播；
 - 路径穿越、符号链接越界、循环依赖、name 冲突全部失败；
+- 大小写不敏感的运行根目录在启动或发布前被拒绝；两个仅大小写不同的合法
+  Agent ID 不能同时发布，大小写改写请求也不能解析到现有 Agent 目录；
 - 失败编译不破坏当前发布目录。
 
 ### 12.2 Prompt 和 Context
@@ -2021,6 +2108,13 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - methods 恰好收敛为 `chat.send`、`chat.steer`、`chat.abort`、
   `chat.history`、`session.get`、`models.list`、`model.set` 和
   `thinking.set`；不暴露 `prompt_templates.list` 或 `skills.list`；
+- `agent_id` 只接受 `agent_` 加 24 位 `[0-9A-Za-z]`，`model_id` 只接受
+  `model_` 加 24 位 `[0-9A-Za-z]`；错误前缀、23/25 位后缀、标点和
+  空格在 Manager 调用前以 `INVALID_REQUEST` 拒绝；
+- Agent/Model ID 按原始字节大小写敏感比较；大小写改写不得别名到原资源，
+  而是按新的语法合法 ID 执行精确查找和授权。调用方不生成、不解析
+  后缀也不依赖排序；`model_` ID 经 Model Manager 解析为
+  Provider model descriptor，WebSocket 不接受 `claude-*` 等 Provider 名代替；
 - `mode=create` 只接受上层提供的 `session_id + agent_id + model_id`，相同
   绑定重试幂等，create Response 丢失时在新连接上重试 create 而不是
   resume；不同 Agent 重绑定和已删除 ID 复用被拒绝；
@@ -2164,6 +2258,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.9.0 | 2026-08-03 | 参考 Anthropic Managed Agents 服务端生成的 `agent_` 资源 ID 示例，将 Campus `agent_id` 冻结为 `^agent_[0-9A-Za-z]{24}$`，将 CampusModel `model_id` 冻结为 `^model_[0-9A-Za-z]{24}$`；明确两者大小写敏感、不透明、由各自管理服务生成，区分 `model_` 资源 ID 与私有 Provider model ID，并增加大小写敏感文件系统、case-fold 冲突和目录/manifest 精确匹配门禁；同步 AsyncAPI 2.7.0 和客户端指南 1.3.0 |
 | 1.8.0 | 2026-08-03 | 对外统一为 CampusAgent / agent-service，规范 URL 收敛为 `/agent-service/v1/ws/chat`；Managed 资源目录改为 `.campusagent`；定义既有内部网关认证、用户 IP 粘性、单 Pod 连接 generation 接管、数据库 RuntimeSessionStore 和 Pod 重启 interrupted 语义；收窄 Chat 方法集，补齐纯附件消息、Tool 脱敏/截断、Response-before-Event 契约，并同步 AsyncAPI 2.6.0 和客户端指南 1.2.0 |
 | 1.7.0 | 2026-08-03 | 定义 HTTP/Object Storage 上传与 WebSocket 附件引用边界；新增 AttachmentResolver、不可变 read handle/lease、完整 AttachmentContextPlan、Model 切换校验、幂等原子接受、AttachmentContent 历史、source/derived digest 边界、retention claim、删除 outbox、安全撤销和附件生命周期图，并同步 AsyncAPI 2.5.0、客户端指南 1.1.0 |
 | 1.6.0 | 2026-08-03 | 增加 AgentRuntimeTemplate 规范性增补及优先级；明确不可变 revision/exact pinning，并把 Prompt Template 的 AsyncAPI/Client 同步列为落地门禁 |

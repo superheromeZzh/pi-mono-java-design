@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.6.0` |
+| 文档版本 | `1.7.0` |
 | 状态 | 目标设计对比，CampusAgent v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.8.0` |
-| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.6.0`、Frame 协议号 `2` |
+| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.9.0` |
+| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.7.0`、Frame 协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -115,9 +115,9 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 CampusAgent v2 尚未实现；本节描述的全部行为都是目标设计。其规范来源是以下
 三个仓库内制品：
 
-- [Manager 驱动的多 Agent 运行设计 1.8.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.6.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
-- [CampusAgent Chat WebSocket v2 客户端接入指南 1.2.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [Manager 驱动的多 Agent 运行设计 1.9.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.7.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [CampusAgent Chat WebSocket v2 客户端接入指南 1.3.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -125,6 +125,24 @@ v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要�
 `.campusagent/skills/` 装载上下文；固定 pi-mono-java 基线中的
 `.campusclaw`、`com/campusclaw` 和 `/api/ws/chat` 只用于记录当前源码事实，
 不代表目标名称或目标路由。
+
+### 3.4 Agent 与 Model 资源 ID 的三态边界
+
+| 状态 | 资源 ID 行为 | 结论 |
+|---|---|---|
+| OpenClaw 已实现 | OpenClaw 使用自己的 `agentId`、`sessionKey` 等 Gateway 路由字段，不定义 CampusAgent 的 `agent_id/model_id` 资源格式 | OpenClaw 的路由机制不能作为 Campus 资源 ID 契约 |
+| pi-mono-java v1 当前 | WebSocket Upgrade 只按 `conversation_id` 选择 Session，连接协议没有 `agent_id/model_id` 路由 | v1 没有可沿用的 Agent/Model 资源 ID 校验规则 |
+| CampusAgent v2 目标 | `agent_id` 必须匹配 `^agent_[0-9A-Za-z]{24}$`，`model_id` 必须匹配 `^model_[0-9A-Za-z]{24}$`；二者总长均为 30、大小写敏感、服务端签发且按 opaque string 使用 | Adapter 只校验格式，Manager 按完整 ID 解析与授权；客户端和 Runtime 不解析后缀、不改写大小写，也不从后缀推断顺序或归属 |
+
+`agent_...` 的可见形态参考
+[Anthropic Managed Agents Create Agent API](https://platform.claude.com/docs/en/api/beta/agents/create)
+的响应示例与
+[官方 TypeScript SDK 固定源码](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L14-L155)，
+但官方公开类型只约束为字符串；上述精确正则、长度和 opaque 语义是
+CampusAgent 的目标协议决定，不应表述为 Anthropic 已公开保证的生成规则。
+`model_...` 是 CampusModel / `model-service` 资源 ID 的架构决定；它不是
+Anthropic 模型 ID 规则，也不能用 `claude-*` 等 Provider model identifier
+替代。Model Manager 负责把 `model_id` 映射到具体 Provider 模型。
 
 ## 4. 三种连接作用域
 
@@ -207,9 +225,9 @@ NAT IP、用户 IP 改变，或者 Pod 重启，active run 就不能跨 Pod 继�
 | capability 与 features | 客户端声明可选 caps；Chat delta 不依赖 capability；`hello-ok.features` 返回可用 methods/events/capabilities | 无 | typed structured delta 是协议 2 固有语义；capability 只表达 `full_thinking` 等可选增强；methods 可过滤但必须保留 `chat.history`，八类 Chat events 是不可拆分的固定集合 | 原因：恢复依赖权威历史和完整终态；收益：普通客户端无需声明自然流式能力，且始终能恢复并判定 Message/run 终态；代价：无历史权限的调用服务不能建立 Chat 连接 |
 | Frame | 封闭 `req/res/event`；成功 Response 使用 `payload` | 按命令 `type` 分发；支持可选 `id` 和 `response`，但没有统一 Frame | 封闭 `req/res/event`；成功 Response 使用 `payload`，错误使用 `error` | 原因：连接内存在并发命令和异步事件；收益：统一响应关联、超时、重试和 SDK 生成；代价：需要统一 dispatcher 和 schema validator |
 | 追踪上下文 | Request Frame 可带 `traceparent` | 无协议字段 | 可选 `traceparent` 通过 W3C 校验并传给 Model/Tool Manager，只用于遥测 | 原因：跨 Manager 调用需要关联追踪；收益：无需污染业务载荷；代价：必须隔离 Prompt、数据库、事件和凭据日志 |
-| Agent 路由 | 请求/Session 数据可带 `agentId` | 无 `agent_id` | `mode=create` 必填 `agent_id` 并形成不可变绑定；resume 必须匹配 | 原因：Session 不能跨 Agent 重绑定；收益：防止串用；代价：建连必须访问 Agent Manager |
+| Agent 路由 | 请求/Session 数据可带 `agentId`，但不定义 Campus `agent_id` 格式 | 无 `agent_id` | `mode=create` 必填匹配 `^agent_[0-9A-Za-z]{24}$` 的 `agent_id` 并形成不可变绑定；resume 必须匹配 | 原因：Session 不能跨 Agent 重绑定；收益：防止串用；代价：建连必须访问 Agent Manager |
 | Session 路由 | Chat 请求和事件携带 `sessionKey` | Upgrade query 选择 `conversation_id` | 上层服务提供全局唯一 `session_id`；connect create/resume 后不再传 | 原因：Runtime 只消费调用方会话身份；收益：唯一 key 无二次作用域映射且每帧不能改变目标；代价：调用方必须保证全局唯一和协调生命周期 |
-| Model 路由 | 由 Gateway/Session 配置体系决定 | `set_model` 直接作用于 Session | `mode=create` 必填 `model_id`；resume 可沿用，切换须 Manager 校验 | 原因：Agent-model allowlist 必须服务端权威；收益：避免未授权模型；代价：增加 Manager 延迟和可用性依赖 |
+| Model 路由 | 由 Gateway/Session 配置体系决定，不定义 Campus `model_id` 格式 | `set_model` 直接作用于 Session | `mode=create` 必填匹配 `^model_[0-9A-Za-z]{24}$` 的 `model_id`；resume 可沿用，切换须 Manager 校验 | 原因：Agent-model allowlist 必须服务端权威；收益：避免未授权模型；代价：增加 Manager 延迟和可用性依赖 |
 | 发送 | `chat.send` + `idempotencyKey` | `prompt`，无请求幂等键 | `chat.send` 接受文本、附件或二者；仅附件不生成隐藏 Prompt；返回 `run_id + user_message_id`，成功 Response 先于因果 run 事件 | 原因：网络失败和乐观消息结果可能未知；收益：安全重试、文件原生输入并对齐权威用户消息；代价：服务端要保存幂等结果并短暂约束事件排流 |
 | steer | `chat.send.queueMode="steer"` 等队列模式 | 独立 `steer` | `chat.steer(run_id)` v1 仅支持文本，活动 run 期间不接收新附件 | 原因：显式限定当前 run 并保持附件接受原子性；收益：命令意图和审计更清晰；代价：附件必须等当前 run 结束后另发 `chat.send` |
 | abort | `chat.abort(sessionKey, runId?)` | `abort` 当前 Session | `chat.abort(run_id)`，重复调用幂等 | 原因：避免误终止其他 run；收益：重复请求结果稳定；代价：要保留可查询的 run 终态 |
@@ -479,7 +497,7 @@ canonical thinking 内容被某连接的披露策略抑制时，该连接仍收�
 
 收益是带宽、类型和事件职责更清晰；代价是客户端必须维护按
 `message_id + content_index` 合并的状态机，并在终态用完整 Message 对账。
-CampusAgent AsyncAPI 2.6.0 为此进一步规定 start/delta/end、Response
+CampusAgent AsyncAPI 2.7.0 为此进一步规定 start/delta/end、Response
 先于发起连接的
 run 事件、`user_message_id` 乐观消息对账、开放内容快照和 RunRecord 历史；
 完整算法见
@@ -806,8 +824,8 @@ Sec-WebSocket-Accept: <derived-value>
 下面两个 JSON 对象才是 `101` 之后的 WebSocket Text Frames：
 
 ```jsonl
-{"type":"req","id":"connect-1","method":"connect","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent-a","model_id":"model-a","client":{"id":"mate-service","version":"1.0.0","platform":"service"}}}
-{"type":"res","id":"connect-1","ok":true,"payload":{"protocol":2,"connection_id":"conn-1","connection_generation":1,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent-a","model":{"model_id":"model-a","name":"模型 A","reasoning":true},"session":{"state":"idle","thinking":"hidden"},"limits":{"max_message_bytes":1048576,"max_connection_buffer_bytes":4194304,"heartbeat_seconds":20,"pong_timeout_seconds":10,"connect_timeout_seconds":5},"features":{"methods":["chat.send","chat.steer","chat.abort","chat.history","session.get","models.list","model.set","thinking.set"],"events":["run.started","message.started","message.updated","tool.started","tool.updated","tool.completed","message.completed","run.completed"],"capabilities":[]},"active_run":null}}
+{"type":"req","id":"connect-1","method":"connect","traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","client":{"id":"mate-service","version":"1.0.0","platform":"service"}}}
+{"type":"res","id":"connect-1","ok":true,"payload":{"protocol":2,"connection_id":"conn-1","connection_generation":1,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","model":{"model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","name":"模型 A","reasoning":true,"input":{"modalities":["text"],"attachment_media_types":[],"max_attachments":0,"max_attachment_bytes":0,"max_total_attachment_bytes":0}},"session":{"state":"idle","thinking":"hidden"},"limits":{"max_message_bytes":1048576,"max_connection_buffer_bytes":4194304,"heartbeat_seconds":20,"pong_timeout_seconds":10,"connect_timeout_seconds":5},"features":{"methods":["chat.send","chat.steer","chat.abort","chat.history","session.get","models.list","model.set","thinking.set"],"events":["run.started","message.started","message.updated","tool.started","tool.updated","tool.completed","message.completed","run.completed"],"capabilities":[]},"active_run":null}}
 ```
 
 OpenClaw challenge 证明设备请求的新鲜性并服务于配对体系；CampusAgent 的
@@ -833,7 +851,7 @@ CampusAgent v2，同一连接只可能发送到 connect 已绑定的 Session：
 ```jsonl
 {"type":"req","id":"send-1","method":"chat.send","params":{"message":"你好","attachment_ids":[],"idempotency_key":"idem-send-1"}}
 {"type":"res","id":"send-1","ok":true,"payload":{"run_id":"run-1","user_message_id":"message-user-1","accepted":true}}
-{"type":"event","event":"run.started","seq":1,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","run_seq":1,"timestamp":"2026-08-03T10:00:00Z","model_id":"model-a","thinking":"hidden"}}
+{"type":"event","event":"run.started","seq":1,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","run_seq":1,"timestamp":"2026-08-03T10:00:00Z","model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","thinking":"hidden"}}
 ```
 
 CampusAgent 后续请求里没有 `agent_id` 或 `session_id`，不是信息缺失，而是避免
@@ -868,8 +886,8 @@ OpenClaw：
 CampusAgent v2：
 
 ```jsonl
-{"type":"event","event":"message.updated","seq":18,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":7,"content_index":0,"timestamp":"2026-07-30T10:00:00Z","update":{"type":"text_delta","delta":"世界"}}}
-{"type":"event","event":"message.completed","seq":19,"payload":{"agent_id":"agent-a","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":8,"timestamp":"2026-07-30T10:00:01Z","message":{"message_id":"message-1","role":"assistant","status":"completed","content":[{"type":"text","text":"你好世界"}],"created_at":"2026-07-30T10:00:00Z"}}}
+{"type":"event","event":"message.updated","seq":18,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":7,"content_index":0,"timestamp":"2026-07-30T10:00:00Z","update":{"type":"text_delta","delta":"世界"}}}
+{"type":"event","event":"message.completed","seq":19,"payload":{"agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","run_id":"run-1","message_id":"message-1","run_seq":8,"timestamp":"2026-07-30T10:00:01Z","message":{"message_id":"message-1","role":"assistant","status":"completed","content":[{"type":"text","text":"你好世界"}],"created_at":"2026-07-30T10:00:00Z","completed_at":"2026-07-30T10:00:01Z"}}}
 ```
 
 OpenClaw 的 `replace` 对可见文本重写更宽容；CampusAgent v2 的 typed delta
@@ -954,6 +972,9 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
   成功或失败；
 - `mode=create/resume` 的 `session_id/agent_id/model_id` 规则，以及上层提供
   `session_id`、删除后不复用的边界；
+- `agent_id/model_id` 分别严格匹配 `^agent_[0-9A-Za-z]{24}$` 和
+  `^model_[0-9A-Za-z]{24}$`，总长均为 30、大小写敏感且按 opaque string
+  处理；格式错误、资源不存在和 Agent-model 未授权分别得到稳定错误；
 - 既有内部网关私钥/JWT认证在 `101` 前完成；私钥原文不传输，私有 Header/claim
   不写入本文；入站凭据不转发，Manager 调用使用 target-audience access-token；
 - 三类封闭 Frame 的判别、未知顶层字段拒绝和 `payload/error` 互斥；
@@ -1028,6 +1049,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.7.0` | 2026-08-03 | 同步 CampusAgent Manager 1.9.0、AsyncAPI 2.7.0 和客户端指南 1.3.0；明确 OpenClaw 不定义 Campus 资源 ID、pi-mono-java v1 无 Agent/Model 路由契约，以及 CampusAgent/CampusModel 服务端签发、大小写敏感的 30 字符 opaque ID 规则；统一目标协议示例。 |
 | `1.6.0` | 2026-08-03 | 目标产品统一为 CampusAgent/agent-service，服务 API 地址改为 `/agent-service/v1/ws/chat` 并与 Frame 协议 2 分层；同步 Manager 1.8.0、AsyncAPI 2.6.0 和客户端指南 1.2.0；明确 mate-service 服务调用、既有网关私钥/JWT认证、`.campusagent`、数据库 RuntimeSessionStore、IP affinity、单活动连接接管、Pod 重启 interrupted、八个方法、纯附件消息及 Tool 脱敏/截断边界。旧版本条目保留当时的 CampusClaw 名称。 |
 | `1.5.0` | 2026-08-03 | 同步 CampusClaw Manager 1.7.0、AsyncAPI 2.5.0 和客户端指南 1.1.0；基于 OpenClaw 固定 commit 补充 base64 attachment envelope、实际字节/MIME 校验与 staging 证据，并对比 CampusClaw 的 HTTP/Object Storage、不可变引用、完整 AttachmentContextPlan、read lease、source/derived digest、retention claim、幂等接受和 Session 删除边界 |
 | `1.4.0` | 2026-08-03 | 同步 CampusClaw Manager 1.5.0、AsyncAPI 2.4.0 和客户端接入指南 1.0.0；明确 OpenClaw Chat delta 与 CampusClaw typed delta 都不依赖 capability，只有 full_thinking 等增强参与协商；补充 user_message_id、响应顺序、固定事件集、redacted thinking、历史水位快照、RunRecord 历史、客户端 reducer 和关闭恢复差异，并修正 Tool 投影与 run 所有权口径 |

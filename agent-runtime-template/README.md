@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.1.0 |
+| 文档版本 | 1.2.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee` |
@@ -304,13 +304,29 @@ public enum RuntimeToolKind {
 }
 ```
 
+CampusAgent 资源标识采用独立、封闭的目标契约：`agent_id` 必须匹配
+`^agent_[0-9A-Za-z]{24}$`，`model_id` 必须匹配
+`^model_[0-9A-Za-z]{24}$`，二者总长度均为 30。它们大小写敏感且不可解析；
+调用方、Template Registry 和缓存键必须按原始字节比较，不得转小写、截取后缀
+或推断创建时间。`agent_id` 由 Agent 元数据服务签发，`model_id` 由 CampusModel
+`model-service` 签发；`AgentRuntimeTemplate` 只保存前者，Session 保存的
+`model_id` 仍由 Model Manager 映射到实际 Provider model ID 并在
+create/resume/invoke 时重新校验。
+由于 `<agent-id>` 是物理目录名，Repository 的编译与运行根目录必须位于
+大小写敏感文件系统，启动和发布前验证失败即 fail closed。Agent 管理面和
+Repository 还必须拒绝 ASCII lowercase collision key 相同的两个 ID；该 key
+只用于碰撞检测，不参与查找或回写。打开制品后，目录项、current、manifest
+和 `ref.agentId()` 必须按原始 ASCII 字节完全一致。
+
 Java `record` 只提供浅层不可变。实现必须在 canonical constructor 中执行：
 
+- 校验 `ref.agentId()` 精确匹配 `^agent_[0-9A-Za-z]{24}$`，且不做大小写归一化；
 - `List.copyOf()` 和 `Map.copyOf()`；
 - 对嵌套值做 defensive copy；
 - 使用真正不可变的 JSON Schema 表示，不能直接暴露可修改的 Jackson
   `JsonNode`；
-- 规范化并校验 `revisionRoot`，确认它是对应 revision 的只读目录；
+- 规范化并校验 `revisionRoot`，确认它是大小写敏感文件系统上对应 revision
+  的只读目录，且 manifest `agent.id` 与 `ref.agentId()` 字节完全一致；
 - 校验 Tool name 恰好是 `read/get_tool_info/call_tool` 且不重复；
 - 校验 Skill name、entry path 和资源索引一一对应；
 - 校验所有文件 hash、Prompt hash 和 manifest 的 `content_hash`。
@@ -459,13 +475,15 @@ Session/Connection/Run，不进入 Template。Template 只允许保存有明确�
 5. Template Loader 通过 Repository `openCurrent` 同时固定 pointer 和 canonical
    revision lease，运行中不再解引用 current；
 6. 不使用可被替换目标的 symlink 作为 Session cwd；
-7. 运行账号对 revision 目录只读，发布账号与运行账号分权。
+7. Repository 启动和发布时验证根目录大小写敏感，并拒绝 ASCII lowercase
+   collision key 相同的 Agent；
+8. 运行账号对 revision 目录只读，发布账号与运行账号分权。
 
 current 激活记录示例：
 
 ```json
 {
-  "agent_id": "agent-a",
+  "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
   "status": "ACTIVE",
   "bundle_revision": "01K1RUNTIME7MPLATE0000000000",
   "content_hash": "sha256:...",
@@ -500,7 +518,7 @@ manifest 至少包含：
   "prompt_profile_version": 1,
   "tool_protocol_version": 1,
   "agent": {
-    "id": "agent-a",
+    "id": "agent_011CZkYqphY8vELVzwCUpqiQ",
     "version": "12"
   },
   "bundle_revision": "01K1RUNTIME7MPLATE0000000000",
@@ -755,7 +773,7 @@ ConcurrentHashMap<LoadedTemplateKey,
 
 ![Template CacheEntry、revision artifact 与 Session 生命周期](template_cache_and_session_lifecycle.svg)
 
-[PlantUML 源码](diagram.puml#L420)
+[PlantUML 源码](diagram.puml#L422)
 
 协议：
 
@@ -927,12 +945,12 @@ Session record 至少包含：
   "lifecycle_state": "CREATING",
   "generation": 1,
   "create_fingerprint": "sha256:...",
-  "agent_id": "agent-a",
+  "agent_id": "agent_011CZkYqphY8vELVzwCUpqiQ",
   "agent_version": "12",
   "bundle_revision": "01K1RUNTIME7MPLATE0000000000",
   "bundle_schema_version": 1,
   "template_abi": 1,
-  "model_id": "model-a",
+  "model_id": "model_011CZq2GkV8aD4NwP7sLmXfR",
   "history_sequence": 0,
   "created_at": "2026-08-03T10:00:00Z"
 }
@@ -1297,6 +1315,8 @@ session_create_duration_seconds{cache_result}
 - 共享的是不可变 Template，不是有状态 Agent；
 - 每个 Session 固定并持久化 exact bundle revision；
 - Managed 资源只来自 `.campusagent`，不与 Legacy `.campusclaw` 双读；
+- Repository 根目录大小写敏感；case-fold 冲突不能发布，错误大小写不能命中
+  其他 Agent 的 current、manifest 或 Template cache；
 - Session 持久化只经由数据库 `RuntimeSessionStore`，不生成 JSONL；
 - 单连接接管、完整块持久化和 Pod 重启 `interrupted` 语义均可验证；
 - 每 Pod 缓存/运行所有权与用户 IP 粘性路由限制被明确记录，
@@ -1314,5 +1334,6 @@ session_create_duration_seconds{cache_result}
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.2.0 | 2026-08-03 | 统一 Agent 与 Model 资源标识：分别使用 `agent_` / `model_` 加 24 位大小写敏感字母数字，明确其为 Manager 签发的 opaque ID，规定 Template、Session 与 Model Manager 的比较和映射边界，并增加大小写敏感 Repository、case-fold 冲突与 manifest 精确匹配门禁 |
 | 1.1.0 | 2026-08-03 | 对外统一为 CampusAgent Runtime / `agent-service`；Managed 资源改为 `.campusagent` 且不双读 Legacy `.campusclaw`；Session 持久化改为数据库 `RuntimeSessionStore`；补充每 Pod Template/revision pinning、用户 IP 粘性限制、单连接 generation 接管和 Pod 重启 `interrupted`/完整块恢复语义 |
 | 1.0.0 | 2026-08-03 | 首版；定义不可变 AgentRuntimeTemplate、bundle revision、compile/publish/load API、single-flight 预加载、三层变更感知、Session pinning、缓存与 GC，以及向无状态 AgentRunner 的迁移边界 |

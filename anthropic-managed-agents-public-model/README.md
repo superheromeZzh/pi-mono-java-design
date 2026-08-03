@@ -1,8 +1,8 @@
 # Anthropic Managed Agents 公开模型（官方契约基线）
 
-> 文档版本：`v0.2.0`<br>
-> 状态：公开契约基线，已补充 Session 创建顺序<br>
-> 资料核对日期：`2026-07-21`<br>
+> 文档版本：`v0.3.0`<br>
+> 状态：公开契约基线，已补充 Agent ID 公开形状证据<br>
+> 资料核对日期：`2026-08-03`<br>
 > 范围：仅提取 Anthropic 公开的 Managed Agents 模型，不掺入我们的 Tool/Agent 元数据设计。
 
 ## 1. 本轮结论
@@ -38,7 +38,11 @@ Managed Agents 是 Anthropic 托管服务，本轮没有可对齐的官方开源
 
 - 源码提交：`N/A`。
 - 实现路径和类符号：`N/A`。
-- 事实基线：Anthropic 官方文档和 API Reference，访问日期为 `2026-07-18`。
+- 事实基线：Anthropic 官方文档和 API Reference，访问日期为 `2026-08-03`。
+
+Anthropic 官方 TypeScript SDK 可作为公开请求/响应类型的补充契约证据；本文固定
+SDK commit `3b45cd3b69c956ac63384fdb09ce1d8109f3fa80`，但该客户端源码不是
+Managed Agents 服务端实现，不能据此推断内部 ID 生成算法、存储或路由逻辑。
 
 官方当前将 Managed Agents 标为 Beta。常规 Managed Agents 请求使用 `managed-agents-2026-04-01` beta header；Memory Store 端点的官方页面当前显示 `agent-memory-2026-07-22`，Session 挂载 Memory Store 仍属于常规 Managed Agents Session 请求。
 
@@ -48,6 +52,9 @@ Managed Agents 是 Anthropic 托管服务，本轮没有可对齐的官方开源
 |---|---|---|
 | Agent | [Define your agent](https://platform.claude.com/docs/en/managed-agents/agent-setup) | Agent 字段、版本和更新语义 |
 | Agent API | [Agents API](https://platform.claude.com/docs/en/api/beta/agents) | 请求/响应类型和字段约束 |
+| Create Agent API | [Create an Agent](https://platform.claude.com/docs/en/api/beta/agents/create) | 创建请求、服务端响应和公开 Agent ID 示例 |
+| Update Agent API | [Update an Agent](https://platform.claude.com/docs/en/api/beta/agents/update) | 可选 `version` 乐观并发控制及无条件更新语义 |
+| Agent SDK 契约 | [`Agents.create/retrieve` 与 `Agent.id`](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L14-L155)、[`AgentCreateParams`](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L888-L952)、[Anthropic model ID 类型](https://github.com/anthropics/anthropic-sdk-typescript/blob/3b45cd3b69c956ac63384fdb09ce1d8109f3fa80/src/resources/beta/agents/agents.ts#L701-L721) | 固定 commit 下的公开类型与示例；不是服务端实现证据 |
 | Tools | [Tools](https://platform.claude.com/docs/en/managed-agents/tools) | 托管工具集与自定义工具 |
 | 权限 | [Permission policies](https://platform.claude.com/docs/en/managed-agents/permission-policies) | `always_allow` / `always_ask` 和确认流程 |
 | MCP | [MCP connector](https://platform.claude.com/docs/en/managed-agents/mcp-connector) | MCP Server 声明、Toolset 引用和鉴权拆分 |
@@ -138,9 +145,26 @@ PlantUML：[查看源码](./diagram.puml#L71)
 
 `Agent` 响应还包含 `id`、固定值 `type: "agent"`、`version`、`created_at`、`updated_at` 和 `archived_at`。官方示例中，服务端会将简写的 model 规范化为包含 `id` 和 `speed` 的对象。
 
+#### 5.2.1 Agent ID 的公开观察形状
+
+Create Agent 的请求参数不包含调用方指定的 `id`，成功响应才返回服务端 Agent
+ID。官方 Create Agent 顶层响应和固定 SDK 的 retrieve 示例使用
+`agent_011CZkYpogX7uDKUyvBTophP`；官方生成型 API 示例还把
+`agent_011CZkYqphY8vELVzwCUpqiQ` 用作其他 Agent 引用。两个当前公开样本都
+呈现为 `agent_` 加 24 位大小写字母数字，但它们在示例中的资源角色不能混同。
+
+这一点只能记录为 **观察到的示例形状**，不能提升为 Anthropic 保证的正则契约。
+固定 SDK 的公开类型仍只是 `id: string`，没有声明长度、字符集、大小写归一化、
+生成算法或时间排序保证；`AgentCreateParams` 也没有调用方可填写的 `id`。因此消费
+Anthropic API 时应把该值视为服务端签发的 opaque string。Anthropic 当前列举的
+模型名和示例采用 `claude-*`，但公开 SDK 类型还保留开放 string，不能据此冻结
+完整 Provider model ID 正则。CampusAgent 另行设计的 `model_...` 资源 ID 不是
+Anthropic 的模型 ID 约定。
+
 ### 5.3 版本与更新
 
-- 更新 Agent 必须传入当前 `version`；版本不匹配返回 `409`。
+- 更新 Agent 的 `version` 是可选乐观锁：提供时必须匹配当前版本，否则返回
+  `409`；省略时更新无条件应用，最后到达的并发更新可能静默覆盖先前结果。
 - 配置发生变化时生成新版本；无实际变化时返回现有版本。
 - `tools`、`mcp_servers`、`skills` 是数组整体替换，不是按元素合并。
 - `multiagent` 整体替换；`metadata` 按键合并。
@@ -397,5 +421,6 @@ plantuml -tsvg diagram.puml
 
 | 版本 | 日期 | 变化 |
 |---|---|---|
+| `v0.3.0` | 2026-08-03 | 固定官方 TypeScript SDK 契约证据；记录 Create Agent 的服务端 ID 与当前 `agent_` 加 24 位字母数字示例，区分顶层新建 ID 和被引用 Agent ID；明确公开类型未承诺正则、生成算法或排序，当前 `claude-*` 模型示例仍处于开放 string 类型；并修正 Update Agent 的可选 `version` 乐观锁语义 |
 | `v0.2.0` | 2026-07-21 | 增加 Session 基于版本化 Agent 配置创建的顺序图，区分官方观察行为与服务端逻辑推断；更新根文档索引 |
 | `v0.1.0` | 2026-07-18 | 建立 Anthropic Managed Agents 官方公开契约基线；整理资源、Agent 字段、三类 Tool、Session、Vault、Memory、Skill、Multiagent 和 Deployment；未加入目标元数据设计 |
