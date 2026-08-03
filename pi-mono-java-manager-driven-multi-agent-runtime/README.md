@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.1 |
+| 文档版本 | 1.4.2 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -602,7 +602,7 @@ validation.
 
 ![Tool 渐进式发现与执行](progressive_tool_discovery_execution.svg)
 
-[PlantUML 源码](diagram.puml#L183)
+[PlantUML 源码](diagram.puml#L185)
 
 Agent 直接工具路径：
 
@@ -723,7 +723,7 @@ Provider 从 `SimpleStreamOptions.metadata` 读取不可变：
 
 ![Model Manager 流式调用](model_manager_streaming_flow.svg)
 
-[PlantUML 源码](diagram.puml#L470)
+[PlantUML 源码](diagram.puml#L475)
 
 Model Manager 事件一对一映射为 Java `AssistantMessageEvent`：
 
@@ -772,23 +772,43 @@ Gateway，也不允许连接建立后切换 Agent 或 Session。
 
 ### 9.2 HTTP Upgrade、服务认证和首帧
 
-客户端配置的 WebSocket URI 固定为：
+调用方交给 WebSocket 客户端库的 URI 固定为：
 
 ```text
 wss://api.example.com/api/ws/chat
 ```
 
-`wss` 表示“在 TLS 上运行 WebSocket”。建立连接时，WebSocket 客户端先连接
-`api.example.com:443`，完成 TLS 或 mTLS，再对同一 host、port 和 path 发送
-HTTP WebSocket opening handshake。因此可把握手目标理解为：
+这里的 `connect("wss://...")` 是“请求客户端库建立安全 WebSocket”的高层
+调用，不表示 WebSocket 已经建立，也不存在“先建立 WebSocket，再使用 HTTP
+Upgrade 升级”的阶段。`wss` URI 向客户端库声明：目标 host 是
+`api.example.com`、默认端口是 `443`、需要 TLS、握手 path 是
+`/api/ws/chat`、最终目标协议是 WebSocket。
+
+客户端库自动执行的真实顺序为：
+
+```text
+parse wss URI
+  -> DNS resolve api.example.com
+  -> open one TCP connection to port 443
+  -> complete TLS or mTLS handshake
+  -> send HTTP WebSocket Upgrade on that TLS connection
+  -> receive HTTP 101 Switching Protocols
+  -> WebSocket connection is established
+  -> exchange WebSocket Frames on the same TCP/TLS connection
+```
+
+因此，WebSocket 连接真正成立的边界是收到 HTTP `101`，不是调用客户端库的
+`connect(...)` 方法。HTTP opening handshake 使用同一 host、port 和 path，
+所以可以把其 HTTP/TLS 目标理解为：
 
 ```text
 https://api.example.com/api/ws/chat
 ```
 
-但这只是同一地址的 HTTP/TLS 握手视角，不是一个可用普通 GET/POST 调用的
-RESTful 资源。调用方仍应把 `wss://...` 交给 WebSocket 客户端库，由库生成
-HTTP/1.1 Upgrade 请求；不能先调用一个 REST API，再另外“升级”该响应。
+但这只是同一地址的 HTTP/TLS 握手视角，不是第二个接口，也不是一个可用普通
+GET/POST 调用的 RESTful 资源。调用方只需把 `wss://...` 交给 WebSocket
+客户端库，由库完成 TCP、TLS、HTTP Upgrade 和后续协议切换；不能先调用一个
+REST API，也不需要建立第二条连接。
 
 规范性的 HTTP/1.1 握手请求示例：
 
@@ -822,6 +842,17 @@ Sec-WebSocket-Accept: <derived-value>
 `ResponseFrame` 或 WebSocket close code；在它之后，同一 TCP/TLS 连接只传输
 WebSocket Text/Binary/Ping/Pong/Close Frames，业务失败使用
 `ResponseFrame.error`，连接级失败使用 WebSocket close code。
+
+WebSocket 使用 HTTP opening handshake，而不是另起一套裸协议握手，主要是
+为了：
+
+- 复用 `443`、TLS 证书、反向代理、负载均衡、防火墙和 API Gateway；
+- 在 WebSocket 占用长连接之前，使用 HTTP Host、path、Bearer 和状态码完成
+  路由、认证、授权、限流及拒绝；
+- 让客户端、服务端和中间代理通过 Upgrade/101 明确确认后续字节按 WebSocket
+  Frame 解释，避免普通 HTTP 请求被误判；
+- 在同一条 TCP/TLS 连接上从 HTTP opening handshake 切换到 WebSocket，避免
+  再次建连。
 
 三个阶段不能混淆：
 
@@ -1093,7 +1124,7 @@ NEW -> CONNECTING -> CONNECTED -> CLOSED
 
 ![服务端 SessionTransport 依赖倒置](managed_session_transport_dependency_inversion.svg)
 
-[PlantUML 源码](diagram.puml#L409)
+[PlantUML 源码](diagram.puml#L414)
 
 ### 9.5 流式事件和 Message 投影
 
@@ -1279,7 +1310,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 
 ![Managed WebSocket Session 协议](managed_websocket_session_protocol.svg)
 
-[PlantUML 源码](diagram.puml#L261)
+[PlantUML 源码](diagram.puml#L263)
 
 ## 10. pi-mono-java 目标适配点
 
@@ -1288,7 +1319,7 @@ JSONL。run 终态和最终 Message 必须先按 Session 的持久化顺序提�
 | WebSocket Upgrade route | 不解析业务 query；校验服务间 Bearer 或 mTLS，创建不可变 ConnectionAuthContext；浏览器由上层服务承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、帧限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.3.1 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.3.2 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、按 Agent 组织 JSONL、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `ManagedRunHub` | 新增；维护 partial Message、active tools、终态、run_seq 和原子恢复订阅 | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
@@ -1497,6 +1528,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.2 | 2026-08-03 | 明确 wss URI 是客户端建连指令而不是已建立的 WebSocket；补充 TCP、TLS、HTTP Upgrade、101 和 WebSocket Frame 的真实顺序及复用 HTTP 基础设施的原因；保留完整握手示例并同步 AsyncAPI 2.3.2 |
 | 1.4.1 | 2026-08-03 | 明确 wss URI、HTTP/TLS 握手目标、HTTP/1.1 Upgrade headers、101 协议边界和首个 connect RequestFrame 的分层关系；同步 AsyncAPI 2.3.1 |
 | 1.4.0 | 2026-08-02 | 收紧 Agent Runtime 边界：删除 tenant_id/user_id SessionScope 和直接浏览器认证，以全局唯一 session_id 作为唯一隔离键；调用服务负责用户归属与配额，Runtime 只做服务认证、Agent 绑定和 Session 执行；同步 AsyncAPI 2.3.0 |
 | 1.3.0 | 2026-08-02 | 明确 CampusClaw 的 Agent Runtime 边界；以调用方管理的 session_id 替代目标协议中的 conversation_id，定义 create/resume、SessionScope 和 connection/session/agent/model/message/run 六类核心标识；同步 AsyncAPI 2.2.0 |

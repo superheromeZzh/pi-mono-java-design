@@ -101,6 +101,7 @@ title WebSocket Handshake and Authentication Comparison
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
 ' Target design: CampusClaw authenticates the Upgrade and then requires connect within five seconds.
 ' Target design: the Runtime authenticates only the calling service, not the end user.
+' Target design: a wss URI starts establishment; the WebSocket exists only after HTTP 101.
 ' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
 ' Design reason: service credentials stay in transport authentication and never enter chat payloads.
 
@@ -142,7 +143,8 @@ There is no connect protocol negotiation.
 end note
 
 == CampusClaw v2 target: HTTP opening handshake ==
-CC -> EDGE : HTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
+CC -> CC : call WebSocket library\nconnect(wss URI)
+CC -> EDGE : one TCP connection, TLS, then\nHTTP/1.1 GET /api/ws/chat\nUpgrade headers and service Bearer
 EDGE -> EDGE : complete TLS or mTLS\nvalidate service principal and Upgrade
 EDGE --> CC : HTTP/1.1 101 Switching Protocols
 
@@ -155,6 +157,7 @@ V2 --> CC : res payload {protocol, connection_id,\nsession, limits, features, ac
 note over CC,V2
 No business query parameter and no URL token.
 Browser and end-user identity stay upstream.
+The wss URI requests establishment; it is not an open WebSocket.
 The HTTPS form is a handshake target, not a REST API.
 HTTP 101 creates transport; connect binds the session.
 The connection cannot switch agent or session.

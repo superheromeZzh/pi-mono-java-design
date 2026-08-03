@@ -3,7 +3,7 @@ id: urn:campusclaw:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusClaw 会话 WebSocket API
-  version: 2.3.1
+  version: 2.3.2
   description: |
     Manager 驱动的 CampusClaw Agent Runtime Session 协议规范。
 
@@ -21,12 +21,14 @@ info:
     request/response/event Frame 和结构化消息增量。协议不接受业务查询
     参数或 URL token，也不提供连接内新建会话命令。
 
-    客户端配置 `wss://api.example.com/api/ws/chat`。WebSocket 库先对相同
-    host、port 和 path 发起 HTTP opening handshake；概念上的 HTTP/TLS 目标
-    是 `https://api.example.com/api/ws/chat`，但该地址不是 RESTful 资源。
-    HTTP/1.1 请求必须携带合法 Upgrade headers，成功返回 101 后才开始传输
-    WebSocket Frame。第一个 `connect` RequestFrame 是 101 之后的应用握手，
-    不等同于 HTTP Upgrade。
+    `wss://api.example.com/api/ws/chat` 是交给 WebSocket 客户端库的建连指令，
+    不表示 WebSocket 已经建立。客户端库自动执行 DNS、单条 TCP 连接、TLS 或
+    mTLS、同一连接内的 HTTP opening handshake；只有收到 HTTP 101 后
+    WebSocket 才成立，随后继续在同一 TCP/TLS 连接上传输 WebSocket Frame。
+    概念上的 HTTP/TLS 握手目标是
+    `https://api.example.com/api/ws/chat`，但它不是第二个接口或 RESTful
+    资源。第一个 `connect` RequestFrame 是 101 之后的应用握手，不等同于
+    HTTP Upgrade。
   contact:
     name: CampusClaw
     url: https://github.com/superheromeZzh/pi-mono-java
@@ -1846,18 +1848,29 @@ x-websocket:
       - 'Authorization: Bearer <token>'
       - optional mTLS before the HTTP request
     successStatus: 101
+    websocketEstablishedAt: HTTP 101 response accepted
     preUpgradeFailureStatuses:
       - 400
       - 401
       - 403
       - 426
     firstApplicationFrame: connect RequestFrame
+    connectionSequence:
+      - parse wss URI
+      - resolve DNS and open one TCP connection to port 443
+      - complete TLS or mTLS
+      - send HTTP WebSocket Upgrade on the same connection
+      - accept HTTP 101 Switching Protocols
+      - exchange WebSocket Frames on the same TCP/TLS connection
     description: |
-      wss 是客户端 URI；https 形式只说明同一 host、port 和 path 上承载
-      opening handshake 的 HTTP/TLS 视角，不定义 RESTful API。101 之前不能
-      发送 ResponseFrame 或 WebSocket close code；101 之后不再使用 HTTP
-      status 表达应用错误。HTTP Upgrade 只建立传输，connect RequestFrame
-      才绑定 Runtime Session。
+      wss URI 是客户端库的建连指令，不是已建立的 WebSocket。https 形式只
+      说明同一 host、port 和 path 上承载 opening handshake 的 HTTP/TLS
+      视角，不定义 RESTful API，也不要求第二条连接。101 之前不能发送
+      ResponseFrame 或 WebSocket close code；101 之后不再使用 HTTP status
+      表达应用错误。HTTP Upgrade 只建立传输，connect RequestFrame 才绑定
+      Runtime Session。HTTP opening handshake 使系统能够复用 443、TLS、
+      HTTP 路由、代理、防火墙和认证设施，并在同一 TCP/TLS 连接上明确切换
+      到 WebSocket Frame。
   firstFrameTimeoutSeconds: 5
   pingPongIntervalSeconds: 20
   defaultMaxFrameBytes: 1048576

@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.3.1` |
+| 文档版本 | `1.3.2` |
 | 状态 | 目标设计对比，CampusClaw v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.4.1` |
-| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.3.1`、协议号 `2` |
+| CampusClaw 设计基线 | Manager 多 Agent 设计 `1.4.2` |
+| CampusClaw 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.3.2`、协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -107,8 +107,8 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 
 目标设计以以下仓库内制品为准：
 
-- [Manager 驱动的多 Agent 运行设计 1.4.1](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.3.1](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [Manager 驱动的多 Agent 运行设计 1.4.2](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusClaw Chat WebSocket v2 中文 AsyncAPI 2.3.2](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -242,10 +242,25 @@ CampusClaw v2 是内部 Agent Runtime，不直接承接最终用户或浏览器�
 wss://api.example.com/api/ws/chat
 ```
 
-WebSocket 库在同一 host、port 和 path 上先执行 HTTP opening handshake，因而
-可以把底层目标理解为 `https://api.example.com/api/ws/chat`。二者不是两个
-接口：`wss` 是客户端使用的 WebSocket URI，`https` 形式只是解释握手承载在
-HTTP/TLS 上；该路径不会因此自动获得普通 REST GET/POST 语义。
+调用 `connect("wss://...")` 只是请求客户端库开始建连，不表示 WebSocket 已经
+建立。不存在“先建立 wss/WebSocket，再使用 HTTP Upgrade 升级”的过程。客户端
+库自动执行：
+
+```text
+parse wss URI
+  -> DNS
+  -> one TCP connection to port 443
+  -> TLS or mTLS
+  -> HTTP WebSocket Upgrade on the same connection
+  -> HTTP 101
+  -> WebSocket is established
+  -> WebSocket Frames on the same TCP/TLS connection
+```
+
+因此可以把底层 HTTP/TLS 握手目标理解为
+`https://api.example.com/api/ws/chat`。二者不是两个接口：`wss` 是客户端库的
+建连指令，`https` 形式只是解释 opening handshake 承载在 HTTP/TLS 上；该路径
+不会因此自动获得普通 REST GET/POST 语义，也不会建立第二条连接。
 
 常见 HTTP/1.1 握手为：
 
@@ -272,6 +287,10 @@ Sec-WebSocket-Accept: <derived-value>
 status，不能返回 CampusClaw `ResponseFrame`。`101` 之后才属于 WebSocket：
 不再为每个消息发送 HTTP method、headers 或 status，业务消息使用
 Request/Response/Event Frame，连接级错误使用 WebSocket close code。
+
+使用 HTTP opening handshake 的原因是复用 443、TLS、HTTP Host/path 路由、
+代理、负载均衡、防火墙、Bearer 认证和状态码拒绝能力；Upgrade/101 还让所有
+参与方明确确认同一 TCP/TLS 连接的后续字节必须按 WebSocket Frame 解释。
 
 | 名称 | 所属层 | 作用 |
 |---|---|---|
@@ -402,7 +421,7 @@ toolcall_start / toolcall_delta / toolcall_end
 
 ![WebSocket 流式输出与恢复对比](websocket_stream_recovery_comparison.svg)
 
-[PlantUML 源码：`websocket_stream_recovery_comparison`](diagram.puml#L166)
+[PlantUML 源码：`websocket_stream_recovery_comparison`](diagram.puml#L169)
 
 ### 9.1 OpenClaw：重新投影权威状态
 
@@ -575,7 +594,7 @@ handler 也以手写 `type` 分支处理消息。因此 AsyncAPI 目前更接近
 
 ![WebSocket Transport 依赖倒置对比](websocket_transport_dependency_inversion_comparison.svg)
 
-[PlantUML 源码：`websocket_transport_dependency_inversion_comparison`](diagram.puml#L239)
+[PlantUML 源码：`websocket_transport_dependency_inversion_comparison`](diagram.puml#L242)
 
 OpenClaw 最新 SDK 已把客户端依赖倒置到
 `OpenClawTransport.request/events/close`，`GatewayClientTransport` 再封装
@@ -787,6 +806,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.3.2` | 2026-08-03 | 同步 CampusClaw Manager 1.4.2 与 AsyncAPI 2.3.2；明确 wss URI 是客户端建连指令，WebSocket 仅在 HTTP 101 后成立，并补充复用同一 TCP/TLS 连接和 HTTP 基础设施的原因 |
 | `1.3.1` | 2026-08-03 | 同步 CampusClaw Manager 1.4.1 与 AsyncAPI 2.3.1；明确 wss URI、HTTP/1.1 Upgrade 请求、101 协议边界和 connect RequestFrame 是三个不同概念 |
 | `1.3.0` | 2026-08-02 | 同步 CampusClaw Manager 1.4.0 与 AsyncAPI 2.3.0；Runtime 改以全局唯一 session_id 为唯一隔离键，tenant/user 和浏览器认证留在上层会话服务，Upgrade 只认证调用服务 |
 | `1.2.0` | 2026-08-02 | 同步 CampusClaw Manager 1.3.0 与 AsyncAPI 2.2.0；明确上层服务拥有 session_id、CampusClaw 使用 SessionScope 和不可变 Agent 绑定，并统一六类核心 Runtime 标识 |
