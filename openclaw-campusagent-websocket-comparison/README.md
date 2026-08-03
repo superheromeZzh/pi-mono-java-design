@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.8.0` |
+| 文档版本 | `1.9.0` |
 | 状态 | 目标设计对比，CampusAgent v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.10.0` |
-| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.8.0`、Frame 协议号 `2` |
+| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.11.0` |
+| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.9.0`、Frame 协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -115,9 +115,10 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 CampusAgent v2 尚未实现；本节描述的全部行为都是目标设计。其规范来源是以下
 三个仓库内制品：
 
-- [Manager 驱动的多 Agent 运行设计 1.10.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.8.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
-- [CampusAgent Chat WebSocket v2 客户端接入指南 1.4.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [Manager 驱动的多 Agent 运行设计 1.11.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.9.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [CampusAgent Chat WebSocket v2 客户端接入指南 1.5.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [CampusMate Attachment Service：OBS + openGauss 设计](../campusmate-attachment-service/README.md)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -202,9 +203,9 @@ thinking 披露和审计天然落在同一个固定边界内。`mate-service` �
 tenant/user 归属、会话列表、最多 50 个等产品规则、附件归属以及业务删除；
 CampusAgent 只认证调用服务，以全局唯一 `session_id` 作为 Session key，并负责
 Runtime 上下文和 run。`RuntimeSessionStore` 把 Session、Message、RunRecord、
-`history_seq`、幂等结果、Agent/Model/bundle revision 与附件 claim 持久化到
-数据库，不生成 Session JSONL；本文只定义逻辑记录和恢复语义，物理表结构
-另行设计。
+`history_seq`、幂等结果、Agent/Model/bundle revision 与 AttachmentContent 元数据
+快照持久化到数据库，不保存附件正文或 OBS 定位，也不生成 Session JSONL；本文
+只定义逻辑记录和恢复语义，物理表结构另行设计。
 
 多副本 v1 依赖可信网关按用户 IP 把同一调用链粘到同一 Pod；不引入 Redis、
 Session Header、跨 Pod 转发或分布式 owner。若网关只能看到 `mate-service` 或
@@ -217,7 +218,7 @@ NAT IP、用户 IP 改变，或者 Pod 重启，active run 就不能跨 Pod 继�
 |---|---|---|---|---|
 | 核心定位 | 通用 Gateway 控制平面和节点传输 | Chat 服务端模式 | `agent-service` 的服务到服务 Session-scoped Chat 协议 | 原因：收窄 ToB Runtime 边界；收益：降低跨 Agent 授权复杂度；代价：多会话调用方连接更多 |
 | 连接作用域 | 一条连接可调用多个 Session 和控制面能力 | 一条连接持有一个 `AgentSession`，但可 `new_session` | 一条连接固定调用方 `session_id` 及其 Agent 绑定；同一 Pod 同一 Session 只有一个活动读写连接 | 原因：固定审计和权限边界；收益：后续帧无需重新路由；代价：不具备 Gateway 式多路复用或观察连接 |
-| 多副本路由 | Gateway 自身维护连接、订阅与 Session 路由 | 未定义分布式 owner | v1 由可信网关按用户 IP 粘性到 Pod；无 Redis、Session Header、跨 Pod 转发或分布式 owner | 原因：先控制实现复杂度；收益：单 Pod run 语义清晰；代价：NAT/代理可见 IP、用户换 IP和 Pod 重启都会破坏 active run 连续性 |
+| 多副本路由 | Gateway 自身维护连接、订阅与 Session 路由 | 未定义分布式 owner | v1 由可信网关按用户 IP 粘性到 agent-service Pod；无 Redis、Session Header、跨 Pod 转发或分布式 run owner。CampusMate 附件数据独立使用共享 openGauss + OBS，因此可被任一 Pod 读取 | 原因：区分 active run 所有权与附件存储可达性；收益：附件不因 Pod 切换丢失；代价：Pod 重启仍会中断 active run |
 | Upgrade 输入 | 建立 WebSocket 后进行 challenge/connect | query `conversation_id`；AsyncAPI 还声明 query `token` | `wss://api.example.com/agent-service/v1/ws/chat` 由客户端库生成同 host/path 的 HTTP GET + Upgrade headers；不收业务 query 和 URL token | 原因：传输握手与应用绑定分层；收益：凭据和路由不进入代理 URL 日志；代价：Gateway 与服务都必须保留完整路径并正确支持 Upgrade |
 | 认证 | connect 内认证、设备签名/配对、role/scope | 基线路由没有实现文档所述 query token 校验 | 内部网关在 `101` 前用既有私钥/JWT能力认证调用服务；私钥原文不传输，Runtime 不接收 tenant/user 身份 | 原因：Runtime 只建立服务信任；收益：不重复上层用户体系；代价：`mate-service` 等上层服务成为用户授权责任边界 |
 | 握手 | HTTP/WebSocket 建立后：`connect.challenge` → `connect` → `hello-ok` | 没有协议首帧，Upgrade 后直接处理命令 | HTTP/1.1 GET Upgrade → `101` → 5 秒内 `connect` RequestFrame → ResponseFrame | 原因：明确 HTTP 与应用协议边界；收益：握手错误和业务错误各归其层；代价：服务端要维护首帧超时状态 |
@@ -244,7 +245,7 @@ NAT IP、用户 IP 改变，或者 Pod 重启，active run 就不能跨 Pod 继�
 | 恢复 | 重新订阅、history、in-flight 状态、序列对账 | 仅可恢复已写历史，活动 run 已被 abort | 同 Pod resume 接管旧 connection generation 并取得原子快照；Pod 重启后从数据库重建 Session，把旧 run 及由已持久化完整内容块组成的 Message 标为 `interrupted` | 原因：明确本地恢复与进程故障边界；收益：无 Redis 仍可恢复权威历史；代价：未到内容块结束边界的尾部不承诺保存 |
 | 帧与背压 | hello policy 给限制；广播有 slow-consumer 分支 | v1 无规范化上限和恢复契约 | 解压重组后的 UTF-8 JSON Message 默认 1 MiB、缓冲 4 MiB；1009/1013 | 原因：每连接资源必须有界且不混淆 wire fragment；收益：防止慢连接拖垮服务；代价：大消息需拆分且客户端必须恢复 |
 | 心跳 | Gateway policy 和客户端协议支持连接保活 | 应用层 JSON `pong` | 原生 WebSocket Ping/Pong，默认 20 秒 | 原因：让协议栈和基础设施识别保活；收益：业务消息更纯粹；代价：调用服务必须正确处理 Pong 和重连 |
-| 附件 | Request Frame 内联 base64 attachment envelope；服务端在 ACK 前验证实际字节/MIME/限制并 stage/offload | v1 prompt 只接收字符串；通用附件输入仍是 follow-up | `mate-service` 通过 HTTP/Object Storage 上传；WS 只传绑定 session_id 的 ID，Runtime 批量解析不可变版本、read handle 和 retention claim | 原因：agent-service 不拥有用户文件数据面；收益：大对象、扫描、授权、历史保留和 Chat 背压解耦；代价：多一个上传/READY 阶段和跨服务租约一致性 |
+| 附件 | Request Frame 内联 base64 attachment envelope；服务端在 ACK 前验证实际字节/MIME/限制并 stage/offload | v1 prompt 只接收字符串；通用附件输入仍是 follow-up | CampusMate 公网 HTTP 接收文件，正文写共享私有 OBS、元数据写共享 openGauss；WS 只传绑定 session_id 的 ID，Runtime 只调用内部 batch resolve 和 content 流，不直连 OBS 或落本地文件 | 原因：agent-service 不拥有用户文件数据面；收益：大对象、扫描、授权、跨 Pod 读取和 Chat 背压解耦；代价：多一个上传/READY 阶段并依赖 CampusMate 内部接口 |
 | 权限与审计 | role/scope/capability + session visibility | 没有 Agent 维度的协议授权 | 服务身份 + Agent/Model/Tool 校验；入站凭据不转发，调用内部 Manager 时签发目标 audience access-token；凭据不进事件或数据库 | 原因：按所有权拆分授权；收益：Runtime 不复制用户体系且降低凭据横向复用风险；代价：服务间委托能力成为关键依赖 |
 | Transport 依赖方向 | SDK 客户端依赖 `OpenClawTransport`；服务端 handler 已抽象 `RespondFn`，但连接状态和广播仍直接依赖 WebSocket | `ChatWebSocketHandler` 直接拥有 Session、订阅和断线 abort | `ChatWebSocketAdapter` 依赖服务端 `SessionTransport`，`ManagedSessionTransport` 拥有业务状态机 | 原因：协议适配与 Session 生命周期分离；收益：可单测并保留未来 Adapter 扩展点；代价：需要严格定义连接与订阅状态机 |
 | 协议制品 | TypeBox → 运行时校验、类型和协议 Schema | AsyncAPI 1.0 文档与 Java 手写处理存在偏差 | AsyncAPI 3.1 规范制品，后续 Java 实现必须对齐 | 原因：先固定可评审契约；收益：可生成文档和契约测试；代价：实现前仍没有运行时校验，后续要建设生成链 |
@@ -497,7 +498,7 @@ canonical thinking 内容被某连接的披露策略抑制时，该连接仍收�
 
 收益是带宽、类型和事件职责更清晰；代价是客户端必须维护按
 `message_id + content_index` 合并的状态机，并在终态用完整 Message 对账。
-CampusAgent AsyncAPI 2.8.0 为此进一步规定 start/delta/end、Response
+CampusAgent AsyncAPI 2.9.0 为此进一步规定 start/delta/end、Response
 先于发起连接的
 run 事件、`user_message_id` 乐观消息对账、开放内容快照和 RunRecord 历史；
 完整算法见
@@ -673,6 +674,10 @@ input/result/progress 都有独立大小上限并在进入 Frame 前完成结构
 
 ### 11.3 附件
 
+![附件数据面与运行时读取边界对比](attachment_data_plane_comparison.svg)
+
+[PlantUML 源码：`attachment_data_plane_comparison`](diagram.puml#L373)
+
 OpenClaw 把附件作为 `chat.send` Request Frame 的一部分。其
 `ChatAttachmentSchema` 可以携带 MIME、文件名、content、size 等字段；Web UI
 把 Data URL 转为 base64 envelope 后直接发送。服务端不是盲信这些字段：它先
@@ -683,36 +688,56 @@ OpenClaw 的选择是“Gateway 请求拥有本次附件数据，并在请求接
 
 CampusAgent v2 采用另一条完整链路：
 
-1. `mate-service` 承载 Attachment Service，通过 HTTP/Object Storage 接收
-   文件，完成最终用户授权、内容嗅探、安全扫描和 `session_id` 绑定；
-2. 文件经历 `UPLOADING -> PROCESSING -> READY`，只有 READY 才可首次使用；
+1. CampusMate `mate-service` 承载 Attachment Service。最终客户端向
+   `POST /mate-service/v1/sessions/{session_id}/attachments` 上传单个 multipart
+   文件，并提供 `X-Attachment-Size`；1 至 20 MiB 的请求可用
+   `Prefer: respond-async` 或 `Prefer: wait=N` 选择立即返回或短暂等待，
+   服务端实际等待不超过 `min(N, 10)` 秒，再用状态 GET 轮询到 READY。
+   OBS SDK 读取声明长度后还必须确认 file part 已到 EOF；
+2. CampusMate 只把附件正文写入共享私有 OBS，把
+   `attachment_id/session_id/status/object_key/filename/media_type/size_bytes/sha256`
+   等元数据和映射写入共享 openGauss。OBS object 不覆盖，重传签发新
+   `attachment_id`；任一 CampusMate Pod 都从共享存储继续处理，不依赖本地盘；
 3. WebSocket `chat.send` 只提交不透明 `attachment_ids[]`，不接受 URL、MIME、
    文件名、size、hash 或 Base64；附件引用是协议 2 固有可选字段，不是 capability；
-4. Runtime 使用 Upgrade 固化的 service principal 和当前 Session 批量、保序、
-   全有或全无地解析 ID，固定 `content_version + sha256`、受控 read handle 和
-   retention claim；
+4. Runtime 使用 Upgrade 固化的 service principal 和当前 Session 调用
+   `POST /mate-service/internal/v1/attachments:resolve`。CampusMate 在一个
+   openGauss 事务中按输入顺序全有或全无地校验 READY、Session 归属和未过期，
+   单向标记附件已引用、保留首次引用时间并清空过期时间，再只返回稳定
+   元数据，不返回 object key、OBS URL
+   或凭据；
 5. Runtime 先按当前 ModelSummary.input 校验“有效历史 + 新附件”的完整
-   AttachmentContextPlan；model.set 也以当前历史 plan 拒绝不兼容切换；
-   校验通过后再把用户 Message、AttachmentContent 快照、幂等结果和 run 占位
-   原子提交；只有附件时直接形成纯附件 User Message，不生成隐藏默认 Prompt，
-   同时包含文字时内容顺序固定为文字在前、附件按请求顺序在后；
-6. AttachmentInputAssembler 通过版本绑定的短期 lease 读取，Provider 才转换成
-   实际模型格式；Session 删除前保留原始内容版本，派生制品使用独立内部
-   digest，删除时经 outbox 幂等 release。
+   AttachmentContextPlan；model.set 也以当前历史 plan 拒绝不兼容切换。校验通过
+   后再把 User Message、AttachmentContent 元数据快照、幂等结果和 run 占位原子
+   提交；只有附件时直接形成纯附件 User Message，不生成隐藏默认 Prompt；
+6. Provider 需要正文时，Runtime 调用
+   `GET /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/content`。
+   CampusMate 从 OBS 流式代理，Runtime 在不超过 1 MiB 的内存缓冲中消费并复核
+   `sha256`；agent-service 不直连 OBS，不写本地文件或临时文件。
 
 两种方案都在模型调用前验证附件，但信任边界不同：OpenClaw 验证本次 Frame
-携带的实际内容，CampusAgent 验证 Attachment Service 持有的不可变内容版本。
+携带的实际内容，CampusAgent 验证 CampusMate openGauss 元数据和不可覆盖 OBS
+正文的一致性。
 CampusAgent 的差异是产品约束、安全加固和架构改造，不代表 OpenClaw 的实现
-不安全。收益是大对象上传、断点续传、扫描、最终用户授权、Session 历史保留与
-Chat delta 背压解耦；代价是客户端多一个 READY 阶段，Runtime 与 Attachment
-Service 还要实现 reservation/lease、幂等 retain/release 和崩溃 reconciliation。
-agent-service 本身不提供文件上传端点；活动 run 上的 `chat.steer` v1 也不接受
-附件，调用方必须等待 run 结束后再用新的 `chat.send` 提交。
+不安全。收益是大对象上传、安全扫描、最终用户授权、Session 历史保留与
+Chat delta 背压解耦，并让附件在不同 CampusMate/agent-service Pod 间保持可读；
+代价是客户端多一个 READY 阶段，Runtime 依赖 CampusMate 内部 resolve/content
+可用性。agent-service 本身不提供文件上传端点；活动 run 上的 `chat.steer` v1
+也不接受附件，调用方必须等待 run 结束后再用新的 `chat.send` 提交。
+
+该目标不引入 `content_version`、跨服务 XA、reservation 或复杂 retention claim。
+Runtime 历史只保存
+`attachment_id/filename/media_type/size_bytes/sha256` 快照；CampusMate 使用简单的
+已引用状态阻止单独删除，Session 删除时进入 `DELETING` 并清理 OBS 正文和
+openGauss 中的可用状态，最终保留 `DELETED` tombstone。未被 Session 引用且满
+24 小时的附件可由后台任务清理；短事务
+lease 字段只用于跨 Pod 认领扫描/删除任务，OBS I/O 不持有数据库事务，这不同于
+旧草案中面向每次读取的复杂 claim/lease 协议。
 
 CampusAgent 还把单项资源格式冻结为
 `^attachment_[0-9A-Za-z]{24}$`（总长 35）。该 ID 由 `mate-service`
 Attachment Service 服务端签发、大小写敏感，在一个 Attachment Service 部署内
-通过 binary 唯一约束保证全局唯一，碰撞时重签，READY 后不改绑且删除后不
+通过大小写敏感的主键唯一约束保证全局唯一，碰撞时重签，READY 后不改绑且删除后不
 复用；永久 issued-ID/tombstone 防止物理删除释放 ID。客户端和 Runtime
 逐字节比较，不解析后缀。这是 CampusAgent 的
 target-only 资源契约，不是 OpenClaw attachment envelope 的既有行为；同时，
@@ -929,7 +954,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusAgent v2 的 typed
 | 多种 active-run queue mode | 当前产品需要可预测的单主 run | `RUN_ACTIVE` + 显式 steer/abort |
 | 慢消费者丢弃 Chat delta | 单 Session Chat 更重视输出连续性 | 1013 断开 + 原子快照恢复 |
 | Gateway 全局 `stateVersion` | Chat 连接没有全局 presence/health 快照 | 连接 `seq` + run `run_seq` + active snapshot + history |
-| Request Frame 内联 base64 附件 | ToB Runtime 不拥有最终用户文件数据面；大对象、扫描和保留需要独立生命周期 | HTTP/Object Storage 上传 + attachment ID + 不可变 read lease |
+| Request Frame 内联 base64 附件 | ToB Runtime 不拥有最终用户文件数据面；大对象、扫描和保留需要独立生命周期 | CampusMate HTTP 上传 + openGauss 元数据 + 私有 OBS 正文；Runtime 仅使用 attachment ID 和内部流式读取 |
 | 多观察连接 | v1 只需要单一读写所有者，且不建设分布式 fan-out | 同一 Pod 同一 Session 只有一个活动连接，resume 用 `4409 SESSION_REPLACED` 接管 |
 | Gateway 分布式路由体系 | 当前部署优先控制 owner 与基础设施复杂度 | 可信网关按用户 IP affinity；明确无跨 Pod active continuation |
 
@@ -938,7 +963,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusAgent v2 的 typed
 | 变化 | 分类 | 原因 |
 |---|---|---|
 | 全局唯一 `session_id` Pool key，Agent 为固定绑定 | 架构改造 | 上层拥有用户归属，Runtime 只维护执行上下文 |
-| 数据库 `RuntimeSessionStore` 替代 Session JSONL | 架构改造 | Session、Message、RunRecord、history sequence、幂等结果与附件 claim 需要跨进程成为权威历史 |
+| 数据库 `RuntimeSessionStore` 替代 Session JSONL | 架构改造 | Session、Message、RunRecord、history sequence、幂等结果与 AttachmentContent 元数据快照需要跨进程成为权威历史；正文仍归 CampusMate |
 | 内部网关私钥/JWT Upgrade 认证和无 URL token | 安全加固 | 防泄漏并固定调用服务身份，不复制用户认证体系；入站凭据不转发给 Manager |
 | `connect` 首帧 | 架构改造 | 协议、能力、Agent、Model 的显式协商 |
 | 封闭 Frame、`payload` 和 `traceparent` | 架构改造 | 契约校验、追踪传播和响应关联 |
@@ -950,7 +975,7 @@ OpenClaw 的 `replace` 对可见文本重写更宽容；CampusAgent v2 的 typed
 | run 生命周期从 WebSocket 解耦 | 架构改造 | 同 Pod Pool 持有 active-run 引用、AgentSession/Loop 执行、Hub 维护恢复投影，因此普通断线可继续执行；不承诺跨 Pod |
 | 单活动连接、generation 接管和重启 interrupted | 产品约束、架构改造 | 不建设观察 fan-out 或分布式 owner；Pod 重启只从数据库重建已持久化完整内容块 |
 | thinking 同策略投影 | 安全加固 | 防止通过历史/快照旁路 |
-| `mate-service` Attachment Service、Resolver、lease 与 retention claim | 安全加固、架构改造 | 将所有权、扫描和大对象数据面留在上层，同时保证 Runtime 的 TOCTOU、幂等接受与 Session 历史可重放 |
+| CampusMate Attachment Service、内部 resolve/content 与共享 OBS/openGauss | 安全加固、架构改造 | 将所有权、扫描和大对象正文留在 CampusMate；Runtime 不获 OBS 定位、不写本地文件，并以稳定元数据快照支持历史重放 |
 | Tool result 脱敏、截断预览和 `result_ref` | 安全加固、架构改造 | 防止凭据/执行秘密泄露并保持 Frame 有界；API v1 不开放完整结果读取 |
 
 ## 15. 未来 Gateway 边界
@@ -1029,13 +1054,22 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 - history 水位分页在 `has_more=true` 时必须返回 next_cursor，false 时不返回；
 - 未绑定当前 session_id、跨 service principal、不存在或删除的附件统一返回
   INVALID_ATTACHMENT；NOT_READY 只在授权后披露，Model 输入不兼容明确拒绝；
-- attachment_ids 批量解析全有或全无、固定内容版本与 digest；accepted 幂等重试
-  不重新解析过期附件，read lease、retention claim 和 Session 删除 outbox 可恢复；
-- Frame 不接受附件 URL/MIME/文件名/Base64，数据库只保存 AttachmentContent
-  快照和内部 claim 状态，不保存句柄、凭据或供应商 file ID；agent-service
-  不提供上传端点，Attachment Service 由 mate-service 承载；
+- CampusMate 上传只接受一个 multipart file 和匹配的 `X-Attachment-Size`，限制为
+  1 至 20 MiB；`Prefer: respond-async` 与 `Prefer: wait=N`、状态 GET、READY 前
+  拒绝、24 小时未引用清理均有契约测试；
+- attachment_ids 由内部 batch resolve 保序、全有或全无地校验并标记 referenced；
+  accepted 幂等重试返回原结果，不依赖重新解析过期附件；
+- Frame 不接受附件 URL/MIME/文件名/Base64。RuntimeSessionStore 只保存
+  `attachment_id/filename/media_type/size_bytes/sha256` 快照，不保存 object key、
+  URL、正文、句柄、凭据、`content_version` 或复杂 claim；
+- 两个 CampusMate Pod 通过同一 openGauss 元数据和私有 OBS 正文处理同一附件，
+  两个 agent-service Pod 都只走内部 resolve/content；Runtime 不直连 OBS，不写
+  本地文件或临时文件，并在最多 1 MiB 流式缓冲中复核 sha256；
+- 已引用附件单项删除返回冲突，Session 删除进入 DELETING；跨 Pod lease 只短暂
+  认领扫描/删除任务，OBS I/O 不持 openGauss 事务，补偿对账可恢复部分失败；
 - RuntimeSessionStore 保存 Session、Message、RunRecord、history sequence、
-  幂等结果、Agent/Model/bundle revision 和附件 claim，不生成 Session JSONL；
+  幂等结果、Agent/Model/bundle revision 和 AttachmentContent 元数据快照，不生成
+  Session JSONL；
 - Managed Profile 读取 `.campusagent/SYSTEM.md` 与 `.campusagent/skills/`，不把
   固定 Java 证据中的 `.campusclaw` 路径误写成目标兼容行为；
 - Manager 认证失败、重组 Message 超限和慢消费者恢复；
@@ -1062,9 +1096,10 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.9.0` | 2026-08-03 | 同步 CampusAgent Manager 1.11.0、AsyncAPI 2.9.0、客户端指南 1.5.0 和 CampusMate Attachment Service 1.0.0；将目标附件边界收敛为共享 openGauss 元数据与私有 OBS 正文，Runtime 只使用内部 batch resolve/content 流且不直连 OBS 或落本地文件；删除 content_version、reservation 和复杂 retention claim，保留稳定元数据历史、简单 referenced/DELETING 生命周期与跨 Pod 补偿对账；OpenClaw 和 pi-mono-java 固定基线事实不变。 |
 | `1.8.0` | 2026-08-03 | 同步 CampusAgent Manager 1.10.0、AsyncAPI 2.8.0 和客户端指南 1.4.0；将 CampusAgent 目标 `attachment_id` 冻结为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 Attachment Service 服务端签发、大小写敏感、部署级全局唯一、碰撞重签、READY 后不改绑、删除后不复用，以及格式与唯一性不构成授权；OpenClaw 既有 attachment envelope 行为不变。 |
 | `1.7.0` | 2026-08-03 | 同步 CampusAgent Manager 1.9.0、AsyncAPI 2.7.0 和客户端指南 1.3.0；明确 OpenClaw 不定义 Campus 资源 ID、pi-mono-java v1 无 Agent/Model 路由契约，以及 CampusAgent/CampusModel 服务端签发、大小写敏感的 30 字符 opaque ID 规则；统一目标协议示例。 |
-| `1.6.0` | 2026-08-03 | 目标产品统一为 CampusAgent/agent-service，服务 API 地址改为 `/agent-service/v1/ws/chat` 并与 Frame 协议 2 分层；同步 Manager 1.8.0、AsyncAPI 2.6.0 和客户端指南 1.2.0；明确 mate-service 服务调用、既有网关私钥/JWT认证、`.campusagent`、数据库 RuntimeSessionStore、IP affinity、单活动连接接管、Pod 重启 interrupted、八个方法、纯附件消息及 Tool 脱敏/截断边界。旧版本条目保留当时的 CampusClaw 名称。 |
+| `1.5.0` | 2026-08-03 | 目标产品统一为 CampusAgent/agent-service，服务 API 地址改为 `/agent-service/v1/ws/chat` 并与 Frame 协议 2 分层；同步 Manager 1.8.0、AsyncAPI 2.6.0 和客户端指南 1.2.0；明确 mate-service 服务调用、既有网关私钥/JWT认证、`.campusagent`、数据库 RuntimeSessionStore、IP affinity、单活动连接接管、Pod 重启 interrupted、八个方法、纯附件消息及 Tool 脱敏/截断边界。旧版本条目保留当时的 CampusClaw 名称。 |
 | `1.5.0` | 2026-08-03 | 同步 CampusClaw Manager 1.7.0、AsyncAPI 2.5.0 和客户端指南 1.1.0；基于 OpenClaw 固定 commit 补充 base64 attachment envelope、实际字节/MIME 校验与 staging 证据，并对比 CampusClaw 的 HTTP/Object Storage、不可变引用、完整 AttachmentContextPlan、read lease、source/derived digest、retention claim、幂等接受和 Session 删除边界 |
 | `1.4.0` | 2026-08-03 | 同步 CampusClaw Manager 1.5.0、AsyncAPI 2.4.0 和客户端接入指南 1.0.0；明确 OpenClaw Chat delta 与 CampusClaw typed delta 都不依赖 capability，只有 full_thinking 等增强参与协商；补充 user_message_id、响应顺序、固定事件集、redacted thinking、历史水位快照、RunRecord 历史、客户端 reducer 和关闭恢复差异，并修正 Tool 投影与 run 所有权口径 |
 | `1.3.3` | 2026-08-03 | 全文统一为“主体动作、触发条件、可观察结果、机制与原因”的行为先行表述；同步 CampusClaw Manager 1.4.3 与 AsyncAPI 2.3.3，统一既有 Bearer/mTLS 替代认证口径，三态事实和 Schema 行为不变 |

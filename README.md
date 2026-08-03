@@ -13,6 +13,7 @@
 - [Agent 元数据 GaussDB 表设计](./agent-metadata-gaussdb-design/README.md)
 - [CampusAgent Runtime：pi-mono-java Manager 驱动的多 Agent 运行设计](./pi-mono-java-manager-driven-multi-agent-runtime/README.md)
 - [CampusAgent Chat WebSocket v2 客户端接入指南](./pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [CampusMate Attachment Service：OBS + openGauss 设计](./campusmate-attachment-service/README.md)
 - [OpenClaw 与 CampusAgent WebSocket 设计对比](./openclaw-campusagent-websocket-comparison/README.md)
 - [AgentRuntimeTemplate 不可变运行模板设计](./agent-runtime-template/README.md)
 - [pi-mono Java 集中式 GaussDB 会话记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)

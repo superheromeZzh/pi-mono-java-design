@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.10.0 |
+| 文档版本 | 1.11.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -38,11 +38,13 @@ mate-service 先为一次对话分配 `session_id`，再建立 WebSocket，并�
 Request Frame 可以携带 W3C `traceparent`，connect Response 返回经过客户端
 声明、服务能力和授权共同过滤的有效 features。
 
-文件内容不经 WebSocket 传输。mate-service 承载的 Attachment Service 负责 HTTP/Object
-Storage 上传、内容嗅探、安全扫描、最终用户授权和 `session_id` 绑定；
-`chat.send` 只提交不透明 `attachment_ids[]`。Runtime 通过
-`AttachmentResolver` 把所有 ID 原子解析为不可变内容版本和受控读取句柄，
-再由 `AttachmentInputAssembler` 按有效 Model 输入策略构造本次模型输入。
+文件内容不经 WebSocket 传输。mate-service 承载 Attachment Service：
+正文写入 OBS，状态、Session 绑定、可信 MIME、大小和摘要写入
+openGauss。外部调用方使用单文件 multipart 上传并轮询处理状态；
+`chat.send` 只提交不透明 `attachment_ids[]`。Runtime 通过 Attachment
+Service 的内部 `resolve` 批量取得可信元数据快照，再通过内部
+`content` 流式读取正文；Runtime 不接触 OBS `object_key`、凭据或预签名
+URL，也不直连 OBS。
 每个 `attachment_id` 由 Attachment Service 签发，严格匹配
 `^attachment_[0-9A-Za-z]{24}$`，总长 35、大小写敏感，并在该 Attachment
 Service 部署内全局唯一；格式和唯一性都不代替 Session 级授权。
@@ -78,7 +80,11 @@ RuntimeSessionStore (database)
 ├── SessionRecord
 ├── MessageRecord + history_seq
 ├── RunRecord + idempotency result
-└── attachment retention record
+└── AttachmentContent metadata snapshot
+
+Attachment Service
+├── openGauss: metadata, status, Session binding and referenced state
+└── OBS: attachment body, reachable only by Attachment Service
 ```
 
 `references/tools.json` 只在 Skill 存在直接有效 `binding_tools` 时生成。
@@ -88,6 +94,9 @@ RuntimeSessionStore (database)
 接收完整 Message 投影。
 本专题的规范性协议文件为
 [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)。
+附件的 HTTP 契约、openGauss DDL、OBS 存储端口和补偿状态机以
+[`CampusMate Attachment Service：OBS + openGauss 设计`](../campusmate-attachment-service/README.md)
+为规范性专题。
 实现上层服务、SDK 或浏览器侧 Frame reducer 时，按
 [`chat-ws-v2-client-integration.md`](chat-ws-v2-client-integration.md)
 给出的连接、发送、归并、恢复和错误路径实施；浏览器仍只连接上层会话服务，
@@ -117,7 +126,7 @@ mate-service 必须保证 `session_id` 在一个 CampusAgent Runtime 部署范�
 - Managed Prompt 与 pi-mono-java `Context` 的组装；
 - Tool Manager 的逻辑工具发现和执行；
 - Model Manager Provider 的模型选择和流式事件适配；
-- 附件引用、原子接受、不可变内容租约、模型输入装配和 Session 保留语义；
+- 附件上传、状态轮询、内部解析/流式读取、模型输入装配和 24 小时未引用清理；
 - 每 Pod 单 JVM 内多个 Agent 的隔离边界和基于用户 IP 的部署亲和前提；
 - 对 pi-mono-java 的目标适配点和验收要求。
 
@@ -127,7 +136,7 @@ mate-service 必须保证 `session_id` 在一个 CampusAgent Runtime 部署范�
 - 元数据管理服务；
 - Tool Manager 或 Model Manager；
 - WebSocket 客户端；
-- 附件上传 REST API；
+- 附件上传 REST API 的 Java 实现（HTTP 契约由关联专题定义）；
 - 数据库表和管理界面。
 - pi-mono-java 现有 Java package、class 或 artifact 的 CampusAgent 改名。
 
@@ -287,10 +296,10 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 | ManagedSessionPool | 当前 Pod 内 `session_id` 到 Session 和 active run 的映射 | 内存隔离、同 Pod 恢复、Agent 绑定、运行所有权和淘汰 |
 | ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于物理连接维护同 Pod 恢复投影；不提供跨 Pod active-run 迁移 |
 | ConnectionAuthAdapter | 内部网关确认的调用服务身份 | 在 `101` 前消费现有私钥签名/JWT认证结果；不复制私有字段或向下游原样传递凭据 |
-| Attachment Service（mate-service） | 上传状态、可信元数据、不可变内容版本、Session 绑定、扫描结论和读取授权 | mate-service 经 HTTP/Object Storage 上传；按调用服务身份和 `session_id` 原子解析附件引用 |
-| AttachmentResolver | 当前 Session、调用服务身份、附件 ID 列表、read handle 和 retention claim | 把 ID 批量解析为可信快照与 `AttachmentReadHandle`；只有句柄可打开 lease，不接受裸 ID 二次查询 |
-| AttachmentInputAssembler | Model 有效输入策略和附件受控内容流 | 将附件转成 Provider 中立的图片/文档输入；不把文件内容当作系统或工具指令 |
-| RuntimeSessionStore | Session、Message、RunRecord、history sequence、幂等结果、Agent/Model/revision 绑定、附件 claim 和删除状态 | 使用共享数据库按全局 `session_id` 持久化，不保存用户或租户身份；物理表结构另行设计 |
+| Attachment Service（mate-service） | openGauss 中的状态、可信元数据、Session 绑定和 referenced 标记；OBS 中的正文 | 接收单文件 multipart，执行校验/扫描，提供外部状态轮询与内部 resolve/content，清理超过 24 小时仍未引用的附件 |
+| AttachmentResolver | 当前 Session、调用服务身份和有序附件 ID 列表 | 调用内部 batch resolve；全量校验成功后原子返回元数据快照并把全部记录单向标记为 referenced |
+| AttachmentInputAssembler | Model 有效输入策略和 Attachment Service 内部 content 流 | 经内部鉴权的 content API 读取正文，校验大小/摘要/MIME，并转成 Provider 中立输入 |
+| RuntimeSessionStore | Session、Message、RunRecord、history sequence、幂等结果、Agent/Model/revision 绑定和附件元数据快照 | 使用共享数据库按全局 `session_id` 持久化；不保存 OBS `object_key`、凭据、预签名 URL 或 Runtime 可直连的存储路径 |
 
 运行目录是 Manager 数据的模型披露投影，不是授权数据库。目录中的
 `tool_id` 只告诉模型“可能使用什么”；Tool Manager 仍在每次发现和执行时
@@ -1320,12 +1329,12 @@ idempotency_key 的等价重试必须返回同一 `run_id + user_message_id`，�
 run 当前仍 active，也不能先返回 `RUN_ACTIVE`。Request 超时不证明服务端没有
 执行；重试使用新的 RequestFrame id 和原 idempotency_key。
 
-附件必须先经由 `mate-service` 承载的 Attachment Service 和
-HTTP/Object Storage 数据面上传；`agent-service` 不提供上传端点。
+附件必须先经由 `mate-service` 承载的 Attachment Service 上传；
+正文由该服务写入 OBS，`agent-service` 不提供上传端点也不直连 OBS。
 WebSocket 只传绑定当前 `session_id` 的 `attachment_ids[]`；附件引用是协议 2
 的标准可选字段，不是 capability。调用方不能提交 URL、路径、对象存储 key、
 MIME、文件名或 Base64 代替权威元数据。Runtime 的解析、错误优先级、幂等
-提交边界、内容租约和模型输入装配见 9.11 节。
+提交边界、内部正文读取和模型输入装配见 9.11 节。
 
 ### 9.4 服务端 SessionTransport
 
@@ -1640,7 +1649,7 @@ CampusAgent Runtime 的目标设计不生成 `<session-id>.jsonl`。
 - RunRecord、单调 `history_seq`、终态、usage、stop reason 和脱敏 Error；
 - 会改变状态的命令的幂等 key、负载指纹和已接受结果；
 - 每个 run 固化的 Agent revision、Model revision 和 runtime bundle revision；
-- 已验证的 AttachmentContent 快照、内容版本、权利声明/读取租约；
+- 已验证的 AttachmentContent 元数据快照；
 - 脱敏后的完整超限 Tool result 和对外投影用的不透明 `result_ref`。
 
 `session_id` 是逻辑主键，Store 必须校验保存的不可变 `agent_id`，
@@ -1658,48 +1667,75 @@ run 终态和最终 Message 必须先按 Session 的 `history_seq` 顺序提交�
 
 ### 9.11 附件引用与模型输入
 
-#### 9.11.1 所有权和上传状态
+#### 9.11.1 外部上传、轮询和存储
 
-附件使用“HTTP/Object Storage 数据面 + WebSocket 控制面”。`mate-service`
-承载 Attachment Service：最终客户端先向它申请上传，直接或经预签名
-URL 写入对象存储，再通知它完成校验。`agent-service` 不提供文件
-上传端点，也不
-接收 WebSocket Binary Frame、Base64、预签名 URL 或对象存储凭据。
+Attachment Service 只由 `mate-service` 对外提供。单文件上传固定为：
 
-Attachment Service 拥有以下权威数据：
+```http
+POST /mate-service/v1/sessions/{session_id}/attachments
+Content-Type: multipart/form-data; boundary=...
+X-Attachment-Size: 182734
+Prefer: wait=10
 
-- 最终用户、业务租户和调用服务的上传授权；
-- `attachment_id`、当前 `session_id` 绑定和不可变 `content_version`；
-- 内容嗅探后的 MIME、显示文件名、实际字节数和 SHA-256；
-- 病毒扫描、内容安全、隔离、过期、删除和保留状态；
-- 对 Runtime 发放的短期读取句柄和租约。
+--...
+Content-Disposition: form-data; name="file"; filename="orders.pdf"
+Content-Type: application/pdf
+
+<file bytes>
+--...--
+```
+
+- multipart 必须且只能有一个 `file` part；
+- `X-Attachment-Size` 必填，只接受 `1..20971520`（20 MiB）的十进制
+  字节数；服务端还必须以实际接收字节数校验，并在 OBS SDK
+  读取声明长度后额外确认 `file` part 已到 EOF，防止小报长度的尾部字节
+  未被计数；
+- 未携带 `Prefer` 或携带 `Prefer: respond-async` 时，立即返回
+  `202 Accepted`；
+- `Prefer: wait=N` 中 `N` 是非负整数秒；服务端最多等待
+  `min(N, 10)` 秒；期间进入 `READY` 返回 `201 Created`，进入
+  `BLOCKED` 返回 `422 Unprocessable Content`，进入终态 `FAILED`
+  返回 `503 Service Unavailable`，到期仍为 `PROCESSING` 才返回
+  `202 Accepted`；扫描器暂时不可用但任务仍可重试时保持
+  `PROCESSING`，并按 `202 + Retry-After` 轮询；
+- `202` 必须携带资源 `Location` 和正整数秒的 `Retry-After`；
+  `201` 返回完整的附件资源表示。
+
+外部状态固定通过下列资源轮询：
+
+```http
+GET /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+```
+
+`GET` 返回 `UPLOADING | PROCESSING | READY | BLOCKED | FAILED |
+DELETING | DELETED`；只有 `READY` 可用于 `chat.send`。调用方按
+`Retry-After` 或有界退避轮询，本版不定义附件 WebSocket/SSE 订阅。
+
+Attachment Service 把正文写入 OBS，把 `attachment_id`、`session_id`、
+状态、内部 `object_key`、文件名、可信 MIME、实际大小、SHA-256、
+`referenced`、`referenced_at` 和 `expires_at` 写入 openGauss。
+`object_key` 不从资源 ID 确定性推导，也不返回 Runtime 或外部调用方。
 
 Attachment Service 只能在服务端签发 `attachment_id`。其格式固定为
 `attachment_` 加 24 位 ASCII 大小写字母或数字，即
 `^attachment_[0-9A-Za-z]{24}$`，总长 35。ID 大小写敏感、按原始字节比较，
 客户端和 Runtime 不得自行生成、转小写、解析后缀或从后缀推断时间、顺序和
-归属。一个 Attachment Service 部署内必须使用大小写敏感或 binary collation
-的数据库唯一约束保证全局唯一；生成碰撞只能重新签发，不能把碰撞值返回给
+归属。一个 Attachment Service 部署内必须用经实际 openGauss/JDBC 验证的
+大小写敏感比较语义和主键唯一约束保证全局唯一；生成碰撞只能重新签发，
+不能把碰撞值返回给
 调用方。该约束必须覆盖活动记录和永久 issued-ID/tombstone 记录，物理删除
 文件或业务记录不能释放 ID。ID 从签发起绑定同一上传记录，进入 `READY` 后
 不得改绑其他内容，进入 `DELETED` 后也不得重新使用。
 
-上传生命周期固定为：
-
-```text
-UPLOADING -> PROCESSING -> READY
-                  |          |
-                  +-> BLOCKED+-> EXPIRED or DELETED
-                  +-> FAILED
-```
-
-只有 `READY` 可以首次用于 `chat.send`。Attachment Service 可以建模
-tenant/user，但 CampusAgent Runtime 不接收、持久化或使用这些字段；Runtime
+记录创建时设置 `referenced=false` 和 24 小时后的 `expires_at`。
+后台任务幂等删除超过该时间仍未引用的 OBS 正文，并把 openGauss 记录转为
+`DELETED` tombstone，不物理删除 ID 记录。Attachment 表不重复保存
+tenant/user；这些归属由 mate-service 的 Session 权威数据维护。CampusAgent Runtime
 只携带已认证的调用服务身份和当前 `session_id` 解析引用。`attachment_id` 是
 不透明资源标识，不是 Bearer capability；格式合法、全局唯一或知道 ID 本身
 都不构成读取权限。
 
-#### 9.11.2 Runtime 端口和不可变读取句柄
+#### 9.11.2 Runtime 内部 resolve 和 content
 
 目标 Java 端口使用批量解析，避免部分附件成功后启动 run：
 
@@ -1710,84 +1746,91 @@ interface AttachmentResolver {
         ConnectionAuthContext authContext,
         SessionInvocationMetadata metadata);
 
-    CompletionStage<AttachmentReadHandle> reopenRetainedContent(
-        AttachmentRetentionKey retentionKey,
+    Flow.Publisher<ByteBuffer> openContent(
+        String sessionId,
+        String attachmentId,
+        String expectedSha256,
         ConnectionAuthContext authContext,
-        SessionInvocationMetadata metadata);
+        SessionInvocationMetadata metadata,
+        CancellationToken cancellation);
 }
 
 record AttachmentResolveCommand(
     String sessionId,
-    String agentId,
-    String modelId,
     List<String> attachmentIds) {}
 
 record ResolvedAttachment(
     String attachmentId,
-    String contentVersion,
     String filename,
     String mediaType,
     long sizeBytes,
-    String sha256,
-    AttachmentReadHandle readHandle,
-    AttachmentRetentionClaim retentionClaim) {}
+    String sha256) {}
+```
 
-interface AttachmentReadHandle {
-    CompletionStage<AttachmentReadLease> open(
-        CancellationToken cancellation);
-}
+内部解析接口固定为：
 
-interface AttachmentReadLease extends AutoCloseable {
-    Flow.Publisher<ByteBuffer> content();
-    Instant expiresAt();
-    void close();
+```http
+POST /mate-service/internal/v1/attachments:resolve
+Content-Type: application/json
+
+{
+  "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "attachment_ids": ["attachment_011CZm8VpK4rNs6WtY2hDqfB"]
 }
 ```
 
-`resolveForSession` 必须一次返回与请求顺序相同的完整集合，或整体失败。返回的
-可信元数据来自已扫描的不可变内容版本；调用方在 Frame 中不能覆盖。
-`AttachmentReadHandle` 是 Runtime 内部、短期、不可序列化的能力，绑定调用
-服务、Session 和内容版本。只有句柄可以打开单消费者
-`AttachmentReadLease`；禁止用裸 `attachment_id` 再查询一次，避免“校验版本
-A、读取版本 B”的 TOCTOU。Lease 支持背压、取消、读超时和字节上限，成功、
-失败或取消后都必须恰好关闭一次；`close()` 幂等。
+Attachment Service 在单个 openGauss 事务中按请求顺序全量校验：
+调用服务有权、全部 ID 存在且绑定该 Session、状态为 `READY`。
+全部通过后，原子将所有记录设为 `referenced=true`、
+`referenced_at=COALESCE(referenced_at, now())`、`expires_at=NULL`，并返回与请求同序的
+`attachment_id/filename/media_type/size_bytes/sha256`。任一失败时整体
+回滚，不返回部分集合。`referenced` 只能从 `false` 转为
+`true`，对外不提供逆向变更接口或确认回调。Runtime Store 后续提交失败时可能
+保守多保留附件，但不得回滚 referenced 造成误删。
 
-`reopenRetainedContent` 只接受 Runtime Store 中的内部 retention key，并精确
-绑定已接受的 `session_id + attachment_id + content_version + sha256`；它用于
-进程恢复或后续 turn 重建历史 Context。该方法不是按裸 ID 重新 resolve，也不
-允许选择最新版本，因此后续对话不会悄悄读取与原用户 Message 不同的文件。
+正文读取固定为：
+
+```http
+GET /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/content
+```
+
+Attachment Service 每次重新校验内部服务身份、Session 绑定、`READY`
+和 `referenced=true`，然后由它使用 openGauss 中的内部 `object_key`
+从 OBS 流式读取并转发。Runtime 只消费带背压、取消、超时和字节
+上限的 HTTP 响应流，不获得 OBS 凭据、`object_key` 或预签名 URL。
 
 `traceparent` 可以经 `SessionInvocationMetadata` 传播到 Attachment Service
 遥测，但不能进入附件快照、数据库业务记录或访问日志中的凭据字段。
-解析结果不得包含
-长期对象存储凭据；如果内部使用预签名 URL，它只能封装在 read handle 后面，
-不能返回 WebSocket 客户端或模型。
+解析和 content 响应不得包含 OBS 凭据、`object_key`、预签名 URL
+或 Provider file ID。
 
 #### 9.11.3 校验和错误优先级
 
 Runtime 在首次接受 `chat.send` 前按以下顺序处理全部附件：
 
-1. 用不可变调用服务身份和当前 `session_id` 批量解析全部 ID；
-2. 校验每项仍为 `READY`、扫描通过、未隔离、未删除或过期；
-3. 由 Session Context Builder 生成“有效 transcript 中仍保留的历史附件 +
+1. 用不可变调用服务身份和当前 `session_id` 调用内部 resolve；
+2. Attachment Service 在同一 openGauss 事务中校验整个有序 ID
+   集合仍为 `READY`、扫描通过、未隔离、未删除或过期，
+   并原子单向标记全部 referenced；
+3. 由 Session Context Builder 用 resolve 返回的可信元数据生成
+   “有效 transcript 中仍保留的历史附件 +
    本次新附件”的完整 `AttachmentContextPlan`，校验其可信 MIME、数量、
    单文件字节数和总字节数符合当前 ModelSummary.input；
-4. 取得每项的 Session 保留引用和当前 run 读取句柄 reservation；
-5. 将稳定 AttachmentContent 快照与用户消息一起提交。
+4. 将稳定 AttachmentContent 元数据快照与用户消息一起提交。
 
 错误披露遵循先授权、后状态的原则：
 
 | 条件 | 错误 | 语义 |
 |---|---|---|
-| ID 不存在、调用服务无权、未绑定当前 Session、已删除或过期 | `INVALID_ATTACHMENT` | 统一不可重试响应，不泄露其他主体的资源是否存在 |
+| ID 不存在、调用服务无权、未绑定当前 Session、已删除、过期、`BLOCKED` 或 `FAILED` | `INVALID_ATTACHMENT` | 统一不可重试响应，不泄露其他主体的资源是否存在或安全状态 |
 | 已确认有权，但仍为 UPLOADING/PROCESSING | `ATTACHMENT_NOT_READY` | `retryable=true`，必须带 `retry_after_ms` |
 | 完整 AttachmentContextPlan 的可信 MIME、数量或字节数不符合当前 Model 有效输入策略 | `ATTACHMENT_NOT_SUPPORTED` | 不创建 run；调用方更换附件、压缩/分支 Context 或 Model |
 | Attachment Service 不可用 | `MANAGER_UNAVAILABLE` | 按统一 Manager 暂时失败策略处理 |
 
 客户端声明的 MIME、文件名、size 或 hash 即使存在也必须拒绝为未知字段，不能
 参与校验。`sha256` 的内容一致性由 Attachment Service 在 READY 前保证；
-Runtime 读取时按句柄绑定的 `content_version + sha256` 识别内容，不自行信任
-对象存储响应头。
+Runtime 从 content 流重新校验实际字节数和 SHA-256，不信任上传 Header
+或上游存储响应头。
 
 #### 9.11.4 幂等与原子接受边界
 
@@ -1798,28 +1841,29 @@ validate Frame and normalize omitted attachment_ids to []
   -> look up accepted result by session_id + method + idempotency_key
   -> if found, compare payload and return original run_id/user_message_id
   -> reject RUN_ACTIVE for a new key
-  -> resolve all attachments and acquire retain/read reservations
+  -> resolve all attachments and atomically mark them referenced
   -> build the next AttachmentContextPlan and validate frozen Model input policy
   -> atomically persist user Message + attachment snapshots
-       + idempotency result + run_id + active-run reservation
+       + idempotency result + run_id + active-run state
   -> write accepted ResponseFrame
   -> start model input assembly and run execution
 ```
 
 同 key 的已接受请求必须先于 `RUN_ACTIVE` 和附件当前状态检查返回原结果；即使
-附件随后过期，也返回原 `run_id + user_message_id`。接受前的
+当前 Attachment Service 不可用，也不重新查询附件，而是返回原
+`run_id + user_message_id`。接受前的
 `INVALID_ATTACHMENT`、`ATTACHMENT_NOT_READY`、`ATTACHMENT_NOT_SUPPORTED`
-或 Manager 暂时失败不占用幂等键。首次请求只有在所有附件都成功解析、保留和
+或 Manager 暂时失败不占用幂等键。首次请求只有在所有附件都成功解析、标记和
 持久化后才返回 `accepted=true`；不得创建“缺少其中一个附件”的部分 run。
 
-跨 Attachment Service 与 Runtime Store 不要求 XA 事务。Attachment Service
-先发放可撤销 reservation/lease，Runtime 在单一本地事务提交消息、幂等结果和
-run 占位；本地提交失败时释放 reservation，提交成功后确认 Session 保留引用。
-后台 reconciliation 修复确认响应丢失，但不能静默改变已接受 Message 的附件
-集合。
+Attachment Service resolve 事务与 Runtime 后续校验及 Store 提交不要求 XA。
+resolve 成功而 Model 输入策略后续拒绝或 Runtime Store 提交失败时，
+附件保持 referenced；这是有意的
+保守多保留，不得回滚标记造成误删。两个本地事务之间不建立
+跨库补偿状态机。
 
 当前协议只允许 `chat.send` 创建带附件的用户消息；`chat.steer` 不接受
-`attachment_ids`。未来若允许 steer 附件，必须复用同一解析、快照、租约和
+`attachment_ids`。未来若允许 steer 附件，必须复用同一解析、快照和
 幂等提交边界，而不是增加旁路。
 
 `model.set` 在没有 active run 时也必须先对当前有效 transcript 生成
@@ -1833,10 +1877,9 @@ accepted 前失败。只有已经接受后出现的内容读取、完整性或 P
 #### 9.11.5 Provider 中立输入装配
 
 接受成功后，`AttachmentInputAssembler` 使用已冻结的 Model 输入策略和已解析
-附件集合构造 Provider 中立输入；后续 turn 则以内部 retention record 精确重开
-历史内容。文本保持第一块，附件按请求顺序追加。它只
-通过 `readHandle.open(cancellation)` 获取有界内容流，并把取消信号、读超时和字节
-上限传播到下游。
+附件集合构造 Provider 中立输入。当前 run 和后续 turn 都使用历史快照中的
+`session_id + attachment_id` 调用内部 content API。文本保持第一块，附件按用户
+Message 中的顺序追加；读取流传播背压、取消、超时和字节上限。
 
 ```java
 interface AttachmentInputAssembler {
@@ -1855,21 +1898,22 @@ ModelSummary.input 明确允许时才披露 image/document；不能先宣称 doc
 
 “有效 transcript”由现有 Session tree、分支和已持久化 compaction entry
 确定。仍在下一次 Context 中的 AttachmentContent 必须进入 plan；已经被一次
-显式、可审计的 compaction 替换为文本摘要的旧附件可以不再发送原始内容，但
-retention claim 仍按 Session 生命周期保留。Runtime 不能为了适配新模型临时
+显式、可审计的 compaction 替换为文本摘要的旧附件可以不再发送原始内容。
+Runtime 不能为了适配新模型临时
 静默丢弃历史附件；调用方必须选择兼容模型，或显式分支/压缩 Context。
 
 Model Manager Provider 再按实际 Provider 决定：
 
 - 图片映射为受支持的 image content；
-- PDF/Office 文档使用受控提取制品或供应商 file API；
-- 文本文件按编码和大小策略转换为文本块；
+- PDF/Office 文档只能使用能消费有界流或流式上传的 Provider API；
+- 文本文件在字节上限内流式解码为文本块；
+- 只接受本地文件或完整 `byte[]` 的适配器不进入 v1；
 - 临时供应商文件在 run 终态后按 Provider 策略回收。
 
-长期对象存储凭据、read handle 和供应商 file ID 都不能进入 Prompt、模型可见
+长期 OBS 凭据、`object_key`、预签名 URL 和供应商 file ID 都不能进入 Prompt、模型可见
 文本、数据库业务投影或 WebSocket 事件。文件名和文件正文都是不可信用户数据，不得
 解释为 SYSTEM、Tool description 或权限指令。Tool 若需要读取同一附件，必须
-通过独立、授权明确的工具协议取得内容，不能复用模型输入句柄。
+通过独立、授权明确的工具协议取得内容，不能复用模型输入流。
 
 pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固定基线
 的 `ContentBlock` 也没有通用 AttachmentContent。因此
@@ -1884,7 +1928,6 @@ pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固
 {
   "type": "attachment",
   "attachment_id": "attachment_011CZm8VpK4rNs6WtY2hDqfB",
-  "content_version": "version-01",
   "filename": "orders.pdf",
   "media_type": "application/pdf",
   "size_bytes": 182734,
@@ -1892,7 +1935,7 @@ pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固
 }
 ```
 
-快照不包含 URL、Bearer、对象存储 key、Base64、read handle 或供应商 file
+快照不包含 URL、Bearer、OBS `object_key`、Base64 或供应商 file
 ID。`AttachmentContent` 只允许出现在 role=user 的 Message；Assistant/Tool
 Message 不能伪造附件历史。
 
@@ -1901,28 +1944,35 @@ AttachmentContent、或单个非空 TextContent 后跟一个或多个
 AttachmentContent。不生成空文本占位，附件顺序与 `chat.send.attachment_ids`
 一致。
 
-Runtime Store 还要保存不向客户端投影的 `AttachmentRetentionRecord`，至少能
-以 `session_id + message_id + attachment_id + content_version` 确定性重建
-claim ID、retain 状态和 release 状态。只保存公开快照不足以可靠删除；read
-handle 和短期 lease 仍不得持久化。
+Runtime Store 只额外保存 Message 中的 `AttachmentContent` 元数据快照，
+附件存储定位和访问信息由 Attachment Service 内部管理，Runtime
+无法从快照推导 OBS 位置。Attachment Service 保留已 referenced 记录的
+原始正文，至少到 Session 删除流程将该 Session 转入 `DELETING`。
+Assembler 每次读取原始正文时都按快照校验 length、MIME 和 SHA-256；
+v1 不定义另一套可见的附件版本或派生制品生命周期。
+普通“用户删除附件列表项”不能让既有 Session 历史变成不可重放。常规扫描仅允许
+`PROCESSING -> READY | BLOCKED | FAILED`。若事后安全事件要求紧急
+阻断已就绪内容，受审计的特权控制面可以条件更新执行
+`READY -> BLOCKED`。转换成功后新的 resolve/content 立即失败；尚未读取
+正文的 active run 必须失败或 abort。历史保留快照和吊销状态，不能
+静默省略附件后继续生成，也无法撤回已经交给模型的字节。
 
-Attachment Service 必须保留 AttachmentContent 快照所指的原始不可变内容，
-直到上层删除 Session 并由 Runtime 释放 Session 保留引用。派生制品可以缓存，
-但必须使用独立的内部 artifact version、MIME、size 和 digest，不能替代或冒充
-公开的 source `sha256`；Assembler 读取原始版本时仍按快照校验 length、MIME
-和 SHA-256。
-普通“用户删除附件列表项”不能让既有 Session 历史变成不可重放。若安全事件
-要求紧急吊销内容，Attachment Service 应显式标记 revoked；尚未读取的 active
-run 必须失败或 abort，历史保留快照和吊销状态，不能静默省略附件后继续生成。
+外部单附件删除使用：
 
-上层通过独立控制面幂等请求删除 Session。Runtime 先写入 DELETING/tombstone
-并拒绝 create/resume/send，再按策略 abort active run、关闭读取 lease，通过
-outbox 幂等释放全部 retention claim，最后清理数据库 Session 数据；
-tombstone 继续
-阻止 `session_id` 复用。归档或仍可恢复的 Session 不释放 claim。一个内容版本
-被多个 Session 引用时，Attachment Service 只有在最后一个 claim 释放且没有
-合规保留后才可物理删除。删除完成的外部语义采用“release 已可靠写入 outbox”，
-异步物理删除不阻塞控制面响应，但必须可查询最终完成状态。
+```http
+DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+```
+
+未 referenced 的附件可幂等删除；已 referenced 的附件返回
+`409 Conflict`，不允许单独删除导致历史无法重放。上层通过独立
+控制面幂等删除 Session；Runtime 和 Attachment Service 统一把它转为
+`DELETING`，拒绝 create/resume/send/resolve/content，处理 active run 后清理
+OBS 正文，并把 openGauss 记录转为永久 `DELETED` tombstone。
+
+多个 Runtime Pod 共享 RuntimeSessionStore，所有 Attachment Service 副本共享
+openGauss 与 OBS。因此任一经认证的 Runtime Pod 都可以通过相同内部
+resolve/content 接口重建附件输入；跨 Pod 共享不依赖本地盘、进程内
+状态或某个 Runtime Pod 直连 OBS。
 
 ![附件引用、接受与模型输入生命周期](managed_attachment_reference_lifecycle.svg)
 
@@ -1939,9 +1989,9 @@ tombstone 继续
 | WebSocket Upgrade route | 规范路径为 `/agent-service/v1/ws/chat`；不解析业务 query；信任并校验既有内部网关认证结果，创建不可变 ConnectionAuthContext；浏览器由 `mate-service` 承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.8.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.9.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、每 Pod 维护单活动连接 generation、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
-| `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件 claim；Managed Profile 不生成 Session JSONL | 架构改造 |
+| `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件元数据快照；Managed Profile 不生成 Session JSONL | 架构改造 |
 | `ManagedRunHub` | 新增；同 Pod 维护 partial Message、active tools、终态、run_seq 和原子恢复订阅；Pod 重启时通过 Store 收束为 interrupted | 架构改造 |
 | `ManagedAgentSessionFactory` | 新增；按 Session 加载受控 Agent 目录并创建独立 Agent | 架构改造 |
 | `AgentSession.initialize()` | Managed 路径使用精确 cwd、三个通用 Tool、Manager Model 和 Managed Prompt profile | 架构改造 |
@@ -1952,9 +2002,9 @@ tombstone 继续
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
 | Runtime WebSocket 客户端/SDK | 按客户端接入指南实现 connect、pending request、typed delta reducer、幂等与恢复 | 架构改造 |
 | 浏览器 Web 前端 | 连接上层会话服务而非 Runtime；若上层透传相同 Frame，可复用 message_id/content_index reducer，但不得获得 Runtime 服务凭据 | 安全加固 |
-| Attachment Service / `AttachmentResolver` | `mate-service` 完成上传、用户授权和扫描；Runtime 按调用服务身份与 session_id 批量解析不可变版本、read handle 和 retention claim | 安全加固、架构改造 |
-| `AttachmentInputAssembler` / Provider | 以受控 lease 读取内容，校验字节/hash/MIME，并按 ModelSummary.input 转换为 Provider 中立的图片、文档或文本输入 | 架构改造 |
-| Runtime Session Store | 为用户 Message 保存 AttachmentContent 快照，并保存内部 retention record、删除 tombstone、release outbox 和超限 Tool result | 架构改造 |
+| Attachment Service / `AttachmentResolver` | `mate-service` 完成 multipart 上传、OBS/openGauss 存储、用户授权和扫描；Runtime 只调用内部 batch resolve 和 content | 安全加固、架构改造 |
+| `AttachmentInputAssembler` / Provider | 消费 Attachment Service content 响应流，校验字节/hash/MIME，并按 ModelSummary.input 转换为 Provider 中立输入 | 架构改造 |
+| Runtime Session Store | 为用户 Message 保存 AttachmentContent 元数据快照和超限 Tool result；附件存储定位和访问信息仍属于 Attachment Service | 架构改造 |
 | Legacy CLI | 保持原来的本地 Provider、Tool、Settings 和资源发现路径 | 兼容要求 |
 
 Managed 路径不得修改共享 `SettingsManager.workingDir` 来表示当前 Agent。
@@ -2017,8 +2067,7 @@ Agent 身份必须来自不可变 SessionContext，避免并发 Session 互相�
 - Manager 认证错误清除敏感上游详情后映射为 `MANAGER_AUTH_FAILED`；
 - 附件解析失败发生在 accepted 前，不创建用户消息或 run；输入装配或内容读取在
   accepted 后失败时，以结构化 `run.completed(outcome=error)` 结束，不回滚历史；
-- run 终态或取消必须关闭所有短期 attachment lease；Session retention claim
-  只在 Session 删除控制面通过 outbox 释放；
+- run 终态或取消必须取消并关闭所有内部 content HTTP 流；
 - Agent 目录更新只影响后续新 Session，运行中的 Session 保持创建时快照。
 
 ### 11.4 信任边界
@@ -2041,7 +2090,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - 实时、快照和历史共用 ThinkingProjectionPolicy；
 - attachment_id 的格式与部署级唯一性由上层 Attachment Service 保证，
   tenant/user 所有权也由其校验；Runtime 必须用不可变 service principal 和
-  session_id 批量解析不可变版本，只通过 read handle 读取，并按当前 Model
+  session_id 批量 resolve 可信元数据，只通过内部 content API 读取，并按当前 Model
   输入策略重新校验可信 MIME、数量和字节数；
 - Attachment Service、Tool Manager 和 Model Manager 分别是附件、工具和模型
   每次调用的最终授权/状态执行点。
@@ -2160,7 +2209,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - `message.updated` 只携带本次 delta，不携带 OpenClaw 式累计 message 或
   replace；客户端可按 content_index 还原为
   `message.completed` 的最终 Message；
-- text/thinking/toolcall 的 start/update/end 状态机、summary 完整替换、hidden
+- text/thinking/toolcall 的 start/update/end 状态机、hidden
   占位块和 `thinking_redacted` 序列占位均可由 reducer 重现；
 - 每个 `tool.started` 在 run 终态前恰好收到一次
   `tool.completed(done|error|aborted)`；一个 run 多 Message 和
@@ -2213,20 +2262,30 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - Attachment Service 的大小写敏感数据库唯一约束拒绝碰撞，碰撞时重新签发；
   删除后仍保留 issued-ID/tombstone 以占用 ID；`READY` 后改绑和 `DELETED`
   后复用都失败。上述唯一性测试不代替调用服务与 session_id 授权测试；
-- 批量解析保持 attachment_ids 顺序；重复 ID、任一无效项或部分 retain 失败都
-  整批失败，不创建用户 Message、run 或 accepted 幂等结果；
+- 外部上传只接受单 `file` multipart；缺失或伪造
+  `X-Attachment-Size`、非数字、0 或超过 20 MiB 都被拒绝；恰好
+  20 MiB 且与实际字节一致时接受，声明值与实际值不符时拒绝；
+  SDK 读满声明长度后还必须用 file-part EOF 校验拒绝小报长度；
+- 无 `Prefer`、`respond-async` 和 `wait=0` 立即得到 `202`；
+  `wait=10` 在等待窗口内 READY 时得到 `201`，否则得到 `202`；
+  `wait>10` 按 10 秒截断；`202` 必有 `Location + Retry-After`，GET
+  轮询可到达终态；
+- batch resolve 保持 attachment_ids 顺序；重复 ID 或任一无效项使整个
+  openGauss 事务回滚，全部成功时原子设置 referenced/at/expires；
 - Frame 中提交 tenant_id、user_id、URL、path、MIME、filename、size、hash 或
   Base64 均因封闭 Schema 被拒绝，Runtime 的 Prompt、数据库业务投影、事件和日志中没有
-  tenant/user、read handle、lease、Token 或对象存储 URL；
-- resolve 后同一 attachment_id 被重新绑定，也只能读取已固定的
-  content_version + sha256，或安全失败，不能二次用裸 ID 取新内容；
-- lease 在成功、异常、取消和超时路径都恰好关闭一次；Publisher 背压、单文件
+  tenant/user、OBS `object_key`、OBS 凭据、Token 或预签名 URL；
+- Attachment ID READY 后不能改绑；Runtime content 只能经内部 API 读取，
+  不能获得或推导 `object_key`、OBS 凭据或预签名 URL；
+- content 流在成功、异常、取消和超时路径都正确关闭；背压、单文件
   和总流式字节上限有效；实际 length/hash/MIME 不一致、像素/解压炸弹被拒绝；
-- 同一 idempotency key 并发请求只产生一条用户消息、一个 run 和一组 retain；
-  不同附件顺序属于不同负载；accepted 重试在 RUN_ACTIVE、附件过期或删除后仍
-  返回原 run_id/user_message_id，接受前失败可以重试；
-- 在 retain 后/Store commit 前、commit 后/outbox 前注入崩溃，reconciler 能
-  清理孤儿 reservation，且不会丢失 release、重复 run 或改变附件快照；
+- 同一 idempotency key 并发请求只产生一条用户消息、一个 run，
+  每个附件的 referenced 最多发生一次单向转换；
+  不同附件顺序属于不同负载；accepted 重试在 RUN_ACTIVE 或
+  Attachment Service 不可用时仍返回原 run_id/user_message_id，不重新查询
+  附件，接受前失败可以重试；
+- resolve 成功后注入 Runtime Store commit 失败，referenced 不回滚且不会
+  被 24 小时任务误删；未 resolve 成功的记录满 24 小时后清理；
 - 输入装配保持“可选非空 TextContent + 请求顺序的附件”，纯附件时不
   生成空文本块；图片可映射到现有
   ImageContent，document/text 的 Provider 中立类型和转换在实现前有显式契约，
@@ -2234,11 +2293,13 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - model.set 对当前有效 transcript 的完整 AttachmentContextPlan 做校验；不兼容
   时保持原模型。新 chat.send 在 accepted 前校验“历史 + 新附件”，compaction
   只有通过持久化 entry 才能改变 plan，不能为适配模型静默丢附件；
-- 原始 read lease 的 length/MIME/SHA-256 与公开快照一致；任何派生制品使用
-  独立 artifact version/digest，不能用源文件 sha256 校验不同字节；
-- Session 删除先写 tombstone、拒绝新 run、处理 active run，再经 outbox 幂等
-  release；多 Session 引用在最后一个 claim 释放前不物理删除，归档/恢复仍能
-  以相同 digest 重建模型输入；
+- content 流的 length/MIME/SHA-256 与公开快照一致；v1 不启用只能接收
+  本地文件、完整字节数组或独立派生版本的 Provider 适配器；
+- 未 referenced 的单附件 DELETE 成功且幂等，已 referenced 返回 409；
+  Session 删除统一转 DELETING、删除 OBS 正文并在 openGauss 保留
+  DELETED tombstone；
+- 任一 Runtime Pod 都能经共享 Attachment Service/openGauss/OBS 读取同一
+  附件，不依赖本地盘或某一 Pod 的进程内对象；
 - 紧急安全撤销显式 abort 或拒绝后续 run，并保留历史快照与审计状态，不静默
   删除附件后以不同 Context 继续执行。
 
@@ -2269,9 +2330,9 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - traceparent 只进入遥测和下游 Manager 调用，有效 features 可发现但不构成授权；
 - run 生命周期独立于连接，重连通过原子快照和 run_seq 恢复；
 - 同一披露策略覆盖实时、快照和历史；
-- 附件以 HTTP/Object Storage 数据面上传、WebSocket 只传 ID；Runtime 批量解析
-  不可变版本与受控句柄，幂等接受边界、Model 输入策略、历史快照、retention
-  claim 和 Session 删除 release 均有可观察契约；
+- 附件由 mate-service 单文件 multipart 接收，正文存 OBS、元数据存
+  openGauss，WebSocket 只传 ID；Runtime 只经内部 resolve/content 读取，
+  历史仅保存元数据快照；
 - Attachment ID 严格匹配 `^attachment_[0-9A-Za-z]{24}$`，由 Attachment
   Service 服务端签发并以大小写敏感唯一约束保证部署级全局唯一，`READY` 后
   不改绑、删除后不复用，且格式或唯一性不构成授权；
@@ -2285,6 +2346,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.11.0 | 2026-08-03 | 将附件存储收敛为 OBS 正文 + openGauss 元数据；固定单文件 multipart、`X-Attachment-Size`、`Prefer: respond-async/wait=N`、201/202/422/503 与 GET 轮询；定义 24 小时未引用清理、单向 referenced、内部 resolve/content 和跨 Pod 共享；删除 content_version、面向读取/保留的复杂 claim/reservation/lease、确定性存储路径及 Runtime 直连 OBS，保留 Worker 的短任务租约；同步 AsyncAPI 2.9.0 和客户端指南 1.5.0 |
 | 1.10.0 | 2026-08-03 | 将 `attachment_id` 冻结为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确其由 Attachment Service 服务端签发、大小写敏感、在服务部署内全局唯一、碰撞重签、READY 后不改绑且删除后不复用；补充 binary 唯一约束、逐字节比较、格式与唯一性不等于授权及边界测试；同步 AsyncAPI 2.8.0 和客户端指南 1.4.0 |
 | 1.9.0 | 2026-08-03 | 参考 Anthropic Managed Agents 服务端生成的 `agent_` 资源 ID 示例，将 Campus `agent_id` 冻结为 `^agent_[0-9A-Za-z]{24}$`，将 CampusModel `model_id` 冻结为 `^model_[0-9A-Za-z]{24}$`；明确两者大小写敏感、不透明、由各自管理服务生成，区分 `model_` 资源 ID 与私有 Provider model ID，并增加大小写敏感文件系统、case-fold 冲突和目录/manifest 精确匹配门禁；同步 AsyncAPI 2.7.0 和客户端指南 1.3.0 |
 | 1.8.0 | 2026-08-03 | 对外统一为 CampusAgent / agent-service，规范 URL 收敛为 `/agent-service/v1/ws/chat`；Managed 资源目录改为 `.campusagent`；定义既有内部网关认证、用户 IP 粘性、单 Pod 连接 generation 接管、数据库 RuntimeSessionStore 和 Pod 重启 interrupted 语义；收窄 Chat 方法集，补齐纯附件消息、Tool 脱敏/截断、Response-before-Event 契约，并同步 AsyncAPI 2.6.0 和客户端指南 1.2.0 |

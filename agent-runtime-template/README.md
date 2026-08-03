@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.2.0 |
+| 文档版本 | 1.3.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee` |
@@ -79,6 +79,8 @@ Registry 的每 Pod 进程内 materialization cache key 为：
 - 新建、恢复 Session 时的 revision 固定规则；
 - `RuntimeSessionStore` 的逻辑持久化边界、完整内容块提交与
   `interrupted` 恢复语义；
+- CampusMate Attachment Service 的共享 OBS/openGauss 数据边界，以及
+  Agent Runtime 无本地附件存储、只经内部接口读取的约束；
 - `agent-service` 多副本下每 Pod Template/Session 所有权、单活动
   连接接管与可信网关用户 IP 粘性路由的限制；
 - 与现有每 Session 独立 `Agent` 的迁移路径，以及与无状态
@@ -213,7 +215,8 @@ Redis owner、Session 路由 Header、Pod 间转发或分布式 active-run lease
 
 `RuntimeSessionStore` 是 Session 持久化的唯一逻辑边界，使用数据库
 保存 Session、Message、RunRecord、history sequence、幂等结果、
-Agent/Model/bundle revision 和 attachment claim。目标设计不生成
+Agent/Model/bundle revision，以及 User Message 内的 AttachmentContent
+元数据快照。目标设计不生成
 Session JSONL；物理表结构不在本文定义。
 
 同一 Pod 内，新的 `resume` 在 Session lifecycle slot 上原子增加
@@ -226,6 +229,41 @@ Pod 重启后，新进程从 `RuntimeSessionStore` 按 exact bundle revision
 active RunRecord，必须把 RunRecord 及相关 Message 稳定标记为
 `interrupted`。Runtime 只在 `text_end`、`thinking_end`、`toolcall_end`
 等完整内容块边界持久化；未到完整块边界的尾部不承诺保存。
+
+### 4.2 CampusMate 附件边界
+
+![Agent Runtime 与 CampusMate Attachment Service 边界](runtime_attachment_service_boundary.svg)
+
+[PlantUML 源码](diagram.puml#L553)
+
+附件不属于 `AgentRuntimeTemplate`、bundle revision 或 Agent cwd。最终客户端把
+文件上传给 CampusMate `mate-service` 承载的 Attachment Service；该服务只把正文
+写入共享私有 OBS，把状态、归属、可信 MIME、大小、SHA-256 和
+`attachment_id -> object_key` 映射写入共享 openGauss。CampusMate 任一 Pod 都从
+这两个共享权威恢复，不依赖本地文件、临时目录或 Pod 粘性。
+
+`agent-service` 收到 `chat.send.attachment_ids[]` 后只调用两个内部接口：
+
+```text
+POST /mate-service/internal/v1/attachments:resolve
+GET  /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/content
+```
+
+批量 `resolve` 在一个 openGauss 事务中按调用服务和 `session_id` 全有或全无地
+校验 READY、归属和未过期状态，并单向标为已引用、保留首次引用时间、
+清空过期时间；响应只返回稳定
+元数据，不返回 `object_key`、OBS URL 或凭据。`content` 由 CampusMate 从 OBS
+流式代理，Runtime 使用接受时保存的 `sha256` 复核正文。Runtime 不直连 OBS，
+不把附件写到 `revisionRoot`、cwd、本地缓存或临时文件；Pod 内只保留有界流式
+缓冲，目标上限为 1 MiB。
+
+目标协议不引入 `content_version`、跨服务 XA、reservation 或复杂 retention claim。
+不可覆盖的 OBS 对象、不可复用的 `attachment_id` 和 SHA-256 共同固定内容身份；
+`RuntimeSessionStore` 只随 User Message 保存
+`attachment_id/filename/media_type/size_bytes/sha256` 快照。已被 Session 引用的
+附件不能单独删除；Session 删除由 CampusMate 进入 `DELETING` 并清理正文和
+可用元数据，最终保留 `DELETED` tombstone。附件存储可以跨 Pod 使用，不改变 active run 仍只属于一个
+`agent-service` Pod 的约束。
 
 ## 5. AgentRuntimeTemplate 数据合约
 
@@ -961,9 +999,10 @@ revision root；如为兼容保留 cwd，只能作为诊断字段。
 
 `RuntimeSessionStore` 必须由数据库实现，并支持唯一约束、CAS
 generation、原子 revision 引用计数和按 history sequence 提交。它逻辑
-保存 Session、Message、RunRecord、幂等结果、Agent/Model/bundle
-revision 与 attachment claim；目标设计不生成 `<session-id>.jsonl`。
-物理表、索引和分区策略留待数据库设计。
+保存 Session、Message、RunRecord、幂等结果、Agent/Model/bundle revision 与
+User Message 的 AttachmentContent 元数据快照；目标设计不生成
+`<session-id>.jsonl`，也不保存 OBS object key、URL、读取凭据或附件正文。物理表、
+索引和分区策略留待数据库设计。
 
 run 被接受时先持久化 `active` RunRecord；Message 内容只在内容块
 完整结束时与对应 history sequence 原子提交，run 终态再单独提交。
@@ -1198,7 +1237,8 @@ session_create_duration_seconds{cache_result}
 | `AgentSession.initialize()` | CampusAgent Managed 路径接收 TemplateLease、ModelDescriptor 和恢复状态，不再扫描/构建静态资源 | 架构改造 |
 | `ManagedAgentSessionFactory` | acquire/pin Template；创建 per-session Tool binding 和独立 Agent/Session | 架构改造 |
 | `SessionPool.getOrCreate()` | 改为每 Pod `session_id -> SessionLifecycleSlot`，统一 create/resume/run/evict/delete；完成持久化且持有 owner generation 后才发布 ready | 并发修复 |
-| `RuntimeSessionStore` | 使用数据库持久化 Session/Message/RunRecord/history sequence/幂等结果/revision/attachment claim；不生成 Session JSONL | 架构改造 |
+| `RuntimeSessionStore` | 使用数据库持久化 Session/Message/RunRecord/history sequence/幂等结果/revision 和 AttachmentContent 元数据快照；不保存附件正文、OBS 定位或 Session JSONL | 架构改造 |
+| CampusMate Attachment Service | 共享 openGauss 保存元数据和 `attachment_id -> object_key` 映射，私有 OBS 保存不可覆盖正文；向 Runtime 提供内部批量 resolve 和 content 流 | 架构改造、安全加固 |
 | WebSocket Session adapter | 同 Pod 只允许一个活动读写连接；resume 递增 `connection_generation` 并以 `4409 SESSION_REPLACED` 关闭旧连接 | 并发修复 |
 | `agent-service` 部署 | 每 Pod 独立 Template Registry/SessionPool/RunHub；可信网关按最终用户 IP 粘性路由，不承诺跨 Pod active run 接管 | 产品约束 |
 | `Agent` | 第一阶段继续每 Session 创建；静态字段由 Template 注入 | 兼容迁移 |
@@ -1278,8 +1318,16 @@ session_create_duration_seconds{cache_result}
   `4409 SESSION_REPLACED` 关闭旧连接；
 - 普通 WebSocket 断开只解除订阅，同 Pod active run 继续执行；
 - `RuntimeSessionStore` 保存 Session、Message、RunRecord、history sequence、
-  幂等结果、Agent/Model/bundle revision 和 attachment claim，且不生成
-  `<session-id>.jsonl`；
+  幂等结果、Agent/Model/bundle revision 和 AttachmentContent 元数据快照，且不
+  保存附件正文、OBS 定位或生成 `<session-id>.jsonl`；
+- 两个不同 `agent-service` Pod 都只能通过 CampusMate 内部 resolve/content 接口
+  读取同一 `attachment_id`；CampusMate 以共享 openGauss 与 OBS 提供跨 Pod
+  权威，Runtime 不直连 OBS、不写本地文件或临时文件，流式缓冲始终受 1 MiB
+  上限约束；
+- resolve 不返回 object key、URL 或凭据，整批附件必须同时 READY、匹配当前
+  Session 且未过期；Runtime 历史只保存
+  `attachment_id/filename/media_type/size_bytes/sha256`，不出现
+  `content_version`、reservation 或复杂 retention claim；
 - 模拟 Pod 重启后，遗留 active RunRecord 和相关 Message 变为
   `interrupted`，并使用 `RUN_INTERRUPTED`；
 - 只有到达 `text_end`、`thinking_end`、`toolcall_end` 等边界的完整块
@@ -1334,6 +1382,7 @@ session_create_duration_seconds{cache_result}
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.3.0 | 2026-08-03 | 同步 CampusMate Attachment Service 的简化存储边界：共享私有 OBS 保存正文、共享 openGauss 保存元数据和对象映射；Agent Runtime 只调用内部批量 resolve/content 并使用有界流式缓冲，不直连 OBS 或写本地文件；RuntimeSessionStore 只保存 AttachmentContent 快照，不引入 content_version、reservation 或复杂 retention claim |
 | 1.2.0 | 2026-08-03 | 统一 Agent 与 Model 资源标识：分别使用 `agent_` / `model_` 加 24 位大小写敏感字母数字，明确其为 Manager 签发的 opaque ID，规定 Template、Session 与 Model Manager 的比较和映射边界，并增加大小写敏感 Repository、case-fold 冲突与 manifest 精确匹配门禁 |
 | 1.1.0 | 2026-08-03 | 对外统一为 CampusAgent Runtime / `agent-service`；Managed 资源改为 `.campusagent` 且不双读 Legacy `.campusclaw`；Session 持久化改为数据库 `RuntimeSessionStore`；补充每 Pod Template/revision pinning、用户 IP 粘性限制、单连接 generation 接管和 Pod 重启 `interrupted`/完整块恢复语义 |
 | 1.0.0 | 2026-08-03 | 首版；定义不可变 AgentRuntimeTemplate、bundle revision、compile/publish/load API、single-flight 预加载、三层变更感知、Session pinning、缓存与 GC，以及向无状态 AgentRunner 的迁移边界 |

@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.0 |
+| 文档版本 | 1.5.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.8.0 |
-| Manager 设计 | [`README.md`](README.md)，1.10.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.9.0 |
+| Manager 设计 | [`README.md`](README.md)，1.11.0 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -804,8 +804,8 @@ Session 是否已经提交。客户端必须建立新连接，用新 RequestFram
 | `FORBIDDEN` | 隐藏无权限功能并修复授权 |
 | `RUN_ACTIVE` | 等待终态，或对返回/已知 run 执行 steer/abort |
 | `RUN_NOT_FOUND` | 调用 `session.get` 或 `chat.history` 对账 |
-| `INVALID_ATTACHMENT` | 重新上传或重新绑定附件 |
-| `ATTACHMENT_NOT_READY` | 按 retry_after_ms 等待上层处理为 READY，再以相同业务负载重试 |
+| `INVALID_ATTACHMENT` | 移除引用并重新上传；不探测资源是否属于其他 Session |
+| `ATTACHMENT_NOT_READY` | 通过 CampusMate Attachment Service 状态端点轮询，READY 后再以相同业务负载重试 |
 | `ATTACHMENT_NOT_SUPPORTED` | 按当前 ModelSummary.input 更换附件或 Model |
 | `MODEL_NOT_ALLOWED` | 调用 `models.list` 后重新选择 |
 | `MANAGER_UNAVAILABLE` | 仅在 retryable 时按 retry_after_ms 重试 |
@@ -848,69 +848,119 @@ WebSocket Close 处理：
 
 ## 12. 附件
 
-### 12.1 先上传，再发送引用
+### 12.1 先走 HTTP 上传，WebSocket 只传 ID
 
-CampusAgent Runtime WebSocket 不上传二进制内容。Attachment Service 由
-`mate-service` 承载；调用方必须先通过它
-完成上传、扫描、最终用户归属和 Session 绑定，再把 `attachment_ids[]` 放入
-`chat.send`：
+CampusAgent Runtime WebSocket 不上传文件正文。附件数据面固定由
+`mate-service` 中的 CampusMate Attachment Service 承载：
 
 ```text
-select file
-  -> create upload intent for session_id
-  -> HTTP multipart upload or Object Storage direct upload
-  -> finalize upload
-  -> poll or subscribe until READY
-  -> WebSocket chat.send with attachment_ids
+browser or CampusMate client
+  -> HTTPS multipart POST to mate-service
+  -> mate-service streams bytes to shared private OBS
+  -> scanner marks openGauss metadata READY
+  -> mate-service sends attachment_ids over CampusAgent WebSocket
+  -> agent-service resolves and streams content through mate-service internal APIs
 ```
 
-本专题不定义 `mate-service` Attachment REST URL、Header 或鉴权契约，
-`agent-service` 也不提供上传端点。`mate-service` 可以接收 HTTP multipart，
-也可以发放预签名 URL 让客户端直传 Object Storage 再 finalize。
-无论采用哪种上传方式，上层返回的资源状态至少遵循：
+![附件上传、引用与模型输入流程](managed_attachment_reference_lifecycle.svg)
 
-```text
-UPLOADING -> PROCESSING -> READY
-                  |          |
-                  +-> BLOCKED+-> EXPIRED or DELETED
-                  +-> FAILED
+[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L720)
+
+`agent-service` 不提供上传端点，不直连 OBS 或 openGauss。v1 也不给
+浏览器发放 OBS 地址或预签名 URL。文件名、MIME、大小、摘要、Object Key、
+凭据和 Base64 都不进入 `chat.send`；WebSocket 只携带有序
+`attachment_ids`。
+完整 HTTP Schema 见
+[`campusmate-attachment-service/attachment-api.openapi.yaml`](../campusmate-attachment-service/attachment-api.openapi.yaml)。
+
+### 12.2 上传与等待扫描
+
+上层客户端通过一次 multipart 请求上传一个文件：
+
+```http
+POST /mate-service/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/attachments HTTP/1.1
+Host: api.example.com
+Authorization: Bearer <campusmate-access-token>
+Content-Type: multipart/form-data; boundary=...
+X-Attachment-Size: 182734
+Prefer: respond-async
+
+--...
+Content-Disposition: form-data; name="file"; filename="orders.pdf"
+Content-Type: application/pdf
+
+<file bytes>
+--...--
 ```
 
-只有 `READY` 可以首次发送。上传响应可向 UI 展示 `attachment_id`、display name、
-扫描后的 MIME、实际字节数和状态，但 `chat.send` 只提交 ID；不得把 URL、路径、
-MIME、文件名、size、hash、凭据或 Base64 复制到 WebSocket Frame。
+`X-Attachment-Size` 是单个 `file` part 的实际字节数，不是包含
+multipart boundary 和表单头的 HTTP `Content-Length`。它必须位于
+`1..20971520`（20 MiB）；声明大于或小于实际值都会失败。服务端在
+OBS SDK 读取声明长度后还会确认 `file` part 已到 EOF，不允许小报长度时
+尾部字节被忽略。客户端不得
+为“方便重试”自行生成 `attachment_id`。
 
-正式 `attachment_id` 必须由 Attachment Service 返回并严格匹配
-`^attachment_[0-9A-Za-z]{24}$`，总长 35。它大小写敏感且不透明；客户端必须
-原样保存和发送，不得自行生成、转小写、解析后缀或依赖后缀排序。同一上传
-流程的重试沿用服务端返回的同一 ID，新上传使用新 ID；删除后的 ID 永不复用。
-客户端可以把正则用于本地输入防错，但格式合法或知道 ID 都不代表有权使用，
-Runtime 仍会按调用服务身份和当前 `session_id` 校验。
+服务端在授权 Session 后生成
+`^attachment_[0-9A-Za-z]{24}$` 格式的大小写敏感、不透明 ID，将原始
+字节流式写入 OBS，再进入安全扫描。上传请求不保证“重试返回同一 ID”；
+没有收到确定响应时重新上传会获得新 ID，遗留且未引用的附件最多保留
+24 小时。
 
-### 12.2 按有效 Model 输入策略预检
+`Prefer` 的最小客户端处理如下：
 
-connect、`models.list` 和 `model.set` 返回同一种 `ModelSummary.input`。UI 在选择
-或上传前检查：
+| 请求 | 响应行为 |
+|---|---|
+| 省略 `Prefer` | OBS 写入并提交 `PROCESSING` 后返回 `202 + Location + Retry-After` |
+| `Prefer: respond-async` | 同上，返回 `202 + Location + Retry-After` |
+| `Prefer: wait=N` | 最多等待 `min(N, 10)` 秒；期间进入 `READY` 返回 `201`，仍在处理返回 `202` |
 
-- `modalities` 是否包含附件所需的 `image` 或 `document`；
-- 扫描后的 MIME 是否在 `attachment_media_types`；
-- 数量是否不超过 `max_attachments`；
-- 单文件和总字节数是否分别不超过两个 byte limit。
+`wait=N` 窗口内进入 `BLOCKED` 或终态 `FAILED` 时，返回规范性
+OpenAPI 中的 `422` 或 `503` 错误，不伪装成仍在处理的 `202`。
+扫描依赖只是暂时不可用时，服务端保持 `PROCESSING`，客户端继续按
+`Retry-After` 轮询。
 
-这是用户体验预检，不是授权结论。Runtime 仍使用 Attachment Service 返回的
-可信元数据重新检查；客户端文件扩展名和浏览器 `File.type` 都不可信。切换
-Model 后必须按新的 ModelSummary 重新预检尚未发送的附件。
+`202` 不表示文件已经可供模型使用。客户端根据 `Location` 调用：
 
-这些上限实际作用于下一次模型调用的完整 AttachmentContextPlan：当前有效
-transcript 中仍会进入 Context 的历史附件，加上本次新附件。`models.list` 可以
-列出 Agent 允许但不兼容当前历史的模型；调用 `model.set` 时 Runtime 会重新
-计算 plan，不兼容则返回 `ATTACHMENT_NOT_SUPPORTED` 并保持原模型。新
-`chat.send` 也会在 accepted 前检查“历史 + 新附件”。客户端不能通过换模型让
-Runtime 静默忽略旧附件；需要显式创建分支或使用上层提供的 Context 压缩流程。
+```http
+GET /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+```
 
-### 12.3 发送带附件的消息
+只有上传响应或状态查询返回 `status=READY` 后才能提交
+`chat.send`。`PROCESSING` 继续按 `Retry-After` 轮询；`BLOCKED`、
+`FAILED`、`DELETING` 或
+`DELETED` 都不可发送。客户端必须原样保留 Attachment Service 返回的
+ID，不转换大小写、解析后缀或依赖其排序特征。
+安全策略可在事后将 `READY` 撤销为 `BLOCKED`；客户端不得把早先的
+`READY` 作为永久授权，Runtime 在每次接受新消息时仍会重新 resolve。
 
-选择 READY 附件后，保持现有字符串 `message` 线协议：
+### 12.3 OBS 正文与 openGauss 账本的边界
+
+Attachment Service 使用“文件仓库 + 元数据账本”：
+
+- 共享私有 OBS Bucket 保存 PDF、JS 等原始文件字节；
+- 共享 openGauss 只保存 `attachment_id`、`session_id`、内部随机
+  Object Key、状态、字节数和 SHA-256 等元数据，不保存 BLOB/BYTEA 正文；
+- Pod 内存只保留单上传不超过 1 MiB 的在途流式缓冲，不使用 Pod 本地目录、
+  `/tmp`、临时文件或完整 `byte[]`；
+- 一个 `attachment_id` 只绑定一个 `session_id` 和一份不可覆盖的 OBS
+  内容；内容变化必须重新上传并生成新 ID；
+- PDF、JavaScript 和其他文件均是不可信内容。`mate-service`、
+  `agent-service` 和 Provider 适配路径都不得执行 JS。
+
+因为 openGauss 和 OBS 在所有 Pod 间共享，文件在 Pod A 上传后，Pod B
+可以查询状态，agent-service Pod C 也可以通过 Attachment Service 读取。
+任何进程缓存都不是权威来源，缓存未命中必须回源 openGauss/OBS。
+
+### 12.4 发送时的批量解析与内容读取
+
+上传前可以根据 `ModelSummary.input` 预检 MIME、数量、单文件和总字节
+上限，但这只是 UI 体验优化。浏览器 `File.type` 和扩展名都不可信；
+Runtime 仍使用 Attachment Service 返回的检测 MIME 和完整性数据校验。
+该预检应同时考虑仍会进入 Context 的历史附件和本次新附件。如果目标
+Model 不兼容当前有效历史，`model.set` 返回
+`ATTACHMENT_NOT_SUPPORTED` 并保持原模型；Runtime 不会静默丢弃历史附件。
+
+附件进入 `READY` 后，发送字符串 `message`、有序 ID 或两者：
 
 ```json
 {
@@ -925,14 +975,33 @@ Runtime 静默忽略旧附件；需要显式创建分支或使用上层提供的
 }
 ```
 
-`attachment_ids` 省略等价于空数组；非空数组的顺序会成为用户 Message 中附件
-块的顺序，并参与幂等负载比较。附件引用是协议 2 的标准可选字段，不需要声明
-capability。当前版本只有 `chat.send` 接受附件，`chat.steer` 不接受。
-仅附件时省略 `message` 或传空字符串；Runtime 不会为模型补隐藏文本。
+`attachment_ids` 省略等价于空数组；非空数组的顺序会成为用户 Message
+中的附件块顺序，并参与幂等负载比较。附件引用是协议 2 的标准可选字段，
+不需要声明 capability。当前版本只有 `chat.send` 接受附件，
+`chat.steer` 不接受。仅附件时省略 `message` 或传空字符串；Runtime
+不会为模型补隐藏文本。
 
-Runtime 对全部 ID 做一次批量、保序、全有或全无解析。只有全部附件都已授权、
-绑定当前 Session、处于 READY、固定为不可变内容版本，并符合当前 Model 输入
-策略后，才会持久化用户 Message、分配 run 并返回：
+`agent-service` 会以服务身份调用：
+
+```http
+POST /mate-service/internal/v1/attachments:resolve
+Content-Type: application/json
+
+{
+  "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "attachment_ids": ["attachment_011CZm8VpK4rNs6WtY2hDqfB"]
+}
+```
+
+Attachment Service 在一个短 openGauss 事务中校验全部记录都属于当前
+Session、处于 `READY`、未删除且未过期。任一项失败则整批回滚；全部成功
+后原子设置 `referenced=true`、
+`referenced_at=COALESCE(referenced_at, now())`、`expires_at=NULL`，并按请求顺序返回
+`attachment_id/filename/media_type/size_bytes/sha256`。这个标记是单向的；
+如果之后 RuntimeSessionStore 提交失败，附件会偏保守地保留到 Session
+删除，不会因为提早回收而使已接受历史缺失正文。
+
+全部解析成功后，Runtime 才持久化用户 Message、分配 run 并返回：
 
 ```json
 {
@@ -947,26 +1016,34 @@ Runtime 对全部 ID 做一次批量、保序、全有或全无解析。只有�
 }
 ```
 
-任一附件失败都不会建立部分 run。若 Response 丢失，建立新连接恢复后，使用新
-RequestFrame `id`、原 `idempotency_key` 和完全相同的 message、附件 ID 顺序、
-thinking 重新发送。已接受结果优先返回原 `run_id/user_message_id`，即使附件
-此后过期或 run 仍 active；接受前错误不占用幂等键。
+任一附件失败都不会建立部分 run。运行期读取使用固定内部端点：
 
-### 12.4 错误和 UI 动作
+```http
+GET /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/content
+X-Expected-Attachment-SHA256: <sha256 returned by resolve>
+```
+
+Attachment Service 查询 openGauss 取得内部 Object Key，再从 OBS 向
+`agent-service` 流式代理原始字节。Runtime 在流经时重新校验字节数和
+SHA-256；它不会获得 Object Key、OBS URL、ETag 或存储凭据。
+
+若 `chat.send` Response 丢失，建立新连接恢复后，使用新 RequestFrame
+`id`、原 `idempotency_key` 和完全相同的 message、附件 ID 顺序、
+thinking 重新发送。已接受结果返回原 `run_id/user_message_id`。
+
+### 12.5 错误、历史和删除
 
 | code | UI/调用方动作 |
 |---|---|
-| `INVALID_ATTACHMENT` | 不区分不存在、无权、未绑定、删除或过期；移除引用并由上层重新上传/绑定，不能探测 ID |
-| `ATTACHMENT_NOT_READY` | 保留选择，按 `retry_after_ms` 查询上层状态；只有 READY 后用原业务负载重试 |
+| `INVALID_ATTACHMENT` | 不区分不存在、无权、跨 Session、删除、过期、`BLOCKED` 或 `FAILED`；移除引用并重新上传，不能探测 ID 或安全状态 |
+| `ATTACHMENT_NOT_READY` | 保留选择，通过公共 GET 状态端点轮询；只有 READY 后重试 `chat.send` |
 | `ATTACHMENT_NOT_SUPPORTED` | 根据当前 ModelSummary 提示 MIME/数量/大小不支持；更换附件或 Model |
 | `MANAGER_UNAVAILABLE` | 仅在 `retryable=true` 时退避；不得改为把 URL/Base64 内联发送 |
 
-Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请求错误；客户端会
-收到 `run.completed(outcome="error")`，用户消息和附件历史仍保留。
+Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请求错误；客户端
+会收到 `run.completed(outcome="error")`，用户消息和附件历史仍保留。
 
-### 12.5 历史和删除
-
-`chat.history` 的 role=user Message 会返回接受时冻结的 AttachmentContent：
+`chat.history` 的 role=user Message 会返回接受时的公共元数据快照：
 
 ```json
 {
@@ -978,7 +1055,6 @@ Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请�
     {
       "type": "attachment",
       "attachment_id": "attachment_011CZm8VpK4rNs6WtY2hDqfB",
-      "content_version": "version-01",
       "filename": "orders.pdf",
       "media_type": "application/pdf",
       "size_bytes": 182734,
@@ -999,18 +1075,23 @@ Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请�
 ```
 
 文本若存在必须是第一块且非空；附件块顺序与接受时
-`attachment_ids` 一致。纯附件历史不包含空 TextContent。
+`attachment_ids` 一致。纯附件历史不包含空 TextContent。快照字段固定为
+`attachment_id/filename/media_type/size_bytes/sha256`；
+RuntimeSessionStore 不保存文件正文、Object Key、ETag、OBS URL 或凭据。
+客户端只把 filename 当作经过转义的显示文本，不能当作本地路径。v1
+不定义公共附件下载接口，历史也不返回下载 URL。
 
-客户端只把 filename 当作显示文本，不能当成本地路径。历史不会返回下载 URL、
-read handle、对象存储 key 或 Provider file ID；需要下载时向上层 Attachment
-Service 单独申请经过授权的短期下载能力。公开 `sha256` 始终对应原始不可变
-内容；OCR、文本抽取或供应商上传等派生制品使用服务端内部的独立版本和摘要，
-客户端不能用公开 sha256 校验不同的派生字节。
+未被 Message 引用的附件可调用：
 
-删除附件选择只影响尚未发送的草稿。已接受 Message 的内容版本至少保留到上层
-删除整个 Session；归档/恢复不会释放。Session 删除通过独立控制面发起，不是
-WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 run，客户端
-不得把被撤销附件静默从历史中删掉后重新生成不同答案。
+```http
+DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+```
+
+Attachment Service 将其标记为 `DELETING`，异步删除 OBS 对象后进入
+`DELETED`。已引用附件的单独删除返回
+`409 ATTACHMENT_REFERENCED`；它们只在上层删除整个 Session 时一并清理。
+删除不可恢复，重新使用必须重新上传并获得新 ID；`DELETED` 记录作为永久
+ID tombstone 保留，删除后也不复用 ID。
 
 ## 13. 实现检查表
 
@@ -1032,7 +1113,7 @@ WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 
   本地阻止；`chat.steer` 只发送非空文本；
 - typed delta 无需 capability，客户端没有累计 Message/replace 分支；
 - `text/thinking/toolcall` 按 `message_id + content_index` 正确归并；
-- hidden Thinking 保留无文本占位，summary 完整替换，被抑制更新只用
+- hidden Thinking 保留无文本占位，被抑制更新只用
   `thinking_redacted` 推进 canonical `run_seq`；
 - ToolCall 生成和 Tool 执行按 `tool_call_id` 对账；
 - 每个 `tool.started` 在 run 终态前恰好收到一次 `tool.completed`；
@@ -1051,6 +1132,11 @@ WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 
 - Pod 重启后能展示 `interrupted` Message/RunRecord，不假设未完整内容块尾部
   可恢复；客户端不假设 IP 粘性等于跨 Pod run owner；
 - Request 超时使用新 request ID 和原 idempotency key；
+- 使用 `POST /mate-service/v1/sessions/{session_id}/attachments` 上传唯一
+  `file` part，`X-Attachment-Size` 为 `1..20971520` 且精确等于文件字节数；
+  SDK 读满声明长度后仍校验 file-part EOF，小报长度不能被截断接受；
+- 能处理默认/`respond-async` 的 `202`、`wait=N` 的最多 10 秒等待，
+  并通过 `Location` 指向的 GET 端点轮询到终态；
 - 上传状态未到 READY 时不发送；只接受 Attachment Service 返回且匹配
   `^attachment_[0-9A-Za-z]{24}$` 的 ID，按原始大小写保存和比较，不自行生成、
   解析或规范化；按 ModelSummary.input 预检 MIME、数量和字节，WebSocket 只
@@ -1062,7 +1148,8 @@ WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 
 - model.set 遇到历史附件不兼容时保持原模型；chat.send 的预检包含有效历史与
   新附件，客户端不假设 Runtime 会为适配模型静默丢弃历史内容；
 - 已接受附件的 Response 丢失时用原 ID 顺序和原幂等键重试，不重新上传或改写
-  业务负载；历史 filename 只作显示，下载另走上层短期授权接口；
+  业务负载；历史只保留 `attachment_id/filename/media_type/size_bytes/sha256`，
+  filename 只作显示；v1 不定义公共下载接口；
 - create connect 响应丢失时用相同 Session/Agent/Model 重试 create，不改用
   resume；
 - `full_thinking` 只有在有效 capability 回显后才进入 UI；
@@ -1085,7 +1172,7 @@ pi-mono-java 固定基线的当前行为是：
   [`AssistantMessageEvent.java#L44-L164`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java#L44-L164)；
 - 当前 UserMessage 虽接受 ContentBlock 列表，但联合类型只有
   text/image/thinking/toolCall，ImageContent 保存 base64；固定基线没有通用
-  attachment ID、不可变版本或读取租约：
+  attachment ID、上传状态或外部内容读取适配：
   [`UserMessage.java#L20-L31`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/UserMessage.java#L20-L31)、
   [`ContentBlock.java#L17-L24`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ContentBlock.java#L17-L24)、
   [`ImageContent.java#L9-L18`](https://github.com/superheromeZzh/pi-mono-java/blob/1f7a5423219edfa4519d8719f1cc8a188ed72873/modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java#L9-L18)；
@@ -1094,13 +1181,14 @@ pi-mono-java 固定基线的当前行为是：
 
 本文全部 v2 交互都是目标设计，尚未实现。typed delta、`user_message_id`、
 Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecord、附件
-解析/租约/输入装配属于架构改造；服务认证、凭据隔离、thinking 投影和附件
+批量解析/流式输入装配属于架构改造；服务认证、凭据隔离、thinking 投影和附件
 控制面/数据面边界属于安全加固。
 
 ## 15. 版本历史
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.5.0 | 2026-08-03 | 固定 CampusMate Attachment Service 单 multipart 上传、`X-Attachment-Size`、`Prefer` 异步/限时等待和 GET 轮询契约；明确 OBS 正文、openGauss 元数据、无本地文件的跨 Pod 边界；将 Runtime 收敛为内部批量 resolve/content 流式读取和五字段历史快照，不向 Runtime 披露 Object Key 或 OBS 凭据；同步 AsyncAPI 2.9.0 和 Manager 1.11.0 |
 | 1.4.0 | 2026-08-03 | 将 `attachment_id` 收敛为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 ID 只能由 Attachment Service 签发、大小写敏感且不透明，客户端必须原样保存、不得自行生成或解析，删除后不复用，且格式合法不代表获得 Session 授权；同步 AsyncAPI 2.8.0 和 Manager 1.10.0 |
 | 1.3.0 | 2026-08-03 | 将 `agent_id` 收敛为 `^agent_[0-9A-Za-z]{24}$`、`model_id` 收敛为 `^model_[0-9A-Za-z]{24}$`；明确资源 ID 大小写敏感、不透明、由各自管理服务生成，客户端不解析后缀或用 Provider 模型名代替，并按 create/resume 语义核对响应 ID；同步 AsyncAPI 2.7.0 和 Manager 1.9.0 |
 | 1.2.0 | 2026-08-03 | 统一 CampusAgent / agent-service 及规范 URL；将直连边界收窄为 mate-service/已授权服务端，认证复用既有内部网关；将方法集收敛为八个，补齐纯附件、text-only steer、Tool 脱敏/截断、Response-before-Event、单连接 generation 接管、数据库权威历史、IP 粘性限制和 Pod 重启 interrupted 恢复；同步 AsyncAPI 2.6.0 和 Manager 1.8.0 |

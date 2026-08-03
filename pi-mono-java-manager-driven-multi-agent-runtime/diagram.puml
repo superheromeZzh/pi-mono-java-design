@@ -718,7 +718,7 @@ end note
 @enduml
 
 @startuml managed_attachment_reference_lifecycle
-title Managed attachment reference and model input lifecycle
+title Managed attachment OBS-backed reference lifecycle
 
 ' Source evidence (pi-mono fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc):
 ' packages/agent/src/agent.ts, prompt(), lines 336-395
@@ -729,11 +729,13 @@ title Managed attachment reference and model input lifecycle
 ' modules/ai/src/main/java/com/campusclaw/ai/types/ImageContent.java, lines 9-18
 ' docs/plans/ws-chat-followups.md, lines 12-37
 ' Observed behavior: both baselines can carry inline image content but do not
-' define generic attachment references, immutable read handles, or retention claims.
-' Target design: mate-service owns attachment upload and authority; WebSocket
-' carries globally unique opaque IDs and Runtime accepts only an all-or-nothing immutable batch.
-' Design reason: keep large-object transfer off the Chat control plane, prevent
-' client metadata forgery and TOCTOU, and preserve reproducible Session history.
+' define a generic attachment_id or an external Attachment Service.
+' Target design: mate-service streams original bytes to shared OBS, records
+' authority and integrity metadata in shared openGauss, and exposes fixed HTTP
+' upload, batch resolve, and content streaming APIs.
+' Design reason: keep large-object transfer off the Chat control plane, support
+' cross-Pod reads without local files, prevent metadata forgery, and retain
+' reproducible public metadata snapshots in Runtime history.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -749,89 +751,133 @@ skinparam sequence {
 }
 
 actor "End user" as User
-participant "mate-service" as Upstream
+participant "CampusMate client" as Client
 participant "mate-service\nAttachment Service" as Attach
-database "Object Storage" as ObjectStore
+participant "background worker" as Worker
+database "openGauss\nmetadata ledger" as DB
+database "private OBS\ncontent store" as OBS
+participant "mate-service\nRuntime client" as Upstream
 participant "ChatWebSocketAdapter" as WS
 participant "ManagedSessionTransport" as Transport
-participant "AttachmentResolver" as Resolver
-database "Runtime Session Store" as Store
+database "RuntimeSessionStore" as Store
 participant "AttachmentInputAssembler" as Assembler
 participant "Model Manager Provider" as Model
 
-User -> Upstream : request file upload
-Upstream -> Attach : create upload intent and bind session_id
-Attach --> Upstream : globally unique attachment_id\nand upload target
-User -> ObjectStore : upload bytes via HTTP
-Upstream -> Attach : finalize upload
-Attach -> ObjectStore : read and verify bytes
-Attach -> Attach : sniff MIME, hash, scan,\nfreeze content_version, mark READY
-Attach --> Upstream : READY snapshot
+User -> Client : select one file
+Client -> Attach : POST /v1/sessions/{session_id}/attachments\nmultipart file + X-Attachment-Size\nPrefer respond-async or wait=N
+Attach -> Attach : authorize user and session;\nrequire size 1..20 MiB
+Attach -> Attach : generate opaque attachment_id\nand random internal object key
+Attach -> DB : INSERT UPLOADING metadata
+DB --> Attach : committed
+Attach -> OBS : put(objectKey, bounded stream, declared length)
+Attach -> Attach : count bytes, verify file-part EOF,\nand compute SHA-256 with backpressure
 
-Upstream -> WS : chat.send(message?, attachment_ids,\nidempotency_key)
+alt upload failed or actual size mismatch
+  Attach -> OBS : delete possible residual object
+  Attach -> DB : mark FAILED
+  Attach --> Client : bounded HTTP error
+else OBS write succeeded
+  OBS --> Attach : ETag and completion
+  Attach -> DB : update PROCESSING, actual size,\ndigest and internal ETag
+  Attach --> Client : 202 + Location + Retry-After\nunless wait reaches READY
+  Worker -> DB : claim short scan lease for PROCESSING
+  Worker -> OBS : open random object key as stream
+  OBS --> Worker : bounded byte stream
+  Worker -> Worker : verify size and digest;\nsniff MIME and scan security;\nnever execute JavaScript
+  Worker -> DB : mark READY, BLOCKED, or FAILED
+  Client -> Attach : GET /v1/sessions/{session_id}/attachments/{attachment_id}
+  Attach -> DB : read authorized public state
+  DB --> Attach : status and public metadata
+  Attach --> Client : 200 attachment resource
+end
+
+User -> Client : send text, attachments, or both
+Client -> Upstream : application chat request
+Upstream -> WS : RequestFrame chat.send\nordered attachment_ids + idempotency_key
 WS -> Transport : typed SessionRequest + auth context
-Transport -> Store : lookup ACCEPTED idempotency result
+Transport -> Store : lookup accepted idempotency result
 
 alt accepted result exists with the same payload
   Store --> Transport : original run_id and user_message_id
   Transport --> WS : accepted result
-  WS --> Upstream : ResponseFrame before any origin event
+  WS --> Upstream : ResponseFrame before causal events
 else first attempt
-  Transport -> Transport : acquire Session single-writer guard\nand reject a different active run
-  Transport -> Resolver : resolve batch(service principal,\nsession_id, agent_id, model_id, IDs)
-  Resolver -> Attach : authorize, require READY,\nretain immutable versions
-  Attach --> Resolver : ordered snapshots, read handles,\nretention claims
-  Resolver --> Transport : all attachments or one safe error
-  Transport -> Transport : build history plus new attachment plan;\nvalidate frozen Model input policy
-  Transport -> Store : atomic commit user Message snapshots,\nretention records, idempotency result,\nrun and active-run reservation
-  Store --> Transport : run_id and user_message_id
-  Transport --> WS : accepted result
-  WS --> Upstream : ResponseFrame before run events
+  Transport -> Transport : acquire Session single-writer guard;\nreject a different active run
+  Transport -> Attach : POST /internal/v1/attachments:resolve\nservice token + session_id + ordered IDs
+  Attach -> DB : short transaction: lock all rows;\nrequire same session, READY,\nnot deleted, and not expired
+  alt any attachment is invalid
+    DB --> Attach : rollback all changes
+    Attach --> Transport : one safe batch error
+    Transport --> WS : failed ResponseFrame; no run
+  else all attachments are valid
+    Attach -> DB : atomically set referenced=true,\npreserve first referenced_at, expires_at=NULL
+    DB --> Attach : committed public snapshots
+    Attach --> Transport : ordered id, filename, media type,\nsize, and SHA-256
+    Transport -> Store : commit user Message snapshots,\nidempotency result, run,\nand active run state
+    Store --> Transport : run_id and user_message_id
+    Transport --> WS : accepted result
+    WS --> Upstream : ResponseFrame before run events
 
-  Transport -> Assembler : ordered snapshots and read handles
-  Assembler -> Resolver : open version-bound read leases
-  Resolver -> Attach : stream immutable content with limits
-  Attach -> ObjectStore : read fixed original object version
-  ObjectStore --> Attach : content bytes
-  Attach --> Assembler : bounded byte stream
-  Assembler -> Assembler : verify length, digest and MIME;\nconstruct provider-neutral input
-  Assembler -> Model : optional text plus ordered attachments
-  Model --> Transport : model stream
-  Assembler -> Resolver : close read leases exactly once
+    Transport -> Assembler : ordered public snapshots
+    loop each attachment
+      Assembler -> Attach : GET /internal/v1/sessions/{session_id}/\nattachments/{attachment_id}/content\nwith expected SHA-256
+      Attach -> DB : require READY, referenced,\nsame session, and matching digest
+      DB --> Attach : internal random object key
+      Attach -> OBS : open(objectKey)
+      OBS --> Attach : original byte stream
+      Attach --> Assembler : bounded proxy stream
+      Assembler -> Assembler : verify length and SHA-256;\nconstruct provider-neutral input
+    end
+    Assembler -> Model : optional text plus ordered attachments
+    Model --> Transport : model stream
+  end
 end
 
-group Session deletion control plane
-  Upstream -> Store : delete session with deletion_id
-  Store -> Store : persist DELETING tombstone;\nreject create, resume and send
-  Store -> Attach : release claims through durable outbox
-  Attach --> Store : idempotent release acknowledgement
-  Store -> Store : delete database Session records;\nretain non-reusable tombstone
+group Public deletion
+  Client -> Attach : DELETE unreferenced attachment
+  Attach -> DB : conditional update to DELETING
+  alt attachment is already referenced
+    DB --> Attach : conflict
+    Attach --> Client : 409 ATTACHMENT_REFERENCED
+  else deletion accepted
+    DB --> Attach : DELETING
+    Attach --> Client : 202
+    Worker -> OBS : delete object with retry
+    Worker -> DB : mark DELETED tombstone
+  end
 end
 
-note over Upstream,ObjectStore
-HTTP or Object Storage is the file data plane.
-The WebSocket is only the command and event control plane.
-agent-service exposes no upload endpoint.
+group Session deletion
+  Upstream -> Transport : stop or abort Runtime Session
+  Upstream -> Attach : delete all attachments for session_id
+  Attach -> DB : mark all remaining rows DELETING
+  Worker -> OBS : delete each object with retry
+  Worker -> DB : retain permanent DELETED tombstones
+end
+
+note over Client,OBS
+Clients never access OBS directly.
+No presigned upload or deterministic object path is part of v1.
+Upload retries create a new attachment_id.
+The file body exists only in OBS; openGauss stores metadata.
 end note
 
-note over Upstream,Attach
-attachment_id = attachment_ + 24 alphanumeric characters.
-It is case-sensitive and deployment-global.
-Use a binary unique constraint and reissue on collision.
-Never rebind after READY or reuse after deletion.
-Syntax and uniqueness do not grant authorization.
+note over Attach,DB
+The attachment row is a one-way Session binding.
+Referenced rows clear expires_at and cannot be deleted alone.
+If Runtime persistence later fails, conservative retention lasts
+until Session deletion; there is no release protocol.
 end note
 
-note over WS,Resolver
-The Frame never carries tenant, user, URL, path,
-MIME, filename, hash, credentials, or Base64.
-The immutable service principal comes from Upgrade auth.
+note over WS,Attach
+The WebSocket carries only ordered attachment_ids.
+agent-service never receives object keys, OBS URLs, ETags,
+storage credentials, or a complete in-memory file.
 end note
 
 note over Store,Model
-Only stable AttachmentContent snapshots enter history.
-Read handles, leases, provider file IDs, and credentials
-remain transient. Retention records reopen exact versions.
+Runtime history stores exactly attachment_id, filename,
+media_type, size_bytes, and SHA-256.
 File bodies are untrusted user data.
 end note
 @enduml

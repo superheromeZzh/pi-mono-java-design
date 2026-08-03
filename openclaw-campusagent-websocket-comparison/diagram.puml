@@ -369,3 +369,89 @@ note bottom of cc_target_pkg
   Database history survives restart; active runs do not.
 end note
 @enduml
+
+@startuml attachment_data_plane_comparison
+title Attachment Data Plane Comparison
+
+' OpenClaw baseline: b015925bc30f6a8363f290b07d5f8588e21422b8, Gateway Protocol v4
+' Source: packages/gateway-protocol/src/schema/logs-chat.ts ChatAttachmentSchema
+' Source: ui/src/pages/chat/attachment-api.ts and chat-send-request.ts
+' Source: src/gateway/server-methods/attachment-normalize.ts and chat-send-attachments.ts
+' Observed behavior: OpenClaw sends base64 attachment envelopes inside chat.send and validates actual bytes before acknowledgement.
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java
+' Current Java behavior: the v1 WebSocket prompt accepts text only; general attachment transport is not implemented.
+' Target source: campusmate-attachment-service/README.md
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
+' Target design: CampusMate stores metadata in shared openGauss and immutable bodies in private OBS.
+' Target design: agent-service uses internal batch resolve and content streaming, without local files or direct OBS access.
+' Design reason: keep the file data plane outside Chat Frames while allowing any service Pod to read authoritative content.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam defaultFontName Arial
+left to right direction
+
+package "OpenClaw - implemented" as OpenClawAttachment {
+  actor "OpenClaw UI" as OcUi
+  component "chat.send Request Frame\nbase64 attachment envelope" as OcFrame
+  component "Gateway attachment validation\nand preparation" as OcGateway
+  component "Inline or staged model input" as OcInput
+
+  OcUi --> OcFrame : content, MIME, file name, size
+  OcFrame --> OcGateway : one WebSocket request
+  OcGateway --> OcGateway : decode, sniff, limit, validate
+  OcGateway --> OcInput : accepted attachment input
+}
+
+package "pi-mono-java v1 - current" as JavaAttachment {
+  actor "Java v1 client" as JavaClient
+  component "prompt string" as JavaPrompt
+  component "ChatWebSocketHandler" as JavaHandler
+
+  JavaClient --> JavaPrompt
+  JavaPrompt --> JavaHandler
+}
+
+package "CampusAgent v2 - target only" as CampusAttachment {
+  actor "Final client" as CampusClient
+  component "CampusMate public upload\nand status API" as PublicUpload
+  component "CampusMate Attachment Service\nany Pod" as AttachmentService
+  database "Shared openGauss\nmetadata and object mapping" as AttachmentDb
+  cloud "Private OBS\nimmutable object body" as AttachmentObs
+  component "agent-service Pod A" as AgentPodA
+  component "agent-service Pod B" as AgentPodB
+  database "RuntimeSessionStore\nprojected metadata snapshot" as RuntimeStore
+
+  CampusClient --> PublicUpload : multipart upload and poll READY
+  PublicUpload --> AttachmentService
+  AttachmentService --> AttachmentDb : metadata transaction
+  AttachmentService --> AttachmentObs : write immutable body
+  AgentPodA --> AttachmentService : internal batch resolve
+  AgentPodB --> AttachmentService : same ID after Pod change
+  AgentPodA --> AttachmentService : internal content stream
+  AgentPodB --> AttachmentService : internal content stream
+  AttachmentService --> AttachmentDb : authorize session and locate object
+  AttachmentService --> AttachmentObs : stream body
+  AgentPodA --> RuntimeStore : id, name, MIME, size, sha256
+  AgentPodB --> RuntimeStore : restore metadata snapshot
+}
+
+note bottom of OpenClawAttachment
+  The Gateway owns the attachment bytes for this request.
+  This is an implemented product boundary, not a defect.
+end note
+
+note bottom of JavaAttachment
+  General attachment input remains outside the v1 wire contract.
+end note
+
+note bottom of CampusAttachment
+  WebSocket carries attachment IDs only.
+  Resolve returns no object key, URL, or credential.
+  Runtime never accesses OBS directly and writes no local file.
+  No content_version, reservation, or complex retention claim exists.
+end note
+@enduml

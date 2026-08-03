@@ -1,0 +1,810 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: CampusMate Attachment Service API
+  version: 1.0.0
+  description: |
+    CampusMate 中由 mate-service 承载的附件服务目标契约。
+
+    文件正文只保存到共享私有 OBS；openGauss 只保存附件元数据、状态和
+    attachment_id 到内部 Object Key 的映射。所有上传和读取均为流式处理，
+    不使用 Pod 本地文件或完整内存副本。
+
+    本文件是 target-only 设计，不表示现有 Java 服务已经实现这些端点。
+  contact:
+    name: CampusMate Platform
+servers:
+  - url: https://api.example.com/mate-service
+    description: 生产网关示例；公共调用方只使用 HTTPS
+  - url: http://localhost:3000/mate-service
+    description: 本地开发示例
+tags:
+  - name: Public attachments
+    description: CampusMate 客户端使用的上传、查询和删除接口
+  - name: Internal runtime
+    description: agent-service 使用的服务间解析和内容流接口
+paths:
+  /v1/sessions/{session_id}/attachments:
+    post:
+      tags:
+        - Public attachments
+      operationId: uploadAttachment
+      summary: 流式上传单个附件
+      description: |
+        验证调用用户和 Session 后，服务端生成 attachment_id 与内部随机
+        Object Key，在 openGauss 创建 UPLOADING 记录，并将唯一的 file part
+        直接流式写入 OBS。实际字节数必须与 X-Attachment-Size 完全一致；
+        OBS 只读取声明长度后，服务端仍必须验证 file part 已到 EOF。
+
+        省略 Prefer 或使用 respond-async 时，在 OBS 写入成功且状态提交为
+        PROCESSING 后返回 202。使用 wait=N 时最多等待 min(N, 10) 秒。
+        v1 每个请求只接受一个 Prefer 值。
+      security:
+        - CampusMateAccessToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/AttachmentSize'
+        - $ref: '#/components/parameters/Prefer'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    唯一文件 part。文件名只作为不可信显示名；Content-Type
+                    只作为声明 MIME，不能替代服务端内容嗅探。服务端解析
+                    type/subtype、移除参数并以 Locale.ROOT 小写化；无效声明
+                    不作为可信 media_type。
+      responses:
+        '201':
+          description: 在 wait 窗口内完成扫描，附件已经 READY
+          headers:
+            Location:
+              $ref: '#/components/headers/AttachmentLocation'
+            Preference-Applied:
+              $ref: '#/components/headers/PreferenceAppliedWait'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResource'
+              examples:
+                ready:
+                  $ref: '#/components/examples/ReadyAttachment'
+        '202':
+          description: 文件已经写入 OBS，扫描正在异步进行
+          headers:
+            Location:
+              $ref: '#/components/headers/AttachmentLocation'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            Preference-Applied:
+              $ref: '#/components/headers/PreferenceApplied'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResource'
+              examples:
+                processing:
+                  $ref: '#/components/examples/ProcessingAttachment'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/SessionNotFound'
+        '413':
+          $ref: '#/components/responses/AttachmentTooLarge'
+        '422':
+          $ref: '#/components/responses/AttachmentBlocked'
+        '503':
+          $ref: '#/components/responses/AttachmentDependencyUnavailable'
+  /v1/sessions/{session_id}/attachments/{attachment_id}:
+    get:
+      tags:
+        - Public attachments
+      operationId: getAttachment
+      summary: 查询附件状态
+      description: |
+        返回当前 PROCESSING、READY、BLOCKED、FAILED、DELETING 或 DELETED
+        状态。当前 Session 的授权调用方可以读取 DELETED tombstone，
+        用于确认异步删除已完成。响应不包含 Object Key、OBS URL、ETag
+        或存储凭据。
+      security:
+        - CampusMateAccessToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/AttachmentId'
+      responses:
+        '200':
+          description: 当前附件资源
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResource'
+              examples:
+                ready:
+                  $ref: '#/components/examples/ReadyAttachment'
+                processing:
+                  $ref: '#/components/examples/ProcessingAttachment'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvalidAttachment'
+        '503':
+          $ref: '#/components/responses/AttachmentDependencyUnavailable'
+    delete:
+      tags:
+        - Public attachments
+      operationId: deleteAttachment
+      summary: 删除尚未被消息引用的附件
+      description: |
+        未引用附件被条件更新为 DELETING，由 Worker 异步删除 OBS 正文。
+        已引用附件不能单独删除。对 DELETING 或 DELETED 重复调用保持幂等。
+      security:
+        - CampusMateAccessToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/AttachmentId'
+      responses:
+        '202':
+          description: 删除已经登记或此前已经登记
+          headers:
+            Location:
+              $ref: '#/components/headers/AttachmentLocation'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResource'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvalidAttachment'
+        '409':
+          $ref: '#/components/responses/AttachmentReferenced'
+        '503':
+          $ref: '#/components/responses/AttachmentDependencyUnavailable'
+  /internal/v1/attachments:resolve:
+    post:
+      tags:
+        - Internal runtime
+      operationId: resolveAttachments
+      summary: 为一个 Runtime Session 原子解析附件集合
+      description: |
+        只允许 agent-service 的服务身份调用。Attachment Service 在一个短
+        openGauss 事务内校验全部 ID 都属于 session_id、状态为 READY、未删除
+        且未过期，然后原子设置 referenced=true、保留首次 referenced_at
+        并清空 expires_at。任一项失败时整体回滚。不存在、跨 Session、
+        删除、过期或终态失败投影为 INVALID_ATTACHMENT；只有已确认当前
+        Session 归属的 UPLOADING/PROCESSING 才投影为 ATTACHMENT_NOT_READY。
+
+        返回数组严格保持 attachment_ids 的请求顺序，不包含 Object Key、
+        OBS URL、ETag、Bucket 或凭据。
+      security:
+        - AgentServiceAccessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveAttachmentsRequest'
+            examples:
+              oneAttachment:
+                value:
+                  session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+                  attachment_ids:
+                    - attachment_011CZm8VpK4rNs6WtY2hDqfB
+      responses:
+        '200':
+          description: 全部附件已经原子解析并标记为 referenced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolveAttachmentsResponse'
+              examples:
+                resolved:
+                  value:
+                    session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+                    attachments:
+                      - attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
+                        filename: orders.pdf
+                        media_type: application/pdf
+                        size_bytes: 182734
+                        sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvalidAttachment'
+        '409':
+          $ref: '#/components/responses/AttachmentNotReady'
+        '503':
+          $ref: '#/components/responses/AttachmentDependencyUnavailable'
+  /internal/v1/sessions/{session_id}/attachments/{attachment_id}/content:
+    get:
+      tags:
+        - Internal runtime
+      operationId: streamAttachmentContent
+      summary: 向 agent-service 流式代理不可变附件正文
+      description: |
+        只读取 READY 且 referenced=true 的记录。服务端从 openGauss 取得内部
+        Object Key，再从 OBS 流式代理正文；不创建本地文件，也不聚合完整
+        byte 数组。调用方必须提供 resolve 返回的 SHA-256，并在接收时再次
+        增量校验实际长度和摘要。
+      security:
+        - AgentServiceAccessToken: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/AttachmentId'
+        - $ref: '#/components/parameters/ExpectedAttachmentSha256'
+      responses:
+        '200':
+          description: 附件原始字节流
+          headers:
+            Content-Length:
+              description: openGauss 账本中的可信实际字节数
+              required: true
+              schema:
+                type: integer
+                format: int64
+                minimum: 1
+                maximum: 20971520
+            X-Attachment-SHA256:
+              description: 与 resolve 快照相同的原始内容 SHA-256
+              required: true
+              schema:
+                $ref: '#/components/schemas/Sha256'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvalidAttachment'
+        '409':
+          $ref: '#/components/responses/AttachmentContentMismatch'
+        '503':
+          $ref: '#/components/responses/AttachmentDependencyUnavailable'
+components:
+  securitySchemes:
+    CampusMateAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        CampusMate 现有用户认证生成的短期访问令牌。具体 Header claim 和
+        签名配置属于私有部署契约，不在本专题复制。
+    AgentServiceAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        agent-service 面向 mate-service 的短期 service-to-service access token。
+        不能复用入站用户令牌或 OBS 长期凭据。
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      description: |
+        上层服务生成、在 Runtime 部署范围内全局唯一且删除后不复用的 Session ID。
+      schema:
+        $ref: '#/components/schemas/SessionId'
+    AttachmentId:
+      name: attachment_id
+      in: path
+      required: true
+      description: Attachment Service 签发的大小写敏感不透明 ID。
+      schema:
+        $ref: '#/components/schemas/AttachmentId'
+    AttachmentSize:
+      name: X-Attachment-Size
+      in: header
+      required: true
+      description: |
+        file part 的准确字节数，不是 multipart HTTP Body 的 Content-Length。
+        服务端用实际计数流复核该值。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 20971520
+      example: 182734
+    Prefer:
+      name: Prefer
+      in: header
+      required: false
+      description: |
+        RFC 7240 客户端响应偏好。v1 每次请求只接受 respond-async 或 wait=N
+        其中一个值；N 为最多 10 位的非负十进制秒数，实际等待上限为 10 秒。
+        省略时默认异步。
+      schema:
+        type: string
+        maxLength: 16
+        pattern: '^(respond-async|wait=(0|[1-9][0-9]{0,9}))$'
+      examples:
+        asynchronous:
+          value: respond-async
+        waitUpToTenSeconds:
+          value: wait=30
+    ExpectedAttachmentSha256:
+      name: X-Expected-Attachment-SHA256
+      in: header
+      required: true
+      description: resolve 或历史快照中的原始内容 SHA-256。
+      schema:
+        $ref: '#/components/schemas/Sha256'
+  headers:
+    AttachmentLocation:
+      description: 当前附件状态资源的绝对或相对 URL
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+      example: /mate-service/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/attachments/attachment_011CZm8VpK4rNs6WtY2hDqfB
+    AttachmentLocationIfCreated:
+      description: |
+        只在上传已创建持久附件资源时返回的状态 URL。如果失败发生在
+        可用资源建立之前，该 Header 省略。
+      schema:
+        type: string
+        format: uri-reference
+    RetryAfter:
+      description: 建议再次查询状态前等待的秒数
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 60
+      example: 2
+    PreferenceApplied:
+      description: |
+        服务端采用的 RFC 7240 偏好。省略 Prefer 时可以不返回；
+        wait=N 回显服务端实际采用的 min(N, 10)。
+      schema:
+        type: string
+        pattern: '^(respond-async|wait=([0-9]|10))$'
+    PreferenceAppliedWait:
+      description: 服务端采用的 RFC 7240 wait 偏好
+      schema:
+        type: string
+        pattern: '^wait=([0-9]|10)$'
+      example: wait=10
+  responses:
+    InvalidRequest:
+      description: 请求结构、multipart、Prefer、长度声明或实际长度无效
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_SIZE_MISMATCH
+            message: Actual file size does not match X-Attachment-Size.
+            retryable: false
+    Unauthenticated:
+      description: 缺少或无法验证访问令牌
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHENTICATED
+            message: Authentication is required.
+            retryable: false
+    Forbidden:
+      description: 已认证身份不允许调用该接口
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: FORBIDDEN
+            message: The caller is not allowed to perform this operation.
+            retryable: false
+    SessionNotFound:
+      description: Session 不存在或当前用户无权访问
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: SESSION_NOT_FOUND
+            message: The session was not found.
+            retryable: false
+    InvalidAttachment:
+      description: |
+        附件不存在、跨 Session、过期或对当前调用方不可见的统一非泄露响应。
+        Runtime resolve/content 还会把已删除、BLOCKED 和 FAILED 记录投影为该错误。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INVALID_ATTACHMENT
+            message: The attachment is not available for this session.
+            retryable: false
+    AttachmentTooLarge:
+      description: 声明或实际大小超过 20 MiB
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_TOO_LARGE
+            message: The attachment exceeds the 20 MiB limit.
+            retryable: false
+    AttachmentBlocked:
+      description: 在 wait 窗口内确认安全扫描拒绝该文件
+      headers:
+        Location:
+          $ref: '#/components/headers/AttachmentLocation'
+        Preference-Applied:
+          $ref: '#/components/headers/PreferenceApplied'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_BLOCKED
+            message: The attachment was rejected by the content security policy.
+            retryable: false
+    AttachmentReferenced:
+      description: 附件已经进入 Session 消息历史，不能单独删除
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_REFERENCED
+            message: Delete the session to remove a referenced attachment.
+            retryable: false
+    AttachmentNotReady:
+      description: 已授权附件仍在上传或处理
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_NOT_READY
+            message: The attachment is still being processed.
+            retryable: true
+            retry_after_ms: 2000
+    AttachmentContentMismatch:
+      description: 期望 SHA-256 与权威账本不一致
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_CONTENT_MISMATCH
+            message: The requested content digest does not match the attachment.
+            retryable: false
+    AttachmentDependencyUnavailable:
+      description: |
+        当前请求的 openGauss/OBS 依赖不可用，或 wait 窗口内附件已
+        进入终态 FAILED。若上传已稳定进入 PROCESSING，只是后台扫描器
+        暂时不可用，则保持 PROCESSING 并返回 202，不使用本终态响应。
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+        Location:
+          $ref: '#/components/headers/AttachmentLocationIfCreated'
+        Preference-Applied:
+          $ref: '#/components/headers/PreferenceApplied'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: ATTACHMENT_STORAGE_UNAVAILABLE
+            message: Attachment storage is temporarily unavailable.
+            retryable: true
+            retry_after_ms: 2000
+  schemas:
+    SessionId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+      description: 与 CampusAgent Runtime WebSocket SessionId 契约一致，不接受冒号或路径分隔符。
+      examples:
+        - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+    AttachmentId:
+      type: string
+      minLength: 35
+      maxLength: 35
+      pattern: '^attachment_[0-9A-Za-z]{24}$'
+      description: 大小写敏感，删除后也不得复用。
+      examples:
+        - attachment_011CZm8VpK4rNs6WtY2hDqfB
+    AttachmentStatus:
+      type: string
+      description: |
+        常规扫描只从 PROCESSING 进入 READY、BLOCKED 或 FAILED。
+        已 READY 内容在后续安全撤销时可由特权控制面转为 BLOCKED；
+        转换后立即拒绝新的 resolve/content，不会撤回已经交给模型的字节。
+      enum:
+        - UPLOADING
+        - PROCESSING
+        - READY
+        - BLOCKED
+        - FAILED
+        - DELETING
+        - DELETED
+    Sha256:
+      type: string
+      minLength: 64
+      maxLength: 64
+      pattern: '^[0-9a-f]{64}$'
+      examples:
+        - 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
+    MediaType:
+      type: string
+      minLength: 3
+      maxLength: 127
+      pattern: '^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$'
+      description: 无参数且使用 Locale.ROOT 规范化为小写的 MIME type/subtype。
+      examples:
+        - application/pdf
+    DisplayFilename:
+      type: string
+      minLength: 1
+      maxLength: 512
+      pattern: '^[^\x00-\x1F\x7F/\\]+$'
+      description: |
+        服务端清除控制字符和路径分隔符后的显示名。调用方渲染时仍须转义。
+    AttachmentResource:
+      type: object
+      additionalProperties: false
+      required:
+        - attachment_id
+        - session_id
+        - status
+        - filename
+        - expected_size_bytes
+        - referenced
+        - created_at
+        - updated_at
+      properties:
+        attachment_id:
+          $ref: '#/components/schemas/AttachmentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        status:
+          $ref: '#/components/schemas/AttachmentStatus'
+        filename:
+          $ref: '#/components/schemas/DisplayFilename'
+        declared_media_type:
+          $ref: '#/components/schemas/MediaType'
+          description: 解析 multipart 声明后的小写无参数投影，仍然是不可信审计数据。
+        media_type:
+          $ref: '#/components/schemas/MediaType'
+          description: 只有内容嗅探完成后才出现的可信 detected media type。
+        expected_size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 20971520
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 20971520
+        sha256:
+          $ref: '#/components/schemas/Sha256'
+        referenced:
+          type: boolean
+        referenced_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        error_code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Z][A-Z0-9_]{0,63}$'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        ready_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+      allOf:
+        - if:
+            properties:
+              status:
+                const: READY
+            required:
+              - status
+          then:
+            required:
+              - media_type
+              - size_bytes
+              - sha256
+              - ready_at
+        - if:
+            properties:
+              status:
+                const: DELETED
+            required:
+              - status
+          then:
+            required:
+              - deleted_at
+        - if:
+            properties:
+              referenced:
+                const: true
+            required:
+              - referenced
+          then:
+            required:
+              - referenced_at
+            not:
+              required:
+                - expires_at
+    ResolveAttachmentsRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - attachment_ids
+      properties:
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        attachment_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          description: 顺序有语义，响应 attachments 必须保持相同顺序。
+          items:
+            $ref: '#/components/schemas/AttachmentId'
+    ResolvedAttachment:
+      type: object
+      additionalProperties: false
+      required:
+        - attachment_id
+        - filename
+        - media_type
+        - size_bytes
+        - sha256
+      properties:
+        attachment_id:
+          $ref: '#/components/schemas/AttachmentId'
+        filename:
+          $ref: '#/components/schemas/DisplayFilename'
+        media_type:
+          $ref: '#/components/schemas/MediaType'
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 20971520
+        sha256:
+          $ref: '#/components/schemas/Sha256'
+    ResolveAttachmentsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - attachments
+      properties:
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        attachments:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/ResolvedAttachment'
+    ErrorDetailValue:
+      oneOf:
+        - type: string
+          maxLength: 1024
+        - type: integer
+        - type: number
+        - type: boolean
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - retryable
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - SESSION_NOT_FOUND
+            - INVALID_ATTACHMENT
+            - ATTACHMENT_TOO_LARGE
+            - ATTACHMENT_SIZE_MISMATCH
+            - ATTACHMENT_NOT_READY
+            - ATTACHMENT_BLOCKED
+            - ATTACHMENT_REFERENCED
+            - ATTACHMENT_CONTENT_MISMATCH
+            - ATTACHMENT_STORAGE_UNAVAILABLE
+            - ATTACHMENT_SCAN_UNAVAILABLE
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+        retryable:
+          type: boolean
+        retry_after_ms:
+          type: integer
+          minimum: 1
+          maximum: 60000
+        details:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            $ref: '#/components/schemas/ErrorDetailValue'
+  examples:
+    ProcessingAttachment:
+      value:
+        attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
+        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        status: PROCESSING
+        filename: orders.pdf
+        declared_media_type: application/pdf
+        expected_size_bytes: 182734
+        size_bytes: 182734
+        sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
+        referenced: false
+        expires_at: '2026-08-04T10:00:00.000Z'
+        created_at: '2026-08-03T10:00:00.000Z'
+        updated_at: '2026-08-03T10:00:01.000Z'
+    ReadyAttachment:
+      value:
+        attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
+        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        status: READY
+        filename: orders.pdf
+        declared_media_type: application/pdf
+        media_type: application/pdf
+        expected_size_bytes: 182734
+        size_bytes: 182734
+        sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
+        referenced: false
+        expires_at: '2026-08-04T10:00:00.000Z'
+        created_at: '2026-08-03T10:00:00.000Z'
+        updated_at: '2026-08-03T10:00:03.000Z'
+        ready_at: '2026-08-03T10:00:03.000Z'

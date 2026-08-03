@@ -179,7 +179,7 @@ class RuntimeSessionStore <<database>> {
   +RunRecord
   +HistorySequence
   +IdempotencyResult
-  +AttachmentClaim
+  +AttachmentContentSnapshot
 }
 
 AgentRuntimeTemplate *-- AgentRuntimeTemplateRef
@@ -547,5 +547,71 @@ note bottom of RunRecordLife
   RuntimeSessionStore is database-backed.
   Only text_end, thinking_end, toolcall_end, or equivalent
   completed block boundaries are recoverable after Pod loss.
+end note
+@enduml
+
+@startuml runtime_attachment_service_boundary
+' Source baseline: pi-mono commit f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
+' Source baseline: pi-mono-java commit 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Observed behavior: neither baseline implements the CampusMate attachment storage boundary shown here.
+' Target source: campusmate-attachment-service/README.md
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
+' Target-only architecture: CampusMate stores metadata in shared openGauss and immutable bodies in private OBS.
+' Target-only architecture: agent-service uses internal batch resolve and content streaming APIs and stores only message metadata snapshots.
+' Design reason: attachments must work across Pods without exposing object locations, credentials, or local files to Agent Runtime.
+!theme plain
+left to right direction
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #3D8DFF
+skinparam componentBorderColor #B8BCC4
+skinparam componentBackgroundColor #F7F8FA
+skinparam databaseBorderColor #B8BCC4
+skinparam databaseBackgroundColor #EAF5FB
+
+title Agent Runtime and CampusMate Attachment Boundary
+
+actor "Final client" as Client
+component "CampusMate public API" as PublicApi
+component "CampusMate Attachment Service\nany Pod" as AttachmentService
+database "Shared openGauss\nmetadata, status, session binding, object key" as AttachmentDb
+cloud "Private OBS\nimmutable object bodies" as Obs
+component "agent-service Pod A" as RuntimeA
+component "agent-service Pod B" as RuntimeB
+database "RuntimeSessionStore\nAttachmentContent metadata snapshot" as RuntimeStore
+component "Model input assembler\nbounded stream buffer" as Assembler
+
+Client --> PublicApi : upload and poll status
+PublicApi --> AttachmentService
+AttachmentService --> AttachmentDb : metadata transaction
+AttachmentService --> Obs : write or stream object
+RuntimeA --> AttachmentService : POST internal attachments:resolve
+RuntimeB --> AttachmentService : same ID after routing or restart
+RuntimeA --> AttachmentService : GET internal content stream
+RuntimeB --> AttachmentService : GET internal content stream
+AttachmentService --> AttachmentDb : authorize session and locate object
+AttachmentService --> Obs : read immutable body
+RuntimeA --> RuntimeStore : persist id, name, MIME, size, sha256
+RuntimeB --> RuntimeStore : restore the same snapshot
+RuntimeA --> Assembler : verify sha256 while streaming
+RuntimeB --> Assembler : verify sha256 while streaming
+
+note bottom of AttachmentService
+  Batch resolve is all-or-nothing and marks accepted rows referenced.
+  The first reference time is preserved and expiry is cleared.
+  Responses never expose object keys, OBS URLs, or credentials.
+  No content_version, reservation, or complex retention claim exists.
+end note
+
+note bottom of RuntimeA
+  Runtime never reads OBS directly and never writes attachment files.
+  Local memory is a bounded stream buffer, not durable storage.
+end note
+
+note bottom of RuntimeStore
+  The database stores projected metadata only.
+  Attachment bodies remain authoritative in CampusMate.
 end note
 @enduml
