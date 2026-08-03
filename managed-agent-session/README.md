@@ -2,13 +2,20 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.3.0 |
-| 状态 | Draft，供架构评审 |
+| 文档版本 | 1.4.0 |
+| 状态 | 已被后续设计取代，保留为历史方案 |
 | pi-mono 源码基线 | `216e672e7c9fc65682553394b74e483c0c9e47f7` |
 | pi-mono-java 源码基线 | `b99871a0321b73606a8f074c42050f28f52fdfca` |
 | 基线日期 | 2026-07-23 |
 | 元数据输入 | `AGENT元数据设计.json`、`TOOL元数据设计.json`、`SKILL元数据设计.json` |
 | 设计前提 | pi-mono-java 的 `AgentSession` 和 `Agent` 职责与 pi-mono 对齐；Model、Tool、Skill 均由独立管理器提供和执行 |
+
+> [!IMPORTANT]
+> 本文的 `ManagedAgentInstance + agentVersion + resolvedModels/resolvedTools/resolvedSkills`
+> 边界已被 [`AgentRuntimeTemplate` 不可变运行模板设计](../agent-runtime-template/README.md)
+> 取代。Manager-driven Runtime 的模板身份、bundle revision、Session pinning、
+> 动态 Model/Tool 权威和并发生命周期以后续文档为准；下文仅保留历史设计背景，
+> 不再作为新实现合约。
 
 ## 1. 结论
 
@@ -1138,6 +1145,7 @@ ToolCallInvoker
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.0 | 2026-08-03 | 标记为历史方案；Manager-driven Runtime 的模板边界改由 AgentRuntimeTemplate 设计统一定义 |
 | 1.3.0 | 2026-07-23 | 在 9.1 增加 `get_order/create_refund` 具体例子，说明本地 Tool 发现后如何同时形成模型 Schema 投影和可执行 `AgentTool` |
 | 1.2.0 | 2026-07-23 | 在 ToB 目标类图前加入 pi-mono 当前 `AgentSession and Agent` 源码类图，并增加类结构差异对照 |
 | 1.1.0 | 2026-07-23 | 增加本地基线与 Manager 目标下的 Tool 发现/调用、Skill 描述发现/渐进式激活对照；定义 Runtime 自有的 `activate_skill` 控制协议 |

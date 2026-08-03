@@ -2,13 +2,22 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.5.0 |
+| 文档版本 | 1.6.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8` |
 | 运行形态 | 单 JVM、多 Agent、WebSocket 会话 |
+| Template 规范性增补 | [`AgentRuntimeTemplate` 不可变运行模板设计](../agent-runtime-template/README.md)（关联设计基线 `2b2aee5ad11867f53af7fc379426e5fec6fd1d17`） |
+
+> [!IMPORTANT]
+> 本文中“原子替换 `<agent-id>` 目录”、cwd 恢复、Template/revision pinning、
+> `prompt_templates.list` 的 Managed 暴露若与上述增补冲突，以增补为准。Template
+> v1 使用不可变 revision 和 current activation record，恢复按 header 精确 revision；
+> 在 Prompt Template 纳入受控制品前，Managed methods 不暴露
+> `prompt_templates.list`。AsyncAPI 与 Client guide 的对应修订仍是实现落地前的
+> 协议同步门禁。
 
 ## 1. 结论
 
@@ -1758,6 +1767,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.6.0 | 2026-08-03 | 增加 AgentRuntimeTemplate 规范性增补及优先级；明确不可变 revision/exact pinning，并把 Prompt Template 的 AsyncAPI/Client 同步列为落地门禁 |
 | 1.5.0 | 2026-08-03 | 新增客户端接入指南和客户端交互图；将 typed structured delta 固化为协议 2 语义，仅保留 full_thinking 可选能力；补齐 user_message_id、Response/Event 顺序、固定事件集、redacted thinking 序列占位、历史水位快照、Message/Tool reducer、RunRecord 历史、线协议大小与关闭恢复规则，并同步 AsyncAPI 2.4.0 |
 | 1.4.3 | 2026-08-03 | 全文统一为“调用方或组件动作、服务端处理、可观察结果、约束与原因”的行为先行表述；统一既有 Bearer/mTLS 替代认证口径，保持 Frame、Schema 和源码证据不变，并同步 AsyncAPI 2.3.3 |
 | 1.4.2 | 2026-08-03 | 明确 wss URI 是客户端建连指令而不是已建立的 WebSocket；补充 TCP、TLS、HTTP Upgrade、101 和 WebSocket Frame 的真实顺序及复用 HTTP 基础设施的原因；保留完整握手示例并同步 AsyncAPI 2.3.2 |

@@ -1,0 +1,453 @@
+@startuml agent_runtime_template_lifetimes
+' Source baseline: pi-mono commit f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
+' Source baseline: pi-mono-java commit 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source evidence: packages/agent/src/agent.ts Agent, ActiveRun, PendingMessageQueue
+' Source evidence: packages/agent/src/types.ts AgentState and AgentContext
+' Source evidence: packages/coding-agent/src/core/agent-session-services.ts createAgentSessionServices
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java fields and startExecution
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/state/AgentState.java fields
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java constructor and invokeModel
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize
+' Target-only architecture: AgentRuntimeTemplate, CacheEntry, TemplateLease, AgentRunContext, and stateless AgentRunner are not implemented in either baseline.
+' Observed behavior: both baselines keep messages, queues, listeners, and active execution state in or around a stateful Agent.
+' Design reason: share immutable Agent definition data while keeping Session and Run state isolated.
+!theme plain
+left to right direction
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam linetype ortho
+skinparam ArrowColor #3D8DFF
+skinparam classBorderColor #B8BCC4
+skinparam classBackgroundColor #F7F8FA
+skinparam interfaceBorderColor #B8BCC4
+skinparam interfaceBackgroundColor #EAF5FB
+skinparam classAttributeIconSize 0
+
+title Agent Runtime Template Lifetime Boundaries
+
+package "Shared immutable per revision" as SharedTemplate {
+  class AgentRuntimeTemplate <<immutable>> {
+    +ref: AgentRuntimeTemplateRef
+    +materializedForRunnerAbi: int
+    +revisionRoot: Path
+    +prompt: PromptPlan
+    +skills: List<SkillSummary>
+    +resources: ResourceSnapshot
+    +runtimeTools: List<RuntimeToolSpec>
+    +provenance: TemplateProvenance
+    +compatibility: TemplateCompatibility
+  }
+
+  class AgentRuntimeTemplateRef <<business identity>> {
+    +agentId: String
+    +bundleRevision: String
+  }
+
+  class LoadedTemplateKey <<JVM cache key>> {
+    +ref: AgentRuntimeTemplateRef
+    +runnerAbi: int
+  }
+
+  class PromptPlan {
+    +managedSystemPrompt: String
+    +promptHash: String
+  }
+
+  class SkillSummary {
+    +skillId: String
+    +skillVersion: String
+    +name: String
+    +description: String
+    +entryPath: String
+    +contentHash: String
+  }
+
+  class ResourceSnapshot {
+    +entries: Map<String, ResourceEntry>
+    +totalBytes: long
+  }
+
+  class RuntimeToolSpec {
+    +kind: READ | GET_TOOL_INFO | CALL_TOOL
+    +name: String
+    +description: String
+    +parameters: ImmutableJsonSchema
+  }
+
+  class TemplateProvenance
+  class TemplateCompatibility
+}
+
+package "Shared runtime per JVM" as SharedRuntime {
+  interface AgentRuntimeTemplateRegistry {
+    +acquireCurrent(agentId): TemplateLease
+    +acquire(ref): TemplateLease
+  }
+
+  class CacheEntry {
+    +key: LoadedTemplateKey
+    +state: LOADING | ACTIVE | EVICTING | REMOVED
+    +leaseCount: AtomicInteger
+    +reservedWeightBytes: long
+    +actualWeightBytes: long
+  }
+
+  interface BundleLease {
+    +revisionRoot(): Path
+    +close()
+  }
+
+  interface AgentRunner <<stateless>> {
+    +run(template, sessionSnapshot, runContext): RunResult
+  }
+
+  interface RuntimeToolExecutor {
+    +execute(template, sessionIdentity, runContext, toolCall): ToolResult
+  }
+
+  class ModelManagerClient
+  class ToolManagerClient
+}
+
+package "Mutable per session" as SessionScope {
+  class AgentSession {
+    +sessionId: String
+    +lifecycleState: SessionLifecycleState
+    +generation: long
+    +selectedModelId: String
+    +thinkingLevel: ThinkingLevel
+    +messages: List<Message>
+    +mailbox: BoundedMailbox
+  }
+
+  class SessionSnapshot <<immutable run input>> {
+    +sessionId: String
+    +selectedModelId: String
+    +thinkingLevel: ThinkingLevel
+    +messages: List<Message>
+  }
+
+  interface TemplateLease {
+    +template(): AgentRuntimeTemplate
+    +close()
+  }
+
+  class PerSessionAgent <<migration adapter>> {
+    +state: AgentState
+    +queues
+    +listeners
+    +currentExecution
+  }
+}
+
+package "Mutable per run" as RunScope {
+  class AgentRun {
+    +runId: String
+    +runSequence: long
+    +partialOutput
+    +pendingTools
+    +usage
+  }
+
+  class AgentRunContext {
+    +trace: TraceContext
+    +deadline: Instant
+    +cancellation: CancellationToken
+    +events: RunEventSink
+    +steering: SteeringMailbox
+  }
+}
+
+AgentRuntimeTemplate *-- AgentRuntimeTemplateRef
+LoadedTemplateKey *-- AgentRuntimeTemplateRef
+AgentRuntimeTemplate *-- PromptPlan
+AgentRuntimeTemplate *-- SkillSummary
+AgentRuntimeTemplate *-- ResourceSnapshot
+AgentRuntimeTemplate *-- RuntimeToolSpec
+AgentRuntimeTemplate *-- TemplateProvenance
+AgentRuntimeTemplate *-- TemplateCompatibility
+AgentRuntimeTemplateRegistry o-- CacheEntry : exact-key cache
+CacheEntry *-- LoadedTemplateKey
+CacheEntry *-- AgentRuntimeTemplate
+CacheEntry *-- BundleLease : owns until removal
+AgentRuntimeTemplateRegistry ..> TemplateLease : issues atomically
+TemplateLease --> CacheEntry : pins ACTIVE entry
+AgentSession *-- TemplateLease : pins exact revision
+AgentSession "1" *-- "0..1" AgentRun : primary run
+AgentRun *-- AgentRunContext
+AgentSession *-- PerSessionAgent : phase 1 only
+AgentSession ..> SessionSnapshot : creates at run start
+AgentRunner --> AgentRuntimeTemplate : immutable definition
+AgentRunner --> SessionSnapshot : explicit Session input
+AgentRunner --> AgentRunContext : explicit Run input
+AgentRunner --> RuntimeToolExecutor
+AgentRunner --> ModelManagerClient
+RuntimeToolExecutor --> ToolManagerClient
+
+note bottom of AgentRuntimeTemplate
+  No session id, messages, selected model,
+  credential, permission result, listener,
+  queue, active run, cancellation, or trace.
+end note
+
+note bottom of PerSessionAgent
+  Current Java Agent remains per Session.
+  It is never stored in the Template cache.
+end note
+
+note bottom of AgentRunner
+  The long-term Runner has no current
+  Session or current Run instance field.
+end note
+@enduml
+
+@startuml agent_runtime_template_publish_and_pin
+' Source baseline: pi-mono commit f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
+' Source baseline: pi-mono-java commit 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source evidence: packages/coding-agent/src/core/agent-session-services.ts createAgentSessionServices reloads resources before Session construction.
+' Source evidence: packages/coding-agent/src/core/sdk.ts createAgentSession restores state and creates a new Agent and AgentSession.
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java initialize loads tools, skills, context, templates, and prompt.
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate and createSessionWithPersistence.
+' Observed behavior: current Java Session creation performs synchronous restore and resource initialization for every cold Session.
+' Java divergence: the target atomically opens current, loads each immutable bundle revision once, and pins each Session to an exact revision.
+' Target-only architecture: immutable revision directories, activation records, publish events, exact-key single-flight, Template leases, and transactional Session metadata are new.
+' Design reason: remove repeated cold initialization without sharing mutable Agent state or weakening dynamic Manager authorization.
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam sequenceParticipantBorderColor #B8BCC4
+skinparam sequenceParticipantBackgroundColor #EAF5FB
+skinparam sequenceLifeLineBorderColor #B8BCC4
+skinparam sequenceGroupBorderColor #94A3B8
+skinparam sequenceGroupBackgroundColor #F8FAFC
+
+title Template Publish, Preload, and Session Pinning
+
+actor "Metadata publisher" as Publisher
+actor "Session caller" as SessionCaller
+participant "Bundle compiler" as Compiler
+database "Immutable bundle repository" as BundleRepo
+queue "Publish event bus" as EventBus
+participant "Template registry" as Registry
+participant "Periodic reconciler" as Reconciler
+participant "Managed session pool" as SessionPool
+database "Transactional session metadata store" as SessionStore
+participant "Managed session factory" as SessionFactory
+participant "Agent Runner or per-Session Agent" as Runner
+participant "Model Manager" as ModelManager
+participant "Tool Manager" as ToolManager
+
+== Compile and publish ==
+Publisher -> Compiler: compile fixed Agent, Skill, and disclosure revisions
+Compiler -> Compiler: normalize, validate, hash, and write staging
+Compiler -> BundleRepo: install immutable revision directory
+Compiler -> BundleRepo: open desired AVAILABLE artifact for activation
+BundleRepo --> Compiler: activation BundleLease
+Compiler -> BundleRepo: CAS activation record while holding lease
+BundleRepo --> Compiler: committed or already-identical ActiveCurrent
+Compiler -> BundleRepo: close activation BundleLease
+alt current changed
+  Compiler -> EventBus: BundlePublished(agent, revision, hash, sequence)
+else idempotent result already active
+  Compiler -> Compiler: no write, sequence increment, or duplicate event
+end
+Compiler --> Publisher: publish success
+
+== Event-driven preload ==
+EventBus -> Registry: BundlePublished
+Registry -> Registry: ignore stale sequence and record publish hint
+opt hot-set and weight policy admit prewarm
+  Registry -> Registry: install exact-key single-flight placeholder
+  Registry -> BundleRepo: open exact AVAILABLE revision
+  BundleRepo --> Registry: BundleLease
+  Registry -> Registry: validate manifest and reserve weight
+  Registry -> Registry: verify hash and compatibility; LOADING to ACTIVE
+end
+
+== New Session ==
+SessionCaller -> SessionPool: create(session id, agent id, model id, options)
+SessionPool -> SessionPool: acquire admission and install intent fingerprint slot
+SessionPool -> SessionStore: strongly consistent lookup(session id)
+SessionStore --> SessionPool: ABSENT or persisted Session header
+alt persisted EXISTING_CREATING with same fingerprint
+  SessionPool -> Registry: acquire header exact revision without current
+  Registry --> SessionPool: saved TemplateLease
+  SessionPool -> SessionStore: CAS claim CREATING(N) as owner N + 1
+  SessionPool -> ModelManager: revalidate saved model
+  SessionPool -> SessionFactory: recover saved Session state
+  SessionFactory --> SessionPool: candidate ManagedSession
+  SessionPool -> SessionPool: owner reserves resident capacity
+  SessionPool -> SessionStore: CAS CREATING(owner N + 1) to READY(N + 2)
+  SessionPool -> SessionPool: publish while owning lifecycle slot
+else persisted EXISTING_READY with same fingerprint
+  SessionPool -> SessionPool: return resident or use exact resume path
+else persisted binding conflict
+  SessionPool -> SessionPool: reject without reading current
+else ABSENT
+  SessionPool -> Registry: acquireCurrent(agent id) for candidate
+  Registry -> BundleRepo: openCurrent atomically
+  BundleRepo --> Registry: ActiveCurrent plus BundleLease
+  Registry -> Registry: verify pointer identity; single-flight or ACTIVE lease increment
+  Registry --> SessionPool: candidate TemplateLease
+  SessionPool -> ModelManager: resolve requested model
+  ModelManager --> SessionPool: current allowed descriptor
+  SessionPool -> SessionStore: createIfAbsent candidate; ref++ only when CREATED
+  SessionStore --> SessionPool: CREATED or concurrent existing result
+  alt CREATED with owner generation N
+    SessionPool -> SessionFactory: create isolated Session and per-Session Agent
+    SessionFactory --> SessionPool: candidate ManagedSession
+    SessionPool -> SessionPool: owner reserves resident capacity
+    SessionPool -> SessionStore: CAS CREATING(owner N) to READY(N + 1)
+    SessionPool -> SessionPool: publish while owning lifecycle slot
+  else concurrent existing result
+    SessionPool -> Registry: close loser candidate lease
+    SessionPool -> SessionPool: process persisted winner without current
+  end
+end
+SessionPool --> SessionCaller: same Session ready or stable conflict
+
+== Resume after eviction or restart ==
+SessionCaller -> SessionPool: resume(session id, immutable binding)
+SessionPool -> SessionPool: acquire admission and install or join RESTORING slot
+SessionPool -> SessionStore: load READY header, generation, and messages
+SessionStore --> SessionPool: agent id, exact revision, template ABI, model id, generation
+SessionPool -> Registry: acquire(saved agent id, exact revision)
+Registry --> SessionPool: TemplateLease or revision unavailable
+SessionPool -> ModelManager: revalidate saved model
+ModelManager --> SessionPool: current allowed descriptor
+SessionPool -> SessionFactory: restore isolated Session with saved messages
+SessionFactory --> SessionPool: candidate ManagedSession
+SessionPool -> SessionPool: only slot owner reserves resident capacity
+group lifecycle slot owner section excludes delete
+  SessionPool -> SessionStore: validate same READY generation and no tombstone
+  SessionStore --> SessionPool: valid or conflict
+  SessionPool -> SessionPool: check delete intent and publish READY_IDLE or clean up
+end
+
+== Missed event repair ==
+Reconciler -> BundleRepo: inspect activation records and sequences
+BundleRepo --> Reconciler: current pointers
+Reconciler -> Registry: record highest hints; conditionally preload missing revisions
+
+== Runtime dynamic authority ==
+SessionFactory -> Runner: pass Template, SessionSnapshot, and AgentRunContext
+Runner -> ModelManager: revalidate model on every model call
+Runner -> ToolManager: get info and call revalidate current tool state
+
+note over BundleRepo,Registry
+  Events reduce latency but are not the source of truth.
+  acquireCurrent atomically pins one AVAILABLE revision.
+  Publish activation holds a BundleLease through current CAS.
+end note
+
+note over Registry,SessionFactory
+  The CacheEntry owns the BundleLease.
+  The Session owns a TemplateLease to that exact entry.
+end note
+
+note over SessionPool,SessionStore
+  A committed CREATING record pins its original revision.
+  Retry requires the same fingerprint and a newer owner generation.
+  Delete, eviction, and resume compete through one lifecycle slot.
+end note
+
+note over SessionStore,ToolManager
+  Resume never falls back to current.
+  Dynamic authorization never comes from the Template.
+end note
+@enduml
+
+@startuml template_cache_and_session_lifecycle
+' Source baseline: pi-mono-java commit 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution serializes one active execution per Agent.
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate currently uses check-then-create.
+' Target-only architecture: the cache, revision artifact, and Session lifecycle state machines are normative target behavior and are not implemented in the baseline.
+' Design reason: make acquire versus eviction, publish or open versus GC, and resume versus delete linearizable under concurrency.
+!theme plain
+left to right direction
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowColor #3D8DFF
+skinparam stateBorderColor #B8BCC4
+skinparam stateBackgroundColor #F7F8FA
+
+title Template Cache, Revision Artifact, and Session Lifecycles
+
+state "Template CacheEntry" as TemplateCache {
+  [*] --> TC_LOADING : install Future and loader admission
+  state "LOADING" as TC_LOADING
+  state "ACTIVE" as TC_ACTIVE
+  state "EVICTING" as TC_EVICTING
+  state "REMOVED" as TC_REMOVED
+  TC_LOADING --> TC_ACTIVE : verify manifest; reserve weight; load;\nadjust actual weight and own BundleLease
+  TC_LOADING --> TC_REMOVED : failure or cancel; close BundleLease;\nrelease reservation if held
+  TC_ACTIVE --> TC_ACTIVE : acquire leaseCount++\nrelease leaseCount--
+  TC_ACTIVE --> TC_EVICTING : CAS when leaseCount == 0
+  TC_EVICTING --> TC_REMOVED : conditional map removal; close lease\nrelease weight token once
+  TC_REMOVED --> [*]
+}
+
+state "Revision Artifact" as ArtifactLife {
+  [*] --> AR_AVAILABLE
+  state "AVAILABLE" as AR_AVAILABLE
+  state "DELETING" as AR_DELETING
+  state "DELETED" as AR_DELETED
+  AR_AVAILABLE --> AR_AVAILABLE : open load or activation BundleLease atomically
+  AR_AVAILABLE --> AR_DELETING : CAS if not current, no refs,\nno leases, retention expired
+  AR_DELETING --> AR_AVAILABLE : same-generation recheck fails
+  AR_DELETING --> AR_DELETED : leases zero and final recheck passes
+  AR_DELETED --> [*]
+}
+
+state "Session" as SessionLife {
+  [*] --> SS_CREATING : createIfAbsent and revision ref++
+  state "CREATING" as SS_CREATING
+  state "READY_IDLE" as SS_READY_IDLE
+  state "READY_RUNNING" as SS_READY_RUNNING
+  state "EVICTING" as SS_EVICTING
+  state "EVICTED" as SS_EVICTED
+  state "RESTORING" as SS_RESTORING
+  state "DELETING" as SS_DELETING
+  state "DELETED" as SS_DELETED
+  SS_CREATING --> SS_READY_IDLE : owner-generation CAS READY\nand resident reservation
+  SS_CREATING --> SS_DELETING : durable tombstone and generation++
+  SS_READY_IDLE --> SS_READY_RUNNING : run admission and CAS
+  SS_READY_RUNNING --> SS_READY_IDLE : run and durable flush complete
+  SS_READY_IDLE --> SS_EVICTING : idle eviction CAS
+  SS_EVICTING --> SS_EVICTED : flush and close resources;\ncomplete Future then remove slot
+  SS_EVICTED --> SS_RESTORING : own lifecycle slot\nand acquire exact revision
+  SS_RESTORING --> SS_READY_IDLE : validate and publish\nunder the same slot
+  SS_RESTORING --> SS_DELETING : durable tombstone before cleanup
+  SS_READY_IDLE --> SS_DELETING : durable tombstone; install cleanup owner
+  SS_READY_RUNNING --> SS_DELETING : durable tombstone; cancel and drain run
+  SS_EVICTED --> SS_DELETING : durable tombstone; install cleanup owner
+  SS_EVICTING --> SS_DELETING : upgrade intent and persist tombstone;\nsame cleanup owner
+  SS_DELETING --> SS_DELETED : drain and close; CAS DELETED; ref--\ncomplete Future then remove slot
+  SS_DELETED --> [*]
+}
+
+note bottom of TemplateCache
+  ACTIVE lease acquisition and eviction use one atomic protocol.
+  A Session TemplateLease pins an ACTIVE entry.
+  The entry owner releases its weight reservation exactly once.
+  A waiter timeout never cancels the shared load Future.
+end note
+
+note bottom of ArtifactLife
+  Cache load and publish activation leases pin an AVAILABLE artifact.
+  DELETING blocks new opens. GC rechecks current, persistent
+  Session references, leases, retention, and generation.
+end note
+
+note bottom of SessionLife
+  Run, mailbox work, and Store flush pin the Session.
+  Delete persists DELETING before irreversible cleanup.
+  Resume and delete share one lifecycle slot.
+  Concurrent cleanup callers join one owner Future.
+end note
+@enduml
