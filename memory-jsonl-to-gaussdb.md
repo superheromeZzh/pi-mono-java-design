@@ -1,7 +1,7 @@
 # pi-mono Java 集中式 GaussDB 会话存储 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.8
+> 版本：v0.9
 > 日期：2026-08-03
 > 状态：设计评审稿
 > pi 源码基线：[`f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`](https://github.com/badlogic/pi-mono/tree/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee)
@@ -169,7 +169,22 @@ SQLite `appendEntry()` 在同一事务中：
 
 目标 Schema 不包含任何第九张业务表。
 
-### 4.1 类型映射
+### 4.1 每张表的作用
+
+| 表 | 作用 | 关键内容和关系 | 数据性质 |
+|---|---|---|---|
+| [`migrations`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/migrations.ts#L30-L54) | 记录已成功执行的 Schema migration，供 migration runner 在启动时判断哪些 migration 不应重复执行。 | `id` 是 migration 标识，`applied_at` 是应用时间；每个 migration SQL 与账本行在同一事务中提交。 | Schema 迁移账本，不属于 session 业务数据。 |
+| [`sessions`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L294-L365) | 保存每个 session 的主记录，用于 create、open、list、fork、head 读取和 delete。 | 保存创建时间、`cwd`、可选的父 session 和 metadata；`active_leaf_id` 保存当前活动 leaf，逻辑上指向同 session 的 `session_entries.id`。 | session 存在性、基本元数据和当前 head 的权威记录。 |
+| [`session_entries`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/index.ts#L367-L459) | 保存 session 的完整 append log 和树形 entry 历史，支持 entry 读取、分页、分支查询和 context 重建。 | `entry_seq` 确定追加顺序；`parent_id` 是同 session entry 父链的逻辑引用；`type` 和 `payload` 组合恢复具体 `SessionTreeEntry`。 | 权威 append log；`parent_id` 是分支树的事实源。 |
+| [`session_sequences`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-sequences.ts#L1-L16) | 为每个 session 保存下一个可分配的 `entry_seq`，使 append 按稳定的 64 位序号排序。 | create 时写入 `next_seq = 1`；append 先读取当前值，成功写入 entry 后在同一事务内递增。 | 每个 session 一行的序号分配运行状态；缺行被视为非法 session。 |
+| [`branch_entries`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts#L18-L197) | 保存每个 branch 从 root 到 tip 的 entry 成员及顺序，避免每次分支查询都递归遍历父链。 | `branch_id` 识别一条缓存路径；`entry_id` 和 `entry_seq` 来自 `session_entries`；同一 entry 可出现在多条共享前缀的 branch 中。 | 可重建的派生分支缓存，不是树结构事实源。 |
+| [`branch_tips`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts#L199-L326) | 保存每条缓存 branch 的当前 tip，使 append 可快速判断是线性扩展已有 branch，还是从旧 parent 建立新分支。 | `(session_id, tip_id)` 定位 branch；`(session_id, branch_id)` 唯一，保证每条缓存 branch 只有一个 tip；与 `branch_entries` 通过 `branch_id` 建立逻辑关系。 | 可重建的派生分支缓存；不等同于 `sessions.active_leaf_id`。 |
+| [`session_materialized`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts#L28-L221) | 为每个 session 保存一份累积 summary，避免 open、`getName()` 和 `getStats()` 时重放全部 entry。 | `payload` 包含 name、message/token/cost 统计、current model 和 current thinking level；create 写入空 summary，每次 append 在同一事务中更新。 | 每个 session 一行的派生物化投影，不代替权威 entry 历史。 |
+| [`entry_materialized`](https://github.com/badlogic/pi-mono/blob/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee/packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts#L224-L355) | 保存需要按 append 顺序重放的稀疏 entry 投影；当前实现只物化 label 设置和清除事件。 | `(session_id, entry_seq, type)` 保留投影事件的追加顺序；open 时按序重放为 `labelsById`，不是“每个目标一行当前 label”。 | 可由 `session_entries` 重放生成的派生物化投影。 |
+
+所有表间关系都是由应用在事务内维护的逻辑关系，不是数据库外键。会话树以 `session_entries.parent_id` 为权威父链；`branch_entries` 和 `branch_tips` 只是该父链的可重建查询缓存；`session_materialized` 和 `entry_materialized` 是由 append log 累积生成的读优化投影。这些职责说明不增加表、列、约束或索引。
+
+### 4.2 类型映射
 
 | SQLite 语义 | GaussDB 声明 | 对齐口径与理由 |
 |---|---|---|
@@ -185,7 +200,7 @@ SQLite `appendEntry()` 在同一事务中：
 
 GaussDB 官方字符类型允许 `VARCHAR` 不指定 `(n)`，其存储上限由行和列规格决定。本版本用该声明承载所有任意字符串，既使用 GaussDB 原生可变字符类型，又不把 pi 未限定长度的字段收窄为 `VARCHAR(n)`；同样不会把它们误声明为 `UUID` 或 ENUM。
 
-### 4.2 差异分类
+### 4.3 差异分类
 
 | 差异 | 分类 | 是否改变结构 |
 |---|---|---|
@@ -197,7 +212,7 @@ GaussDB 官方字符类型允许 `VARCHAR` 不指定 `(n)`，其存储上限由�
 
 以上有意差异不是产品功能扩展、安全强化或架构变更，不得据此增加表、列、约束、索引或触发器。
 
-### 4.3 明确禁止的结构
+### 4.4 明确禁止的结构
 
 - `memory_schema_version`
 - `agent_session`
@@ -602,6 +617,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.9 | 2026-08-03 | 补充 8 张 SQLite/GaussDB 对齐表的集中职责说明，明确 session 主记录、权威 append log、sequence 运行状态、可重建 branch cache、派生 materialized projection 和 migration 账本的边界；不改变 Schema 或运行行为 |
 | v0.8 | 2026-08-03 | 在不改变表、列、列顺序、可空性、主键、唯一约束和索引的前提下使用 GaussDB 原生语义类型：任意字符串改为无长度 `VARCHAR`，时间字段改为 `TIMESTAMPTZ(3)`，JSON document 改为 `JSONB`，sequence 改为 `BIGINT`；迁移和验收改为按字符串、Instant 与解码后 JSON 结构比较 |
 | v0.7 | 2026-08-03 | 将 GaussDB 从“SQLite 行为对齐 + 可靠性扩展”收敛为 SQLite 物理 Schema 对齐；表名、列名、主键、索引和 migration id 与 SQLite 一致；删除 revision、operation、checksum、额外搜索投影、外键和 CHECK；仅删除 `WITHOUT ROWID` 并把 sequence `INTEGER` 映射为 `BIGINT` |
 | v0.6 | 2026-08-03 | 更新 pi 基线至 `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`；对齐 sequence、materialized projection、branch cache、bounded branch query、search 和 compaction-trimmed context；保留 revision/idempotency 扩展 |
