@@ -3,7 +3,7 @@ id: urn:campusagent:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusAgent 会话 WebSocket API
-  version: 2.7.0
+  version: 2.8.0
   description: |
     调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
     安全 WebSocket。
@@ -169,7 +169,7 @@ components:
             params:
               message: 查询订单 20260730001
               attachment_ids:
-                - attachment-01
+                - attachment_011CZm8VpK4rNs6WtY2hDqfB
               idempotency_key: 6f46bc26-8a14-4d63-b7b1-8f1f933a0d50
               thinking: hidden
         - name: 仅使用附件发送用户消息
@@ -179,7 +179,7 @@ components:
             method: chat.send
             params:
               attachment_ids:
-                - attachment-01
+                - attachment_011CZm8VpK4rNs6WtY2hDqfB
               idempotency_key: b38b138f-e992-4ed5-b74f-0155ba0acd10
     ServerResponseFrame:
       name: ServerResponseFrame
@@ -293,7 +293,7 @@ components:
                       - type: text
                         text: 分析附件中的订单数据
                       - type: attachment
-                        attachment_id: attachment-01
+                        attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
                         content_version: version-01
                         filename: orders.pdf
                         media_type: application/pdf
@@ -328,7 +328,7 @@ components:
                     status: completed
                     content:
                       - type: attachment
-                        attachment_id: attachment-02
+                        attachment_id: attachment_011CZn9WqL5sOt7XuZ3iErgC
                         content_version: version-02
                         filename: image.png
                         media_type: image/png
@@ -621,16 +621,28 @@ components:
         服务端用它
         关联 toolcall 内容和 Tool Manager 事件；它不参与 Session 路由。
     AttachmentId:
-      allOf:
-        - $ref: '#/components/schemas/Identifier'
+      type: string
+      minLength: 35
+      maxLength: 35
+      pattern: '^attachment_[0-9A-Za-z]{24}$'
+      example: attachment_011CZm8VpK4rNs6WtY2hDqfB
       description: |
-        上层 Attachment Service 生成的不透明资源 ID。它不是授权凭据，
-        也不扩展 CampusAgent Runtime Session 路由；每次首次接受的新 chat.send
-        都必须结合
-        不可变调用服务身份和当前 session_id 解析。已接受幂等重试直接读取冻结
-        结果，不重新解析。调用方不能用 URL、路径或对象存储 key
-        替代该值。READY 后 ID 不得重新指向其他内容，删除后不得复用；接受时
-        仍额外冻结 content_version 和 sha256 以支持历史重放与安全撤销。
+        上层 Attachment Service 在服务端签发的不透明资源 ID。固定前缀后是
+        24 位 ASCII 大小写字母或数字，总长 35；ID 大小写敏感，客户端和
+        Runtime 必须按原始字节比较，不得自行生成、转小写、解析后缀或推断
+        时间、顺序和归属。
+
+        一个 Attachment Service 部署内必须用大小写敏感或 binary collation
+        的数据库唯一约束保证全局唯一；生成碰撞时重新签发。唯一约束必须
+        覆盖活动记录和永久 issued-ID/tombstone，物理删除不能释放 ID。ID 从
+        签发起绑定同一上传记录，READY 后不得重新指向其他内容，DELETED 后
+        不得复用。
+
+        格式正确和全局唯一都不构成授权，也不扩展 CampusAgent Runtime
+        Session 路由。每次首次接受的新 chat.send 仍必须结合不可变调用服务
+        身份和当前 session_id 解析；已接受幂等重试直接读取冻结结果，不重新
+        解析。调用方不能用 URL、路径或对象存储 key 替代该值。接受时还要冻结
+        content_version 和 sha256，以支持历史重放与安全撤销。
     AttachmentContentVersion:
       type: string
       minLength: 1
@@ -3139,6 +3151,13 @@ x-resource-identifiers:
       consumer: agent-service and Model Manager
       schema: '#/components/schemas/ModelId'
       semantics: CampusModel resource mapped internally to a private provider_model_id and descriptor
+    attachment_id:
+      issuer: mate-service Attachment Service
+      consumer: agent-service AttachmentResolver
+      schema: '#/components/schemas/AttachmentId'
+      uniquenessScope: one Attachment Service deployment
+      comparison: case-sensitive byte-for-byte
+      reuse: prohibited after deletion
 x-method-contracts:
   description: |
     RequestFrame.id 关联到下列 method 和成功 payload。调用方应在 pending map 中
@@ -3344,6 +3363,11 @@ x-attachments:
   websocketField: chat.send.params.attachment_ids
   websocketCapabilityRequired: false
   uploadOwner: mate-service Attachment Service over HTTP or Object Storage
+  idPattern: '^attachment_[0-9A-Za-z]{24}$'
+  idLength: 35
+  idCaseSensitive: true
+  idUniquenessScope: one Attachment Service deployment
+  idReuseAfterDeletion: prohibited
   agentServiceUploadEndpoint: false
   runtimePort: AttachmentResolver
   contentAdapter: AttachmentInputAssembler
@@ -3365,8 +3389,14 @@ x-attachments:
     内容嗅探、完整性验证、安全扫描和 session_id 绑定并进入 READY 后，调用方
     才提交 attachment_id。
 
+    Attachment Service 只能在服务端签发 attachment_id，并用大小写敏感或
+    binary collation 的数据库唯一约束保证一个服务部署内全局唯一。碰撞必须
+    重新签发；唯一约束覆盖活动记录和永久 issued-ID/tombstone，物理删除不能
+    释放 ID；READY 后不能改绑其他内容，DELETED 后不能复用。客户端和 Runtime
+    必须原样保存并逐字节比较，不能生成、规范化大小写或解析后缀。
+
     CampusAgent Runtime 不维护 tenant_id/user_id，也不把 attachment_id
-    当作授权凭据。
+    当作授权凭据；格式校验和唯一性检查都不能代替资源授权。
     AttachmentResolver 使用 Upgrade 固化的调用服务身份以及当前
     Session 的 session_id、agent_id、model_id 批量解析全部 ID。Attachment
     Service 在自身权威数据中完成最终用户归属判断；调用方不能在 Frame 中自报

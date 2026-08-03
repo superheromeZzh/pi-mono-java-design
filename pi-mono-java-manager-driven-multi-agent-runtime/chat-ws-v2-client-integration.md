@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.3.0 |
+| 文档版本 | 1.4.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.7.0 |
-| Manager 设计 | [`README.md`](README.md)，1.9.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.8.0 |
+| Manager 设计 | [`README.md`](README.md)，1.10.0 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -276,7 +276,7 @@ connect 成功前不得发送其他 RequestFrame。connect 失败后，这条未
   "id": "send-attachments-only-1",
   "method": "chat.send",
   "params": {
-    "attachment_ids": ["attachment-01"],
+    "attachment_ids": ["attachment_011CZm8VpK4rNs6WtY2hDqfB"],
     "idempotency_key": "b6f3c75f-6c66-4b30-830b-98094365cf84"
   }
 }
@@ -289,7 +289,7 @@ connect 成功前不得发送其他 RequestFrame。connect 失败后，这条未
   "method": "chat.send",
   "params": {
     "message": "分析附件中的订单数据",
-    "attachment_ids": ["attachment-01"],
+    "attachment_ids": ["attachment_011CZm8VpK4rNs6WtY2hDqfB"],
     "idempotency_key": "78230de7-7f45-454e-955a-61009bc207e0"
   }
 }
@@ -880,6 +880,13 @@ UPLOADING -> PROCESSING -> READY
 扫描后的 MIME、实际字节数和状态，但 `chat.send` 只提交 ID；不得把 URL、路径、
 MIME、文件名、size、hash、凭据或 Base64 复制到 WebSocket Frame。
 
+正式 `attachment_id` 必须由 Attachment Service 返回并严格匹配
+`^attachment_[0-9A-Za-z]{24}$`，总长 35。它大小写敏感且不透明；客户端必须
+原样保存和发送，不得自行生成、转小写、解析后缀或依赖后缀排序。同一上传
+流程的重试沿用服务端返回的同一 ID，新上传使用新 ID；删除后的 ID 永不复用。
+客户端可以把正则用于本地输入防错，但格式合法或知道 ID 都不代表有权使用，
+Runtime 仍会按调用服务身份和当前 `session_id` 校验。
+
 ### 12.2 按有效 Model 输入策略预检
 
 connect、`models.list` 和 `model.set` 返回同一种 `ModelSummary.input`。UI 在选择
@@ -912,7 +919,7 @@ Runtime 静默忽略旧附件；需要显式创建分支或使用上层提供的
   "method": "chat.send",
   "params": {
     "message": "分析附件中的订单数据",
-    "attachment_ids": ["attachment-01"],
+    "attachment_ids": ["attachment_011CZm8VpK4rNs6WtY2hDqfB"],
     "idempotency_key": "6f46bc26-8a14-4d63-b7b1-8f1f933a0d50"
   }
 }
@@ -970,7 +977,7 @@ Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请�
     {"type": "text", "text": "分析附件中的订单数据"},
     {
       "type": "attachment",
-      "attachment_id": "attachment-01",
+      "attachment_id": "attachment_011CZm8VpK4rNs6WtY2hDqfB",
       "content_version": "version-01",
       "filename": "orders.pdf",
       "media_type": "application/pdf",
@@ -1044,8 +1051,10 @@ WebSocket `chat.send` 命令。紧急安全撤销会显式失败或中止后续 
 - Pod 重启后能展示 `interrupted` Message/RunRecord，不假设未完整内容块尾部
   可恢复；客户端不假设 IP 粘性等于跨 Pod run owner；
 - Request 超时使用新 request ID 和原 idempotency key；
-- 上传状态未到 READY 时不发送；按 ModelSummary.input 预检 MIME、数量和字节，
-  WebSocket 只提交 attachment_ids，不提交 URL、MIME、文件名、size 或 Base64；
+- 上传状态未到 READY 时不发送；只接受 Attachment Service 返回且匹配
+  `^attachment_[0-9A-Za-z]{24}$` 的 ID，按原始大小写保存和比较，不自行生成、
+  解析或规范化；按 ModelSummary.input 预检 MIME、数量和字节，WebSocket 只
+  提交 attachment_ids，不提交 URL、MIME、文件名、size 或 Base64；
 - 带附件 send 的任一引用失败时不乐观显示为已接受；成功后按
   user_message_id 对齐带 AttachmentContent 的权威历史；
 - `INVALID_ATTACHMENT` 不用于探测资源存在性，`ATTACHMENT_NOT_READY` 按建议
@@ -1092,6 +1101,7 @@ Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecor
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.0 | 2026-08-03 | 将 `attachment_id` 收敛为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 ID 只能由 Attachment Service 签发、大小写敏感且不透明，客户端必须原样保存、不得自行生成或解析，删除后不复用，且格式合法不代表获得 Session 授权；同步 AsyncAPI 2.8.0 和 Manager 1.10.0 |
 | 1.3.0 | 2026-08-03 | 将 `agent_id` 收敛为 `^agent_[0-9A-Za-z]{24}$`、`model_id` 收敛为 `^model_[0-9A-Za-z]{24}$`；明确资源 ID 大小写敏感、不透明、由各自管理服务生成，客户端不解析后缀或用 Provider 模型名代替，并按 create/resume 语义核对响应 ID；同步 AsyncAPI 2.7.0 和 Manager 1.9.0 |
 | 1.2.0 | 2026-08-03 | 统一 CampusAgent / agent-service 及规范 URL；将直连边界收窄为 mate-service/已授权服务端，认证复用既有内部网关；将方法集收敛为八个，补齐纯附件、text-only steer、Tool 脱敏/截断、Response-before-Event、单连接 generation 接管、数据库权威历史、IP 粘性限制和 Pod 重启 interrupted 恢复；同步 AsyncAPI 2.6.0 和 Manager 1.8.0 |
 | 1.1.0 | 2026-08-03 | 增加可直接实施的附件上传状态机、完整 AttachmentContextPlan/Model 切换预检、仅 ID 的 chat.send、批量原子接受、错误动作、幂等重试、AttachmentContent 历史、source digest 与 Session 保留/删除说明；同步 AsyncAPI 2.5.0 和 Manager 1.7.0 |

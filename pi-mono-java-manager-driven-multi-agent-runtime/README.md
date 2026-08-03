@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.9.0 |
+| 文档版本 | 1.10.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -43,6 +43,9 @@ Storage 上传、内容嗅探、安全扫描、最终用户授权和 `session_id
 `chat.send` 只提交不透明 `attachment_ids[]`。Runtime 通过
 `AttachmentResolver` 把所有 ID 原子解析为不可变内容版本和受控读取句柄，
 再由 `AttachmentInputAssembler` 按有效 Model 输入策略构造本次模型输入。
+每个 `attachment_id` 由 Attachment Service 签发，严格匹配
+`^attachment_[0-9A-Za-z]{24}$`，总长 35、大小写敏感，并在该 Attachment
+Service 部署内全局唯一；格式和唯一性都不代替 Session 级授权。
 
 模型只直接调用以下三个通用工具：
 
@@ -1279,6 +1282,9 @@ session_id
 `RequestFrame.id` 只是连接内 req/res 关联标识；`tool_call_id` 只关联一个 run
 内的模型 ToolCall 与 Tool Manager 执行事件；`tool_id`、`attachment_id` 和
 模板 ID 属于各 Manager 或资源服务。它们不扩展 Session 路由模型。
+其中 `attachment_id` 是 Attachment Service 的资源地址，不是第七类 Runtime
+核心路由 ID；Adapter 只校验格式，Resolver 仍按调用服务身份和当前
+`session_id` 解析并授权。
 
 命令集固定如下：
 
@@ -1668,6 +1674,16 @@ Attachment Service 拥有以下权威数据：
 - 病毒扫描、内容安全、隔离、过期、删除和保留状态；
 - 对 Runtime 发放的短期读取句柄和租约。
 
+Attachment Service 只能在服务端签发 `attachment_id`。其格式固定为
+`attachment_` 加 24 位 ASCII 大小写字母或数字，即
+`^attachment_[0-9A-Za-z]{24}$`，总长 35。ID 大小写敏感、按原始字节比较，
+客户端和 Runtime 不得自行生成、转小写、解析后缀或从后缀推断时间、顺序和
+归属。一个 Attachment Service 部署内必须使用大小写敏感或 binary collation
+的数据库唯一约束保证全局唯一；生成碰撞只能重新签发，不能把碰撞值返回给
+调用方。该约束必须覆盖活动记录和永久 issued-ID/tombstone 记录，物理删除
+文件或业务记录不能释放 ID。ID 从签发起绑定同一上传记录，进入 `READY` 后
+不得改绑其他内容，进入 `DELETED` 后也不得重新使用。
+
 上传生命周期固定为：
 
 ```text
@@ -1680,7 +1696,8 @@ UPLOADING -> PROCESSING -> READY
 只有 `READY` 可以首次用于 `chat.send`。Attachment Service 可以建模
 tenant/user，但 CampusAgent Runtime 不接收、持久化或使用这些字段；Runtime
 只携带已认证的调用服务身份和当前 `session_id` 解析引用。`attachment_id` 是
-不透明资源标识，不是 Bearer capability，知道 ID 本身不构成读取权限。
+不透明资源标识，不是 Bearer capability；格式合法、全局唯一或知道 ID 本身
+都不构成读取权限。
 
 #### 9.11.2 Runtime 端口和不可变读取句柄
 
@@ -1866,7 +1883,7 @@ pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固
 ```json
 {
   "type": "attachment",
-  "attachment_id": "attachment-01",
+  "attachment_id": "attachment_011CZm8VpK4rNs6WtY2hDqfB",
   "content_version": "version-01",
   "filename": "orders.pdf",
   "media_type": "application/pdf",
@@ -1922,7 +1939,7 @@ tombstone 继续
 | WebSocket Upgrade route | 规范路径为 `/agent-service/v1/ws/chat`；不解析业务 query；信任并校验既有内部网关认证结果，创建不可变 ConnectionAuthContext；浏览器由 `mate-service` 承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.7.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.8.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、每 Pod 维护单活动连接 generation、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件 claim；Managed Profile 不生成 Session JSONL | 架构改造 |
 | `ManagedRunHub` | 新增；同 Pod 维护 partial Message、active tools、终态、run_seq 和原子恢复订阅；Pod 重启时通过 Store 收束为 interrupted | 架构改造 |
@@ -2022,9 +2039,10 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   委托授权以不可变短期凭据传递，不能由模型参数提供；
 - Upgrade URL、Prompt、数据库、事件和日志均不保存认证凭据；
 - 实时、快照和历史共用 ThinkingProjectionPolicy；
-- attachment_id 的 tenant/user 所有权由上层 Attachment Service 校验；Runtime
-  必须用不可变 service principal 和 session_id 批量解析不可变版本，只通过
-  read handle 读取，并按当前 Model 输入策略重新校验可信 MIME、数量和字节数；
+- attachment_id 的格式与部署级唯一性由上层 Attachment Service 保证，
+  tenant/user 所有权也由其校验；Runtime 必须用不可变 service principal 和
+  session_id 批量解析不可变版本，只通过 read handle 读取，并按当前 Model
+  输入策略重新校验可信 MIME、数量和字节数；
 - Attachment Service、Tool Manager 和 Model Manager 分别是附件、工具和模型
   每次调用的最终授权/状态执行点。
 
@@ -2189,6 +2207,12 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 ### 12.7 附件生命周期
 
+- AttachmentId 只接受 `^attachment_[0-9A-Za-z]{24}$`；错前缀、23/25 位后缀、
+  标点或空白均被拒绝。大小写不同的合法字符串是不同资源，错误大小写不能
+  alias 到既有附件；客户端与 Runtime 不执行大小写归一化；
+- Attachment Service 的大小写敏感数据库唯一约束拒绝碰撞，碰撞时重新签发；
+  删除后仍保留 issued-ID/tombstone 以占用 ID；`READY` 后改绑和 `DELETED`
+  后复用都失败。上述唯一性测试不代替调用服务与 session_id 授权测试；
 - 批量解析保持 attachment_ids 顺序；重复 ID、任一无效项或部分 retain 失败都
   整批失败，不创建用户 Message、run 或 accepted 幂等结果；
 - Frame 中提交 tenant_id、user_id、URL、path、MIME、filename、size、hash 或
@@ -2248,6 +2272,9 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - 附件以 HTTP/Object Storage 数据面上传、WebSocket 只传 ID；Runtime 批量解析
   不可变版本与受控句柄，幂等接受边界、Model 输入策略、历史快照、retention
   claim 和 Session 删除 release 均有可观察契约；
+- Attachment ID 严格匹配 `^attachment_[0-9A-Za-z]{24}$`，由 Attachment
+  Service 服务端签发并以大小写敏感唯一约束保证部署级全局唯一，`READY` 后
+  不改绑、删除后不复用，且格式或唯一性不构成授权；
 - 认证凭据不进入 Agent 数据和协议事件；
 - RuntimeSessionStore 以数据库保存权威 Session、Message、RunRecord、幂等结果和
   revision，Managed Profile 不生成 Session JSONL；
@@ -2258,6 +2285,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.10.0 | 2026-08-03 | 将 `attachment_id` 冻结为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确其由 Attachment Service 服务端签发、大小写敏感、在服务部署内全局唯一、碰撞重签、READY 后不改绑且删除后不复用；补充 binary 唯一约束、逐字节比较、格式与唯一性不等于授权及边界测试；同步 AsyncAPI 2.8.0 和客户端指南 1.4.0 |
 | 1.9.0 | 2026-08-03 | 参考 Anthropic Managed Agents 服务端生成的 `agent_` 资源 ID 示例，将 Campus `agent_id` 冻结为 `^agent_[0-9A-Za-z]{24}$`，将 CampusModel `model_id` 冻结为 `^model_[0-9A-Za-z]{24}$`；明确两者大小写敏感、不透明、由各自管理服务生成，区分 `model_` 资源 ID 与私有 Provider model ID，并增加大小写敏感文件系统、case-fold 冲突和目录/manifest 精确匹配门禁；同步 AsyncAPI 2.7.0 和客户端指南 1.3.0 |
 | 1.8.0 | 2026-08-03 | 对外统一为 CampusAgent / agent-service，规范 URL 收敛为 `/agent-service/v1/ws/chat`；Managed 资源目录改为 `.campusagent`；定义既有内部网关认证、用户 IP 粘性、单 Pod 连接 generation 接管、数据库 RuntimeSessionStore 和 Pod 重启 interrupted 语义；收窄 Chat 方法集，补齐纯附件消息、Tool 脱敏/截断、Response-before-Event 契约，并同步 AsyncAPI 2.6.0 和客户端指南 1.2.0 |
 | 1.7.0 | 2026-08-03 | 定义 HTTP/Object Storage 上传与 WebSocket 附件引用边界；新增 AttachmentResolver、不可变 read handle/lease、完整 AttachmentContextPlan、Model 切换校验、幂等原子接受、AttachmentContent 历史、source/derived digest 边界、retention claim、删除 outbox、安全撤销和附件生命周期图，并同步 AsyncAPI 2.5.0、客户端指南 1.1.0 |

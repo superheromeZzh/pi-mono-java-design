@@ -731,7 +731,7 @@ title Managed attachment reference and model input lifecycle
 ' Observed behavior: both baselines can carry inline image content but do not
 ' define generic attachment references, immutable read handles, or retention claims.
 ' Target design: mate-service owns attachment upload and authority; WebSocket
-' carries opaque IDs and Runtime accepts only an all-or-nothing immutable batch.
+' carries globally unique opaque IDs and Runtime accepts only an all-or-nothing immutable batch.
 ' Design reason: keep large-object transfer off the Chat control plane, prevent
 ' client metadata forgery and TOCTOU, and preserve reproducible Session history.
 
@@ -761,7 +761,7 @@ participant "Model Manager Provider" as Model
 
 User -> Upstream : request file upload
 Upstream -> Attach : create upload intent and bind session_id
-Attach --> Upstream : attachment_id and upload target
+Attach --> Upstream : globally unique attachment_id\nand upload target
 User -> ObjectStore : upload bytes via HTTP
 Upstream -> Attach : finalize upload
 Attach -> ObjectStore : read and verify bytes
@@ -812,6 +812,14 @@ note over Upstream,ObjectStore
 HTTP or Object Storage is the file data plane.
 The WebSocket is only the command and event control plane.
 agent-service exposes no upload endpoint.
+end note
+
+note over Upstream,Attach
+attachment_id = attachment_ + 24 alphanumeric characters.
+It is case-sensitive and deployment-global.
+Use a binary unique constraint and reissue on collision.
+Never rebind after READY or reuse after deletion.
+Syntax and uniqueness do not grant authorization.
 end note
 
 note over WS,Resolver

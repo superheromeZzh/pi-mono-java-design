@@ -4,13 +4,13 @@
 
 | 项目 | 值 |
 |---|---|
-| 文档版本 | `1.7.0` |
+| 文档版本 | `1.8.0` |
 | 状态 | 目标设计对比，CampusAgent v2 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8`，Gateway Protocol v4 |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
-| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.9.0` |
-| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.7.0`、Frame 协议号 `2` |
+| CampusAgent 设计基线 | Manager 多 Agent 设计 `1.10.0` |
+| CampusAgent 协议制品基线 | `chat-ws-v2.asyncapi.yaml`，协议制品版本 `2.8.0`、Frame 协议号 `2` |
 | 本文范围 | WebSocket 连接、命令、流式事件、恢复、认证与协议制品 |
 
 本文使用三种状态，不能相互替代：
@@ -115,9 +115,9 @@ commit:     1f7a5423219edfa4519d8719f1cc8a188ed72873
 CampusAgent v2 尚未实现；本节描述的全部行为都是目标设计。其规范来源是以下
 三个仓库内制品：
 
-- [Manager 驱动的多 Agent 运行设计 1.9.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
-- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.7.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
-- [CampusAgent Chat WebSocket v2 客户端接入指南 1.3.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
+- [Manager 驱动的多 Agent 运行设计 1.10.0](../pi-mono-java-manager-driven-multi-agent-runtime/README.md)
+- [CampusAgent Chat WebSocket v2 中文 AsyncAPI 2.8.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+- [CampusAgent Chat WebSocket v2 客户端接入指南 1.4.0](../pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md)
 
 这一部分是 **target-only design**，不是 pi-mono-java 当前行为。相对 Java
 v1 的改变属于架构改造和安全加固；相对 OpenClaw 的差异主要属于产品约束。
@@ -497,7 +497,7 @@ canonical thinking 内容被某连接的披露策略抑制时，该连接仍收�
 
 收益是带宽、类型和事件职责更清晰；代价是客户端必须维护按
 `message_id + content_index` 合并的状态机，并在终态用完整 Message 对账。
-CampusAgent AsyncAPI 2.7.0 为此进一步规定 start/delta/end、Response
+CampusAgent AsyncAPI 2.8.0 为此进一步规定 start/delta/end、Response
 先于发起连接的
 run 事件、`user_message_id` 乐观消息对账、开放内容快照和 RunRecord 历史；
 完整算法见
@@ -709,6 +709,15 @@ Service 还要实现 reservation/lease、幂等 retain/release 和崩溃 reconci
 agent-service 本身不提供文件上传端点；活动 run 上的 `chat.steer` v1 也不接受
 附件，调用方必须等待 run 结束后再用新的 `chat.send` 提交。
 
+CampusAgent 还把单项资源格式冻结为
+`^attachment_[0-9A-Za-z]{24}$`（总长 35）。该 ID 由 `mate-service`
+Attachment Service 服务端签发、大小写敏感，在一个 Attachment Service 部署内
+通过 binary 唯一约束保证全局唯一，碰撞时重签，READY 后不改绑且删除后不
+复用；永久 issued-ID/tombstone 防止物理删除释放 ID。客户端和 Runtime
+逐字节比较，不解析后缀。这是 CampusAgent 的
+target-only 资源契约，不是 OpenClaw attachment envelope 的既有行为；同时，
+唯一性和格式都不代替调用服务身份与当前 `session_id` 授权。
+
 ### 11.4 凭据和审计
 
 CampusAgent 的入站 JWT、签发私钥和内部服务 access-token 都不能进入 Prompt、
@@ -862,8 +871,8 @@ CampusAgent 后续请求里没有 `agent_id` 或 `session_id`，不是信息缺�
 
 ```jsonl
 {"type":"req","id":"text-only","method":"chat.send","params":{"message":"总结材料","idempotency_key":"idem-text"}}
-{"type":"req","id":"attachment-only","method":"chat.send","params":{"attachment_ids":["att-1","att-2"],"idempotency_key":"idem-attachments"}}
-{"type":"req","id":"mixed","method":"chat.send","params":{"message":"比较这两份材料","attachment_ids":["att-1","att-2"],"idempotency_key":"idem-mixed"}}
+{"type":"req","id":"attachment-only","method":"chat.send","params":{"attachment_ids":["attachment_011CZm8VpK4rNs6WtY2hDqfB","attachment_011CZn9WqL5sOt7XuZ3iErgC"],"idempotency_key":"idem-attachments"}}
+{"type":"req","id":"mixed","method":"chat.send","params":{"message":"比较这两份材料","attachment_ids":["attachment_011CZm8VpK4rNs6WtY2hDqfB","attachment_011CZn9WqL5sOt7XuZ3iErgC"],"idempotency_key":"idem-mixed"}}
 ```
 
 仅附件请求不生成隐藏默认 Prompt。其权威 User Message 只包含附件；混合请求
@@ -975,6 +984,10 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 - `agent_id/model_id` 分别严格匹配 `^agent_[0-9A-Za-z]{24}$` 和
   `^model_[0-9A-Za-z]{24}$`，总长均为 30、大小写敏感且按 opaque string
   处理；格式错误、资源不存在和 Agent-model 未授权分别得到稳定错误；
+- `attachment_id` 严格匹配 `^attachment_[0-9A-Za-z]{24}$`、总长 35；由
+  Attachment Service 服务端签发并通过大小写敏感唯一约束保证部署级全局唯一，
+  碰撞重签、READY 后不改绑、删除后不复用；客户端和 Runtime 不归一化大小写，
+  且格式或唯一性不代替 service principal + session_id 授权；
 - 既有内部网关私钥/JWT认证在 `101` 前完成；私钥原文不传输，私有 Header/claim
   不写入本文；入站凭据不转发，Manager 调用使用 target-audience access-token；
 - 三类封闭 Frame 的判别、未知顶层字段拒绝和 `payload/error` 互斥；
@@ -1049,6 +1062,7 @@ Session-scoped，不因为 Gateway 存在而允许连接内切换 Agent 或 Sess
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `1.8.0` | 2026-08-03 | 同步 CampusAgent Manager 1.10.0、AsyncAPI 2.8.0 和客户端指南 1.4.0；将 CampusAgent 目标 `attachment_id` 冻结为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 Attachment Service 服务端签发、大小写敏感、部署级全局唯一、碰撞重签、READY 后不改绑、删除后不复用，以及格式与唯一性不构成授权；OpenClaw 既有 attachment envelope 行为不变。 |
 | `1.7.0` | 2026-08-03 | 同步 CampusAgent Manager 1.9.0、AsyncAPI 2.7.0 和客户端指南 1.3.0；明确 OpenClaw 不定义 Campus 资源 ID、pi-mono-java v1 无 Agent/Model 路由契约，以及 CampusAgent/CampusModel 服务端签发、大小写敏感的 30 字符 opaque ID 规则；统一目标协议示例。 |
 | `1.6.0` | 2026-08-03 | 目标产品统一为 CampusAgent/agent-service，服务 API 地址改为 `/agent-service/v1/ws/chat` 并与 Frame 协议 2 分层；同步 Manager 1.8.0、AsyncAPI 2.6.0 和客户端指南 1.2.0；明确 mate-service 服务调用、既有网关私钥/JWT认证、`.campusagent`、数据库 RuntimeSessionStore、IP affinity、单活动连接接管、Pod 重启 interrupted、八个方法、纯附件消息及 Tool 脱敏/截断边界。旧版本条目保留当时的 CampusClaw 名称。 |
 | `1.5.0` | 2026-08-03 | 同步 CampusClaw Manager 1.7.0、AsyncAPI 2.5.0 和客户端指南 1.1.0；基于 OpenClaw 固定 commit 补充 base64 attachment envelope、实际字节/MIME 校验与 staging 证据，并对比 CampusClaw 的 HTTP/Object Storage、不可变引用、完整 AttachmentContextPlan、read lease、source/derived digest、retention claim、幂等接受和 Session 删除边界 |
