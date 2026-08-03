@@ -1,11 +1,11 @@
 # pi-mono Java 集中式 GaussDB 会话存储 SR 设计
 
 > 文档编号：SR-MEM-001
-> 版本：v0.11
+> 版本：v0.12
 > 日期：2026-08-03
 > 状态：设计评审稿
 > pi 源码基线：[`f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee`](https://github.com/badlogic/pi-mono/tree/f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee)
-> GaussDB 设计参考基线：本仓库 `7d94871aedd71c75b83535999493cf7b2a50cfdd`；[`agent-metadata-gaussdb-design/schema.sql`](./agent-metadata-gaussdb-design/schema.sql) 和 [`chat-ws-v2.asyncapi.yaml`](./pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
+> GaussDB 设计参考基线：本仓库 `8c08e5a06fa6e09ef2df4c2ca48140123394b4e8`；[`agent-metadata-gaussdb-design/schema.sql`](./agent-metadata-gaussdb-design/schema.sql) 和 [`chat-ws-v2.asyncapi.yaml`](./pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml)
 > Java 源码基线：无；本文 Java/GaussDB 内容均为 target-only design
 > 数据库约束：集中式 GaussDB
 > JDBC 约束：openGauss JDBC `6.0.0-htrunks.csi.gaussdb_kernel.opengaussjdbc.r1`
@@ -301,7 +301,7 @@ command 不包含 operation id、expected revision 或 expected leaf。并发模
 
 ## 6. GaussDB DDL
 
-DDL 分为 bootstrap、`001_initial.sql` 和 `002_branch_tips.sql`。migration id 与 SQLite 完全一致。每张表的 `COMMENT ON COLUMN` 紧跟建表语句：`migrations` 注释由 bootstrap 执行，失败时不得继续 migration runner；其余注释与所属 `001` 或 `002` 同事务，任一字段不存在或注释失败时整个 migration 回滚。列注释不得包含凭据、payload 内容或其他敏感信息。
+DDL 分为 bootstrap、`001_initial.sql` 和 `002_branch_tips.sql`。migration id 与 SQLite 完全一致。每张表的 `COMMENT ON COLUMN` 紧跟建表语句：`migrations` 注释由 bootstrap 执行，失败时不得继续 migration runner；其余注释与所属 `001` 或 `002` 同事务，任一字段不存在或注释失败时整个 migration 回滚。列注释直接说明“存什么、什么时候为空、与其他字段的关系”，不单独使用“稀疏投影”、“权威父链”或 `root-to-tip` 等设计术语。列注释不得包含凭据、payload 内容或其他敏感信息。
 
 ### 6.1 Bootstrap：`migrations`
 
@@ -311,8 +311,8 @@ CREATE TABLE IF NOT EXISTS migrations (
     applied_at  TIMESTAMPTZ(3) NOT NULL
 );
 
-COMMENT ON COLUMN migrations.id IS '已执行迁移脚本的唯一标识，当前取 SQL 文件名';
-COMMENT ON COLUMN migrations.applied_at IS '迁移 SQL 执行完成后登记的时间，仅随迁移事务成功提交后生效';
+COMMENT ON COLUMN migrations.id IS '迁移脚本的名称，例如 001_initial.sql；系统用它判断该脚本是否已经执行';
+COMMENT ON COLUMN migrations.applied_at IS '该迁移脚本执行完成后登记的时间；脚本或事务失败时不会保留这条记录';
 ```
 
 启动时，migration runner 先读取这张表：已有 `id` 的脚本直接跳过，尚未登记的脚本才执行。每个脚本和对应 `migrations` insert 在同一事务中完成，`applied_at` 以 UTC `OffsetDateTime` typed parameter 写入。所有 migration `id` 必须为 1–128 字符，超长脚本名在发布检查阶段拒绝。
@@ -331,12 +331,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     active_leaf_id     VARCHAR(128)
 );
 
-COMMENT ON COLUMN sessions.id IS '会话唯一标识';
-COMMENT ON COLUMN sessions.created_at IS '会话创建时间';
-COMMENT ON COLUMN sessions.cwd IS '会话创建时记录的工作目录路径';
-COMMENT ON COLUMN sessions.parent_session_id IS '父会话的逻辑标识；无父会话时为空';
-COMMENT ON COLUMN sessions.metadata IS '可选会话元数据 JSON 对象；无元数据时为 SQL NULL';
-COMMENT ON COLUMN sessions.active_leaf_id IS '当前活动叶 entry 标识；leaf 事件写入 targetId 而非事件自身 id，可为空';
+COMMENT ON COLUMN sessions.id IS '会话的唯一 ID，用于关联该会话的 entry（历史记录）、序号、分支和汇总数据';
+COMMENT ON COLUMN sessions.created_at IS '创建这个会话的时间';
+COMMENT ON COLUMN sessions.cwd IS '创建会话时使用的工作目录；可用于按工作目录筛选会话';
+COMMENT ON COLUMN sessions.parent_session_id IS '当前会话来源于哪个父会话；未指定时为空，fork 时通常为来源会话的 ID';
+COMMENT ON COLUMN sessions.metadata IS '创建会话时由调用方提供的附加信息 JSON 对象；未提供时为 SQL NULL';
+COMMENT ON COLUMN sessions.active_leaf_id IS '当前选中的 entry（历史记录）ID，系统从它向前还原会话上下文；新建会话或 leaf.targetId 为 null 时为空；写入 leaf 事件时保存 targetId，不保存 leaf 事件自身 ID';
 
 CREATE INDEX IF NOT EXISTS idx_sessions_created_at
     ON sessions (created_at DESC);
@@ -358,13 +358,13 @@ CREATE TABLE IF NOT EXISTS session_entries (
     PRIMARY KEY (session_id, id)
 );
 
-COMMENT ON COLUMN session_entries.session_id IS 'entry 所属会话标识';
-COMMENT ON COLUMN session_entries.id IS 'entry 在所属会话内的标识';
-COMMENT ON COLUMN session_entries.entry_seq IS 'entry 在所属会话内从 1 开始分配的追加序号';
-COMMENT ON COLUMN session_entries.parent_id IS '同一会话中的父 entry 标识；根 entry 为空，是会话树父链的权威字段';
-COMMENT ON COLUMN session_entries.type IS 'entry 类型判别值，用于选择 payload 的解析规则';
-COMMENT ON COLUMN session_entries.timestamp IS 'entry 自带的事件时间，不是数据库写入时间';
-COMMENT ON COLUMN session_entries.payload IS '去除 id、parentId、timestamp 和 type 后的类型专属 JSON';
+COMMENT ON COLUMN session_entries.session_id IS '这条 entry（历史记录）属于哪个会话；对应 sessions.id';
+COMMENT ON COLUMN session_entries.id IS '这条 entry（历史记录）的 ID；在同一个会话内唯一';
+COMMENT ON COLUMN session_entries.entry_seq IS '这条 entry 在会话中的写入顺序号；从 1 开始，每次成功追加后递增';
+COMMENT ON COLUMN session_entries.parent_id IS '这条 entry 的直接父 entry ID；会话的第一条 entry 为空，系统据此还原各条会话分支';
+COMMENT ON COLUMN session_entries.type IS '这条 entry 的种类，例如 message、model_change 或 label；系统据此解释 payload';
+COMMENT ON COLUMN session_entries.timestamp IS '这条 entry 产生时携带的事件时间；不是数据库保存这行数据的时间';
+COMMENT ON COLUMN session_entries.payload IS '这条 entry 的具体内容 JSON；ID、父 entry、事件时间和类型已分别保存在其他字段中';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_session_seq
     ON session_entries (session_id, entry_seq);
@@ -380,8 +380,8 @@ CREATE TABLE IF NOT EXISTS session_sequences (
     next_seq    BIGINT       NOT NULL
 );
 
-COMMENT ON COLUMN session_sequences.session_id IS '序号状态所属会话标识；每个会话一行';
-COMMENT ON COLUMN session_sequences.next_seq IS '下一条 entry 将使用的 entry_seq；不是当前最大序号或条目数';
+COMMENT ON COLUMN session_sequences.session_id IS '这行序号记录属于哪个会话；对应 sessions.id，每个会话一行';
+COMMENT ON COLUMN session_sequences.next_seq IS '下一条新 entry 要使用的 entry_seq；新建会话时为 1，每次成功追加后加 1';
 
 CREATE TABLE IF NOT EXISTS branch_entries (
     session_id  VARCHAR(128) NOT NULL,
@@ -391,10 +391,10 @@ CREATE TABLE IF NOT EXISTS branch_entries (
     PRIMARY KEY (session_id, branch_id, entry_id)
 );
 
-COMMENT ON COLUMN branch_entries.session_id IS '缓存分支成员所属会话标识';
-COMMENT ON COLUMN branch_entries.branch_id IS '可重建缓存中一条 root-to-tip 路径的标识';
-COMMENT ON COLUMN branch_entries.entry_id IS '该缓存路径包含的 entry 标识';
-COMMENT ON COLUMN branch_entries.entry_seq IS '缓存成员对应 entry 的会话内追加序号，用于路径排序；不是分支内重新编号';
+COMMENT ON COLUMN branch_entries.session_id IS '这条缓存的分支成员记录属于哪个会话；对应 sessions.id';
+COMMENT ON COLUMN branch_entries.branch_id IS '缓存路径的 ID；相同 ID 的多行按 entry_seq 排列后组成从会话起点到分支末端的一条路径，并与 branch_tips.branch_id 对应；缓存可根据 session_entries 重新生成';
+COMMENT ON COLUMN branch_entries.entry_id IS '这条缓存路径中包含的 entry ID；对应同一会话的 session_entries.id，同一 entry 可出现在多条缓存路径中';
+COMMENT ON COLUMN branch_entries.entry_seq IS '该 entry 在整个会话中的写入顺序号；从 session_entries 复制，用于按原顺序排列路径中的 entry，不是分支内重新编号';
 
 CREATE INDEX IF NOT EXISTS idx_branch_entries_session_branch
     ON branch_entries (session_id, branch_id);
@@ -410,8 +410,8 @@ CREATE TABLE IF NOT EXISTS session_materialized (
     payload     JSONB        NOT NULL
 );
 
-COMMENT ON COLUMN session_materialized.session_id IS '会话摘要投影所属会话标识；每个会话一行';
-COMMENT ON COLUMN session_materialized.payload IS '由 entry 追加日志累积生成的会话摘要 JSON；当前含名称、用量统计、当前模型和思考级别，可重建';
+COMMENT ON COLUMN session_materialized.session_id IS '这份会话汇总属于哪个会话；对应 sessions.id，每个会话一行';
+COMMENT ON COLUMN session_materialized.payload IS '为快速打开会话而保存的汇总信息 JSON，包含会话名称、消息数、Token 和费用统计、当前模型及思考级别；不包含完整 entry，可根据 session_entries 重新计算';
 
 CREATE TABLE IF NOT EXISTS entry_materialized (
     session_id  VARCHAR(128) NOT NULL,
@@ -421,10 +421,10 @@ CREATE TABLE IF NOT EXISTS entry_materialized (
     PRIMARY KEY (session_id, entry_seq, type)
 );
 
-COMMENT ON COLUMN entry_materialized.session_id IS '稀疏 entry 投影所属会话标识';
-COMMENT ON COLUMN entry_materialized.entry_seq IS '投影来源 entry 的会话内追加序号';
-COMMENT ON COLUMN entry_materialized.type IS '投影事件类型；当前实现仅写入 label';
-COMMENT ON COLUMN entry_materialized.payload IS '投影事件 JSON；当前保存 label 的 targetId 与 label，重放时空白或 null 表示清除';
+COMMENT ON COLUMN entry_materialized.session_id IS '这条标签变更记录属于哪个会话；对应 sessions.id，完整 entry 仍保存在 session_entries';
+COMMENT ON COLUMN entry_materialized.entry_seq IS '这条记录来自哪一条 entry 的写入顺序号；对应 session_entries.entry_seq，读取时按此顺序处理标签变更';
+COMMENT ON COLUMN entry_materialized.type IS '这条记录的内容种类；当前实现只写入 label，表示设置、修改或删除标签';
+COMMENT ON COLUMN entry_materialized.payload IS '一次标签设置、修改或删除的内容 JSON，保存 targetId 和 label；label 为 null、空字符串或只含空白时表示删除该 targetId 的标签；该行不是 targetId 的最终标签快照';
 
 CREATE INDEX IF NOT EXISTS idx_entry_materialized_session_type_seq
     ON entry_materialized (session_id, type, entry_seq);
@@ -443,9 +443,9 @@ CREATE TABLE IF NOT EXISTS branch_tips (
     UNIQUE (session_id, branch_id)
 );
 
-COMMENT ON COLUMN branch_tips.session_id IS '缓存分支 tip 所属会话标识';
-COMMENT ON COLUMN branch_tips.tip_id IS '缓存分支当前 tip 的 entry 标识；不等同于 sessions.active_leaf_id';
-COMMENT ON COLUMN branch_tips.branch_id IS 'tip 所属缓存分支路径标识；在会话内唯一';
+COMMENT ON COLUMN branch_tips.session_id IS '这条分支末端记录属于哪个会话；对应 sessions.id';
+COMMENT ON COLUMN branch_tips.tip_id IS '该缓存路径最后一个 entry 的 ID；对应同一会话的 session_entries.id，但不一定等于 sessions.active_leaf_id';
+COMMENT ON COLUMN branch_tips.branch_id IS 'tip_id 所在缓存路径的 ID；对应 branch_entries.branch_id，同一会话内每条路径只有一条末端记录';
 
 DELETE FROM branch_tips;
 DELETE FROM branch_entries;
@@ -587,7 +587,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 - 每张表列名、可空性和列顺序一致。
 - 主键、唯一索引、普通索引名称及列顺序一致。
 - 类型差异严格等于：16 个标识或引用列为 `VARCHAR(128)`，2 个 type 列为 `VARCHAR(64)`，`sessions.cwd` 为 `VARCHAR(512)`，4 个 sequence 列为 `BIGINT`，3 个时间列为 `TIMESTAMPTZ(3)`，4 个 JSON document 列为 `JSONB`。
-- 8 张表的 30 个字段均有非空且与本文字段语义一致的列注释。
+- 8 张表的 30 个字段均有非空且与本文字段语义一致的列注释；注释直接说明存储内容、空值条件和关键关系，不以抽象设计术语代替字段含义。
 - `002_branch_tips.sql` 执行后删除 `idx_branch_entries_session_branch`。
 - 不存在 revision、operation、search document 或其他额外表/列。
 
@@ -689,6 +689,7 @@ JSONL importer 只向上述 SQLite 对齐表写入，不创建额外状态或审
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.12 | 2026-08-03 | 将 30 条中文列注释改为直接说明“存什么、何时为空、如何关联”的表述；去除“稀疏投影”、“权威父链”和 `root-to-tip` 等不加解释的抽象术语；补充缓存可重建、同一 entry 可出现在多条路径、label 变更顺序与非最终快照说明；不改变 DDL 结构 |
 | v0.11 | 2026-08-03 | 使用 GaussDB `COMMENT ON COLUMN` 为 8 张表的 30 个字段增加中文注释；明确注释的 migration 事务、权限、敏感信息、旧稿已执行数据库和验收规则；不增加表、列、键或索引 |
 | v0.10 | 2026-08-03 | 参照 Agent 元数据 GaussDB 的显式长度规则，将 16 个标识及引用列改为 `VARCHAR(128)`、2 个 type 列改为 `VARCHAR(64)`、`cwd` 改为 `VARCHAR(512)`；增加应用和迁移长度预检、边界测试和禁止截断规则；将 `migrations` 重写为数据库升级“已完成清单”并补充示例 |
 | v0.9 | 2026-08-03 | 补充 8 张 SQLite/GaussDB 对齐表的集中职责说明，明确 session 主记录、权威 append log、sequence 运行状态、可重建 branch cache、派生 materialized projection 和 migration 账本的边界；不改变 Schema 或运行行为 |
