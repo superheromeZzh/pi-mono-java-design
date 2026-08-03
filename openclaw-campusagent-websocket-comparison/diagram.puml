@@ -383,7 +383,8 @@ title Attachment Data Plane Comparison
 ' Current Java behavior: the v1 WebSocket prompt accepts text only; general attachment transport is not implemented.
 ' Target source: campusmate-attachment-service/README.md
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
-' Target design: CampusMate stores metadata in shared openGauss and immutable bodies in private OBS.
+' Target design: CampusMate keeps a permanent attachment identity/state row and active lifecycle detail in shared openGauss.
+' Target design: private OBS stores immutable bodies under Object Key equal to attachment_id; no locator mapping is persisted.
 ' Target design: agent-service uses internal batch resolve and content streaming, without local files or direct OBS access.
 ' Design reason: keep the file data plane outside Chat Frames while allowing any service Pod to read authoritative content.
 
@@ -419,25 +420,47 @@ package "CampusAgent v2 - target only" as CampusAttachment {
   actor "Final client" as CampusClient
   component "CampusMate public upload\nand status API" as PublicUpload
   component "CampusMate Attachment Service\nany Pod" as AttachmentService
-  database "Shared openGauss\nmetadata and object mapping" as AttachmentDb
-  cloud "Private OBS\nimmutable object body" as AttachmentObs
+  package "Shared openGauss" as AttachmentDatabase {
+    database "attachment\npermanent identity and state" as AttachmentDb
+    database "attachment_active_detail\nactive lifecycle metadata" as AttachmentDetail
+  }
+  cloud "Private OBS\nkey = attachment_id\nimmutable object body" as AttachmentObs
+  component "CampusMate scan and delete worker" as AttachmentWorker
   component "agent-service Pod A" as AgentPodA
   component "agent-service Pod B" as AgentPodB
   database "RuntimeSessionStore\nprojected metadata snapshot" as RuntimeStore
 
   CampusClient --> PublicUpload : multipart upload and poll READY
   PublicUpload --> AttachmentService
-  AttachmentService --> AttachmentDb : metadata transaction
-  AttachmentService --> AttachmentObs : write immutable body
+  AttachmentService --> AttachmentDb : create identity and status row
+  AttachmentService --> AttachmentDetail : create active detail
+  AttachmentService --> AttachmentObs : put attachment_id and body stream
+  AttachmentWorker --> AttachmentDetail : lease, retry, and cleanup fields
+  AttachmentWorker --> AttachmentObs : scan or delete by attachment_id
+  AttachmentWorker --> AttachmentDb : transition lifecycle status
+  AttachmentWorker --> AttachmentDetail : remove after OBS delete
   AgentPodA --> AttachmentService : internal batch resolve
   AgentPodB --> AttachmentService : same ID after Pod change
   AgentPodA --> AttachmentService : internal content stream
   AgentPodB --> AttachmentService : internal content stream
-  AttachmentService --> AttachmentDb : authorize session and locate object
-  AttachmentService --> AttachmentObs : stream body
+  AttachmentService --> AttachmentDb : authorize session and validate status
+  AttachmentService --> AttachmentDetail : validate active metadata
+  AttachmentService --> AttachmentObs : open attachment_id and stream body
   AgentPodA --> RuntimeStore : id, name, MIME, size, sha256
   AgentPodB --> RuntimeStore : restore metadata snapshot
 }
+
+note right of AttachmentDb
+  Permanent row:
+  attachment_id, session_id, status,
+  created_at, deleted_at
+end note
+
+note right of AttachmentDetail
+  Active fields support MIME and size checks,
+  SHA-256 integrity, reference protection,
+  24-hour cleanup, and worker recovery.
+end note
 
 note bottom of OpenClawAttachment
   The Gateway owns the attachment bytes for this request.
@@ -450,8 +473,12 @@ end note
 
 note bottom of CampusAttachment
   WebSocket carries attachment IDs only.
-  Resolve returns no object key, URL, or credential.
+  The OBS Object Key is exactly attachment_id.
+  Resolve returns no OBS URL or credential.
   Runtime never accesses OBS directly and writes no local file.
-  No content_version, reservation, or complex retention claim exists.
+  OBJECT_KEY_CONFLICT remains quarantined from ordinary deletion;
+  only audited reconciliation may remove an object after ownership proof.
+  After OBS deletion, active detail is removed and the permanent
+  DELETED tombstone retains only the five identity and audit fields.
 end note
 @enduml

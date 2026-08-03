@@ -2,12 +2,12 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.5.0 |
+| 文档版本 | 1.5.1 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
 | 更新日期 | 2026-08-03 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.9.0 |
-| Manager 设计 | [`README.md`](README.md)，1.11.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.9.1 |
+| Manager 设计 | [`README.md`](README.md)，1.11.1 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -867,9 +867,10 @@ browser or CampusMate client
 [PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L720)
 
 `agent-service` 不提供上传端点，不直连 OBS 或 openGauss。v1 也不给
-浏览器发放 OBS 地址或预签名 URL。文件名、MIME、大小、摘要、Object Key、
-凭据和 Base64 都不进入 `chat.send`；WebSocket 只携带有序
-`attachment_ids`。
+浏览器发放 OBS Bucket、地址、凭据或预签名 URL。OBS Object Key 精确等于
+`attachment_id`，但这个值只是 WebSocket 中的附件引用，不是可直连 OBS 的
+Bearer capability；文件名、MIME、大小、摘要和 Base64 都不进入
+`chat.send`，WebSocket 只携带有序 `attachment_ids`。
 完整 HTTP Schema 见
 [`campusmate-attachment-service/attachment-api.openapi.yaml`](../campusmate-attachment-service/attachment-api.openapi.yaml)。
 
@@ -900,11 +901,20 @@ OBS SDK 读取声明长度后还会确认 `file` part 已到 EOF，不允许小�
 尾部字节被忽略。客户端不得
 为“方便重试”自行生成 `attachment_id`。
 
+`file` part 必须带非空 `filename`。Attachment Service 进行 Unicode NFC
+规范化并移除控制字符和 `/`、`\`，结果必须为 `1..512` 个 code point；
+缺失、清理后为空或过长返回 `400`。客户端只把返回的 filename 当作需要转义的
+显示文本，不能假设它参与 MIME 判断或 OBS 定位。
+
 服务端在授权 Session 后生成
 `^attachment_[0-9A-Za-z]{24}$` 格式的大小写敏感、不透明 ID，将原始
 字节流式写入 OBS，再进入安全扫描。上传请求不保证“重试返回同一 ID”；
 没有收到确定响应时重新上传会获得新 ID，遗留且未引用的附件最多保留
 24 小时。
+
+极低概率下，OBS create-only PUT 发现同名对象。服务端不会覆盖、删除来源不明
+对象或复用当前不可重放的请求流；当前 ID 进入受审计 `FAILED`，调用方按有界
+503 响应重新发起上传并取得新 ID，而不是重用失败 ID。
 
 `Prefer` 的最小客户端处理如下：
 
@@ -937,15 +947,37 @@ ID，不转换大小写、解析后缀或依赖其排序特征。
 
 Attachment Service 使用“文件仓库 + 元数据账本”：
 
-- 共享私有 OBS Bucket 保存 PDF、JS 等原始文件字节；
-- 共享 openGauss 只保存 `attachment_id`、`session_id`、内部随机
-  Object Key、状态、字节数和 SHA-256 等元数据，不保存 BLOB/BYTEA 正文；
+- 共享私有 OBS Bucket 保存 PDF、JS 等原始文件字节，Object Key 精确等于
+  大小写敏感的 `attachment_id`，不使用文件名、Session 路径或第二个随机定位值；
+- 共享 openGauss 的永久 `attachment` 主表只保存
+  `attachment_id/session_id/status/created_at/deleted_at`；每个非 `DELETED`
+  主表行都有 `attachment_active_detail` 保存校验、引用、清理和 Worker 执行数据，
+  不保存 BLOB/BYTEA 正文或 Object Key 映射；
 - Pod 内存只保留单上传不超过 1 MiB 的在途流式缓冲，不使用 Pod 本地目录、
   `/tmp`、临时文件或完整 `byte[]`；
 - 一个 `attachment_id` 只绑定一个 `session_id` 和一份不可覆盖的 OBS
   内容；内容变化必须重新上传并生成新 ID；
 - PDF、JavaScript 和其他文件均是不可信内容。`mate-service`、
   `agent-service` 和 Provider 适配路径都不得执行 JS。
+
+活动明细字段对客户端虽然大多不可写，但决定状态和 Runtime 能否安全使用：
+
+| 字段 | Attachment Service 为什么需要 |
+|---|---|
+| `filename` | 经过清理的显示名；仅供 UI 和 Provider 使用，不能当路径 |
+| `detected_media_type` | 从正文嗅探并规范化的小写 MIME；用于安全策略和 Model 输入校验，客户端 `File.type` 不参与授权 |
+| `expected_size_bytes` | 上传前已校验的声明长度；提供 OBS 流式 PUT 长度和 20 MiB 门禁 |
+| `size_bytes` | 服务端实际流式计数；必须与声明值一致，并参与单文件/总量限制 |
+| `sha256` | 不可变正文的完整性摘要；扫描、跨 Pod 读取和 Runtime 重放都要复核 |
+| `referenced_at` | 首次 resolve 成功时间；非空表示已进入 Session 历史，禁止单项和 24 小时清理 |
+| `expires_at` | 未引用附件的清理截止时间；创建时为 24 小时后，引用时清空 |
+| `error_code` | 有界且脱敏的稳定失败分类；不包含 OBS/扫描器原始响应或秘密 |
+| Worker lease/retry | `attempt_count/next_attempt_at` 控制退避，`lease_owner/lease_until` 允许 Pod 崩溃后接管，`row_version` 防止并发覆盖 |
+
+当 OBS 对象删除成功，Attachment Service 删除活动明细，只在永久主表保留
+`attachment_id`、`session_id`、`status=DELETED`、`created_at` 和
+`deleted_at`。因此 tombstone 能防止 ID 复用并保留最小审计事实，但不长期
+保存文件名、MIME、大小、摘要、错误或 Worker 状态。
 
 因为 openGauss 和 OBS 在所有 Pod 间共享，文件在 Pod A 上传后，Pod B
 可以查询状态，agent-service Pod C 也可以通过 Attachment Service 读取。
@@ -995,9 +1027,9 @@ Content-Type: application/json
 
 Attachment Service 在一个短 openGauss 事务中校验全部记录都属于当前
 Session、处于 `READY`、未删除且未过期。任一项失败则整批回滚；全部成功
-后原子设置 `referenced=true`、
+后原子设置
 `referenced_at=COALESCE(referenced_at, now())`、`expires_at=NULL`，并按请求顺序返回
-`attachment_id/filename/media_type/size_bytes/sha256`。这个标记是单向的；
+`attachment_id/filename/media_type/size_bytes/sha256`。`referenced_at` 是单向的；
 如果之后 RuntimeSessionStore 提交失败，附件会偏保守地保留到 Session
 删除，不会因为提早回收而使已接受历史缺失正文。
 
@@ -1023,9 +1055,10 @@ GET /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/
 X-Expected-Attachment-SHA256: <sha256 returned by resolve>
 ```
 
-Attachment Service 查询 openGauss 取得内部 Object Key，再从 OBS 向
-`agent-service` 流式代理原始字节。Runtime 在流经时重新校验字节数和
-SHA-256；它不会获得 Object Key、OBS URL、ETag 或存储凭据。
+Attachment Service 重新校验主表和活动明细，再以 `attachment_id` 为
+Object Key 从私有 OBS 向 `agent-service` 流式代理原始字节。Runtime 在流经时
+重新校验字节数和 SHA-256；它不会获得 Bucket、OBS URL、ETag 或存储凭据，
+知道附件 ID 也不能绕过内部 content API。
 
 若 `chat.send` Response 丢失，建立新连接恢复后，使用新 RequestFrame
 `id`、原 `idempotency_key` 和完全相同的 message、附件 ID 顺序、
@@ -1077,21 +1110,24 @@ Runtime 已接受后若内容读取或 Provider 转换失败，不再返回请�
 文本若存在必须是第一块且非空；附件块顺序与接受时
 `attachment_ids` 一致。纯附件历史不包含空 TextContent。快照字段固定为
 `attachment_id/filename/media_type/size_bytes/sha256`；
-RuntimeSessionStore 不保存文件正文、Object Key、ETag、OBS URL 或凭据。
+RuntimeSessionStore 不保存文件正文、OBS Bucket、ETag、OBS URL 或凭据。
 客户端只把 filename 当作经过转义的显示文本，不能当作本地路径。v1
 不定义公共附件下载接口，历史也不返回下载 URL。
 
-未被 Message 引用的附件可调用：
+未被 Message 引用且不处于 `OBJECT_KEY_CONFLICT` 存储隔离的附件可调用：
 
 ```http
 DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
 ```
 
 Attachment Service 将其标记为 `DELETING`，异步删除 OBS 对象后进入
-`DELETED`。已引用附件的单独删除返回
+`DELETED`，同时删除 `attachment_active_detail`。已引用附件的单独删除返回
 `409 ATTACHMENT_REFERENCED`；它们只在上层删除整个 Session 时一并清理。
+create-only 冲突行的公共 DELETE 返回有界 503，不删除来源不明对象；即使上层
+删除 Session，Runtime 使用会停止且 Session 对用户不可见，但存储清理保持
+pending/quarantined，直到受审计对账确认安全删除或 OBS `NotFound`。
 删除不可恢复，重新使用必须重新上传并获得新 ID；`DELETED` 记录作为永久
-ID tombstone 保留，删除后也不复用 ID。
+ID tombstone 保留；墓碑只含 ID、Session、状态、创建和删除时间，删除后也不复用 ID。
 
 ## 13. 实现检查表
 
@@ -1135,12 +1171,19 @@ ID tombstone 保留，删除后也不复用 ID。
 - 使用 `POST /mate-service/v1/sessions/{session_id}/attachments` 上传唯一
   `file` part，`X-Attachment-Size` 为 `1..20971520` 且精确等于文件字节数；
   SDK 读满声明长度后仍校验 file-part EOF，小报长度不能被截断接受；
+- filename 必填，NFC 规范化和安全清理后为 `1..512` 个 code point；
+  create-only 冲突不覆盖未知对象，客户端通过新请求获取新 attachment_id；
 - 能处理默认/`respond-async` 的 `202`、`wait=N` 的最多 10 秒等待，
   并通过 `Location` 指向的 GET 端点轮询到终态；
 - 上传状态未到 READY 时不发送；只接受 Attachment Service 返回且匹配
   `^attachment_[0-9A-Za-z]{24}$` 的 ID，按原始大小写保存和比较，不自行生成、
   解析或规范化；按 ModelSummary.input 预检 MIME、数量和字节，WebSocket 只
   提交 attachment_ids，不提交 URL、MIME、文件名、size 或 Base64；
+- 验证 OBS Object Key 与 `attachment_id` 完全相同且写入使用 create-only；
+  openGauss 不保存 Object Key 映射，知道 ID 的 Runtime 仍不能直连私有 Bucket；
+- 验证活动明细的 MIME/大小/SHA-256、referenced_at/expires_at 和 Worker
+  lease/retry/row_version 分别驱动校验、引用保护、24 小时清理和故障接管；
+  OBS 删除完成后明细消失，主表只留下五字段 DELETED tombstone；
 - 带附件 send 的任一引用失败时不乐观显示为已接受；成功后按
   user_message_id 对齐带 AttachmentContent 的权威历史；
 - `INVALID_ATTACHMENT` 不用于探测资源存在性，`ATTACHMENT_NOT_READY` 按建议
@@ -1150,6 +1193,9 @@ ID tombstone 保留，删除后也不复用 ID。
 - 已接受附件的 Response 丢失时用原 ID 顺序和原幂等键重试，不重新上传或改写
   业务负载；历史只保留 `attachment_id/filename/media_type/size_bytes/sha256`，
   filename 只作显示；v1 不定义公共下载接口；
+- 普通未引用附件可在 24 小时后清理；`OBJECT_KEY_CONFLICT` 被公共 DELETE、
+  定时清理和普通 Session 删除排除，UI 可以显示存储清理 pending，但不能把它
+  当作正文已删除；
 - create connect 响应丢失时用相同 Session/Agent/Model 重试 create，不改用
   resume；
 - `full_thinking` 只有在有效 capability 回显后才进入 UI；
@@ -1188,6 +1234,7 @@ Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecor
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.5.1 | 2026-08-03 | 同步 Attachment Service 1.1.0：OBS Object Key 固定为 `attachment_id`，openGauss 拆分永久五字段主表与活动明细；解释 filename、检测 MIME、声明/实际大小、SHA-256、引用/过期、失败码和 Worker lease/retry 字段；冻结 filename 与 create-only 冲突 quarantine 门禁，并明确删除正文后只保留最小 tombstone；同步 AsyncAPI 2.9.1 和 Manager 1.11.1 |
 | 1.5.0 | 2026-08-03 | 固定 CampusMate Attachment Service 单 multipart 上传、`X-Attachment-Size`、`Prefer` 异步/限时等待和 GET 轮询契约；明确 OBS 正文、openGauss 元数据、无本地文件的跨 Pod 边界；将 Runtime 收敛为内部批量 resolve/content 流式读取和五字段历史快照，不向 Runtime 披露 Object Key 或 OBS 凭据；同步 AsyncAPI 2.9.0 和 Manager 1.11.0 |
 | 1.4.0 | 2026-08-03 | 将 `attachment_id` 收敛为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 ID 只能由 Attachment Service 签发、大小写敏感且不透明，客户端必须原样保存、不得自行生成或解析，删除后不复用，且格式合法不代表获得 Session 授权；同步 AsyncAPI 2.8.0 和 Manager 1.10.0 |
 | 1.3.0 | 2026-08-03 | 将 `agent_id` 收敛为 `^agent_[0-9A-Za-z]{24}$`、`model_id` 收敛为 `^model_[0-9A-Za-z]{24}$`；明确资源 ID 大小写敏感、不透明、由各自管理服务生成，客户端不解析后缀或用 Provider 模型名代替，并按 create/resume 语义核对响应 ID；同步 AsyncAPI 2.7.0 和 Manager 1.9.0 |

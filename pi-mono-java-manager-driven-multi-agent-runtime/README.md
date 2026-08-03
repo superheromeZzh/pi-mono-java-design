@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.11.0 |
+| 文档版本 | 1.11.1 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
@@ -39,12 +39,13 @@ Request Frame 可以携带 W3C `traceparent`，connect Response 返回经过客�
 声明、服务能力和授权共同过滤的有效 features。
 
 文件内容不经 WebSocket 传输。mate-service 承载 Attachment Service：
-正文写入 OBS，状态、Session 绑定、可信 MIME、大小和摘要写入
+正文写入 OBS，永久身份/状态与活动期校验数据分层写入
 openGauss。外部调用方使用单文件 multipart 上传并轮询处理状态；
 `chat.send` 只提交不透明 `attachment_ids[]`。Runtime 通过 Attachment
 Service 的内部 `resolve` 批量取得可信元数据快照，再通过内部
-`content` 流式读取正文；Runtime 不接触 OBS `object_key`、凭据或预签名
-URL，也不直连 OBS。
+`content` 流式读取正文。OBS Object Key 精确等于 `attachment_id`，因此
+openGauss 不保存第二套定位映射；Runtime 即使知道附件 ID，也没有 Bucket、
+OBS 凭据、预签名 URL或直连 OBS 的权限。
 每个 `attachment_id` 由 Attachment Service 签发，严格匹配
 `^attachment_[0-9A-Za-z]{24}$`，总长 35、大小写敏感，并在该 Attachment
 Service 部署内全局唯一；格式和唯一性都不代替 Session 级授权。
@@ -83,8 +84,9 @@ RuntimeSessionStore (database)
 └── AttachmentContent metadata snapshot
 
 Attachment Service
-├── openGauss: metadata, status, Session binding and referenced state
-└── OBS: attachment body, reachable only by Attachment Service
+├── openGauss attachment: permanent ID, Session binding and tombstone
+├── openGauss attachment_active_detail: active validation and worker state
+└── OBS: attachment body at object key = attachment_id
 ```
 
 `references/tools.json` 只在 Skill 存在直接有效 `binding_tools` 时生成。
@@ -296,10 +298,10 @@ Manager 执行模型与工具，Pool、Hub 和 Store 保存运行状态；下表
 | ManagedSessionPool | 当前 Pod 内 `session_id` 到 Session 和 active run 的映射 | 内存隔离、同 Pod 恢复、Agent 绑定、运行所有权和淘汰 |
 | ManagedRunHub | active run 的 partial Message、Tool、终态和 `run_seq` | 独立于物理连接维护同 Pod 恢复投影；不提供跨 Pod active-run 迁移 |
 | ConnectionAuthAdapter | 内部网关确认的调用服务身份 | 在 `101` 前消费现有私钥签名/JWT认证结果；不复制私有字段或向下游原样传递凭据 |
-| Attachment Service（mate-service） | openGauss 中的状态、可信元数据、Session 绑定和 referenced 标记；OBS 中的正文 | 接收单文件 multipart，执行校验/扫描，提供外部状态轮询与内部 resolve/content，清理超过 24 小时仍未引用的附件 |
-| AttachmentResolver | 当前 Session、调用服务身份和有序附件 ID 列表 | 调用内部 batch resolve；全量校验成功后原子返回元数据快照并把全部记录单向标记为 referenced |
+| Attachment Service（mate-service） | openGauss 永久 `attachment` 身份/状态行、活动 `attachment_active_detail`；OBS 中以 `attachment_id` 为 Object Key 的正文 | 接收单文件 multipart，执行校验/扫描，提供外部状态轮询与内部 resolve/content，清理超过 24 小时仍未引用且不处于存储冲突隔离的附件；删除正文后清除活动明细并保留五字段 tombstone |
+| AttachmentResolver | 当前 Session、调用服务身份和有序附件 ID 列表 | 调用内部 batch resolve；全量校验成功后原子返回元数据快照并为全部记录单向设置 `referenced_at` |
 | AttachmentInputAssembler | Model 有效输入策略和 Attachment Service 内部 content 流 | 经内部鉴权的 content API 读取正文，校验大小/摘要/MIME，并转成 Provider 中立输入 |
-| RuntimeSessionStore | Session、Message、RunRecord、history sequence、幂等结果、Agent/Model/revision 绑定和附件元数据快照 | 使用共享数据库按全局 `session_id` 持久化；不保存 OBS `object_key`、凭据、预签名 URL 或 Runtime 可直连的存储路径 |
+| RuntimeSessionStore | Session、Message、RunRecord、history sequence、幂等结果、Agent/Model/revision 绑定和附件元数据快照 | 使用共享数据库按全局 `session_id` 持久化；不保存 OBS Bucket、凭据、预签名 URL 或 Runtime 可直连的存储位置 |
 
 运行目录是 Manager 数据的模型披露投影，不是授权数据库。目录中的
 `tool_id` 只告诉模型“可能使用什么”；Tool Manager 仍在每次发现和执行时
@@ -1686,6 +1688,9 @@ Content-Type: application/pdf
 ```
 
 - multipart 必须且只能有一个 `file` part；
+- `file` part 的 `filename` 必须存在；服务端按 Unicode NFC 规范化、移除
+  控制字符与 `/`、`\` 后必须剩余 `1..512` 个 code point，否则返回
+  `400 INVALID_REQUEST`；filename 仅用于显示，不参与 MIME、Object Key 或授权；
 - `X-Attachment-Size` 必填，只接受 `1..20971520`（20 MiB）的十进制
   字节数；服务端还必须以实际接收字节数校验，并在 OBS SDK
   读取声明长度后额外确认 `file` part 已到 EOF，防止小报长度的尾部字节
@@ -1711,10 +1716,48 @@ GET /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
 DELETING | DELETED`；只有 `READY` 可用于 `chat.send`。调用方按
 `Retry-After` 或有界退避轮询，本版不定义附件 WebSocket/SSE 订阅。
 
-Attachment Service 把正文写入 OBS，把 `attachment_id`、`session_id`、
-状态、内部 `object_key`、文件名、可信 MIME、实际大小、SHA-256、
-`referenced`、`referenced_at` 和 `expires_at` 写入 openGauss。
-`object_key` 不从资源 ID 确定性推导，也不返回 Runtime 或外部调用方。
+Attachment Service 把正文写入 OBS，Object Key 精确使用大小写敏感的
+`attachment_id`，不再维护 `attachment_id -> object_key` 映射。这个确定性
+定位规则只减少服务内部状态，不把附件 ID 变成 OBS URL 或授权凭据；Bucket
+保持私有，只有 Attachment Service 持有 OBS 访问权限。
+
+OBS PUT 使用 create-only 语义。若发现同名对象，因主表/明细已经提交且上传流
+不可重放，服务端不得覆盖、删除来源不明的对象或在本次请求中换 ID；当前记录
+进入 `FAILED`，明细保存 `OBJECT_KEY_CONFLICT` 并退出普通 24 小时清理，调用方
+重新上传取得新 ID。只有受审计对账确认对象归属并安全删除或确认 NotFound 后，
+才能删除明细并收束为五字段 tombstone。
+
+openGauss 使用两层记录：
+
+- 永久 `attachment` 主表只保存 `attachment_id`、`session_id`、`status`、
+  `created_at`、`deleted_at`。它负责全局 ID 唯一、不可变 Session 归属、状态
+  与删除审计；进入 `DELETED` 后永久保留这五项；
+- 每个非 `DELETED` 主表行都必须具有的 `attachment_active_detail` 明细表，
+  包括上传、失败、对账和待删除状态；它包含
+  `filename`、`detected_media_type`、`expected_size_bytes`、`size_bytes`、
+  `sha256`、`referenced_at`、`expires_at`、`error_code` 以及 Worker
+  `attempt_count/next_attempt_at/lease_owner/lease_until/row_version`。
+
+活动明细字段不是墓碑审计字段，而是当前生命周期的执行依据：
+
+| 字段 | 作用 |
+|---|---|
+| `filename` | 清理控制字符后的显示名和 Provider 文件名；不参与 OBS 定位、路径拼接或授权 |
+| `detected_media_type` | 对正文嗅探并规范化为小写的可信 MIME；用于安全策略、Model 输入类型和重新读取校验，不信任客户端声明 |
+| `expected_size_bytes` | 已校验的上传声明长度；作为 OBS 流式 PUT 的 content length 和 20 MiB 前置门禁 |
+| `size_bytes` | 服务端流式计数的实际长度；必须与 expected 值一致，并用于 Runtime/Model 的单文件与总量校验 |
+| `sha256` | 对不可变正文计算的内容摘要；扫描、跨 Pod 读取、历史重放时复核完整性，不使用 ETag 替代 |
+| `referenced_at` | 首次批量 resolve 成功的时间；非空即表示已被 Session 引用，单向保护正文不被单项或 24 小时任务删除 |
+| `expires_at` | 未引用附件的清理截止时间，创建时通常为 24 小时后；首次引用时原子清空，供清理索引扫描 |
+| `error_code` | 有界、脱敏的稳定失败码；支持客户端状态投影、运维诊断和重试分类，不保存供应商响应正文或秘密 |
+| `attempt_count` / `next_attempt_at` | 当前扫描、删除或对账阶段的重试次数和最早重试时刻；用于有界退避，切换阶段时重置 |
+| `lease_owner` / `lease_until` | Worker 对当前任务的短租约；Pod 崩溃后到期，其他 Pod 可以接管，OBS I/O 期间不持有数据库事务 |
+| `row_version` | scan/delete/resolve 之间的乐观并发版本；条件更新失败时重新读取，不覆盖较新的状态 |
+
+因此 MIME/大小校验、SHA-256 完整性校验、是否已被 Session 引用、24 小时
+未引用清理和 Worker 故障恢复都依赖活动明细；OBS 删除完成后，这些执行数据
+已无用途，Worker 在同一 openGauss 事务中删除明细行，并把主表更新为
+`status=DELETED, deleted_at=now()`。
 
 Attachment Service 只能在服务端签发 `attachment_id`。其格式固定为
 `attachment_` 加 24 位 ASCII 大小写字母或数字，即
@@ -1727,9 +1770,12 @@ Attachment Service 只能在服务端签发 `attachment_id`。其格式固定为
 文件或业务记录不能释放 ID。ID 从签发起绑定同一上传记录，进入 `READY` 后
 不得改绑其他内容，进入 `DELETED` 后也不得重新使用。
 
-记录创建时设置 `referenced=false` 和 24 小时后的 `expires_at`。
-后台任务幂等删除超过该时间仍未引用的 OBS 正文，并把 openGauss 记录转为
-`DELETED` tombstone，不物理删除 ID 记录。Attachment 表不重复保存
+记录创建时设置 `referenced_at=NULL` 和 24 小时后的 `expires_at`；
+`referenced_at IS NOT NULL` 是唯一的“已引用”判断，不另存容易失配的布尔列。
+后台任务幂等删除超过该时间仍未引用、且不是
+`FAILED + OBJECT_KEY_CONFLICT` 隔离状态的 OBS 正文，并把 openGauss 记录转为
+`DELETED` tombstone，同时物理删除活动明细，不物理删除 ID 主记录。Attachment
+主表不重复保存
 tenant/user；这些归属由 mate-service 的 Session 权威数据维护。CampusAgent Runtime
 只携带已认证的调用服务身份和当前 `session_id` 解析引用。`attachment_id` 是
 不透明资源标识，不是 Bearer capability；格式合法、全局唯一或知道 ID 本身
@@ -1781,12 +1827,12 @@ Content-Type: application/json
 
 Attachment Service 在单个 openGauss 事务中按请求顺序全量校验：
 调用服务有权、全部 ID 存在且绑定该 Session、状态为 `READY`。
-全部通过后，原子将所有记录设为 `referenced=true`、
+全部通过后，原子执行
 `referenced_at=COALESCE(referenced_at, now())`、`expires_at=NULL`，并返回与请求同序的
 `attachment_id/filename/media_type/size_bytes/sha256`。任一失败时整体
-回滚，不返回部分集合。`referenced` 只能从 `false` 转为
-`true`，对外不提供逆向变更接口或确认回调。Runtime Store 后续提交失败时可能
-保守多保留附件，但不得回滚 referenced 造成误删。
+回滚，不返回部分集合。`referenced_at` 只能从空变为非空，对外不提供逆向
+变更接口或确认回调。Runtime Store 后续提交失败时可能保守多保留附件，但
+不得清空 `referenced_at` 造成误删。
 
 正文读取固定为：
 
@@ -1795,13 +1841,14 @@ GET /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/
 ```
 
 Attachment Service 每次重新校验内部服务身份、Session 绑定、`READY`
-和 `referenced=true`，然后由它使用 openGauss 中的内部 `object_key`
-从 OBS 流式读取并转发。Runtime 只消费带背压、取消、超时和字节
-上限的 HTTP 响应流，不获得 OBS 凭据、`object_key` 或预签名 URL。
+和 `referenced_at IS NOT NULL`，然后使用 `attachment_id` 作为 Object Key
+从私有 OBS 流式读取并转发。Runtime 只消费带背压、取消、超时和字节
+上限的 HTTP 响应流，不获得 Bucket、OBS 凭据或预签名 URL；知道
+`attachment_id` 不能绕过 content API 的身份与 Session 校验。
 
 `traceparent` 可以经 `SessionInvocationMetadata` 传播到 Attachment Service
 遥测，但不能进入附件快照、数据库业务记录或访问日志中的凭据字段。
-解析和 content 响应不得包含 OBS 凭据、`object_key`、预签名 URL
+解析和 content 响应不得包含 OBS Bucket、凭据、预签名 URL
 或 Provider file ID。
 
 #### 9.11.3 校验和错误优先级
@@ -1910,7 +1957,7 @@ Model Manager Provider 再按实际 Provider 决定：
 - 只接受本地文件或完整 `byte[]` 的适配器不进入 v1；
 - 临时供应商文件在 run 终态后按 Provider 策略回收。
 
-长期 OBS 凭据、`object_key`、预签名 URL 和供应商 file ID 都不能进入 Prompt、模型可见
+长期 OBS 凭据、Bucket、预签名 URL 和供应商 file ID 都不能进入 Prompt、模型可见
 文本、数据库业务投影或 WebSocket 事件。文件名和文件正文都是不可信用户数据，不得
 解释为 SYSTEM、Tool description 或权限指令。Tool 若需要读取同一附件，必须
 通过独立、授权明确的工具协议取得内容，不能复用模型输入流。
@@ -1935,7 +1982,7 @@ pi 固定基线只原生接受 text 和 base64 `ImageContent`，pi-mono-java 固
 }
 ```
 
-快照不包含 URL、Bearer、OBS `object_key`、Base64 或供应商 file
+快照不包含 URL、Bearer、OBS Bucket/凭据、Base64 或供应商 file
 ID。`AttachmentContent` 只允许出现在 role=user 的 Message；Assistant/Tool
 Message 不能伪造附件历史。
 
@@ -1945,8 +1992,9 @@ AttachmentContent。不生成空文本占位，附件顺序与 `chat.send.attach
 一致。
 
 Runtime Store 只额外保存 Message 中的 `AttachmentContent` 元数据快照，
-附件存储定位和访问信息由 Attachment Service 内部管理，Runtime
-无法从快照推导 OBS 位置。Attachment Service 保留已 referenced 记录的
+附件 OBS 访问和 Bucket 信息由 Attachment Service 内部管理。虽然
+Object Key 与快照中的 `attachment_id` 相同，Runtime 没有直连 OBS 的网络与
+凭据权限。Attachment Service 保留 `referenced_at` 非空记录的
 原始正文，至少到 Session 删除流程将该 Session 转入 `DELETING`。
 Assembler 每次读取原始正文时都按快照校验 length、MIME 和 SHA-256；
 v1 不定义另一套可见的附件版本或派生制品生命周期。
@@ -1963,11 +2011,15 @@ v1 不定义另一套可见的附件版本或派生制品生命周期。
 DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
 ```
 
-未 referenced 的附件可幂等删除；已 referenced 的附件返回
+未 referenced 且非 `OBJECT_KEY_CONFLICT` 的附件可幂等删除；已 referenced 的附件返回
 `409 Conflict`，不允许单独删除导致历史无法重放。上层通过独立
-控制面幂等删除 Session；Runtime 和 Attachment Service 统一把它转为
+控制面幂等删除 Session；Runtime 和 Attachment Service 把普通附件转为
 `DELETING`，拒绝 create/resume/send/resolve/content，处理 active run 后清理
 OBS 正文，并把 openGauss 记录转为永久 `DELETED` tombstone。
+存储冲突隔离行不得被公共 DELETE、24 小时任务、Session 删除或普通 Worker
+认领；Session 可以先停止 Runtime 使用并对用户不可见，但存储清理保持
+pending/quarantined。只有受审计 reconciliation 证明对象归属并安全删除或确认
+NotFound 后，才删除明细并完成五字段 tombstone，不能提前宣称全部字节已删除。
 
 多个 Runtime Pod 共享 RuntimeSessionStore，所有 Attachment Service 副本共享
 openGauss 与 OBS。因此任一经认证的 Runtime Pod 都可以通过相同内部
@@ -1989,7 +2041,7 @@ resolve/content 接口重建附件输入；跨 Pod 共享不依赖本地盘、�
 | WebSocket Upgrade route | 规范路径为 `/agent-service/v1/ws/chat`；不解析业务 query；信任并校验既有内部网关认证结果，创建不可变 ConnectionAuthContext；浏览器由 `mate-service` 承接 | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、traceparent、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 以 AsyncAPI 2.9.0 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
+| Frame DTO / validator | 以 AsyncAPI 2.9.1 生成或复用封闭 DTO；成功 Response 使用 payload，connect 返回有效 features、Model 输入策略和附件历史快照 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、每 Pod 维护单活动连接 generation、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件元数据快照；Managed Profile 不生成 Session JSONL | 架构改造 |
 | `ManagedRunHub` | 新增；同 Pod 维护 partial Message、active tools、终态、run_seq 和原子恢复订阅；Pod 重启时通过 Store 收束为 interrupted | 架构改造 |
@@ -2002,7 +2054,7 @@ resolve/content 接口重建附件输入；跨 Pod 共享不依赖本地盘、�
 | model list/set/restore | 统一经过 Agent 范围的 Model Manager catalog | 安全加固 |
 | Runtime WebSocket 客户端/SDK | 按客户端接入指南实现 connect、pending request、typed delta reducer、幂等与恢复 | 架构改造 |
 | 浏览器 Web 前端 | 连接上层会话服务而非 Runtime；若上层透传相同 Frame，可复用 message_id/content_index reducer，但不得获得 Runtime 服务凭据 | 安全加固 |
-| Attachment Service / `AttachmentResolver` | `mate-service` 完成 multipart 上传、OBS/openGauss 存储、用户授权和扫描；Runtime 只调用内部 batch resolve 和 content | 安全加固、架构改造 |
+| Attachment Service / `AttachmentResolver` | `mate-service` 完成 multipart 上传、以 `attachment_id` 为 OBS Object Key、openGauss 主表/活动明细、用户授权和扫描；Runtime 只调用内部 batch resolve 和 content | 安全加固、架构改造 |
 | `AttachmentInputAssembler` / Provider | 消费 Attachment Service content 响应流，校验字节/hash/MIME，并按 ModelSummary.input 转换为 Provider 中立输入 | 架构改造 |
 | Runtime Session Store | 为用户 Message 保存 AttachmentContent 元数据快照和超限 Tool result；附件存储定位和访问信息仍属于 Attachment Service | 架构改造 |
 | Legacy CLI | 保持原来的本地 Provider、Tool、Settings 和资源发现路径 | 兼容要求 |
@@ -2266,17 +2318,21 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   `X-Attachment-Size`、非数字、0 或超过 20 MiB 都被拒绝；恰好
   20 MiB 且与实际字节一致时接受，声明值与实际值不符时拒绝；
   SDK 读满声明长度后还必须用 file-part EOF 校验拒绝小报长度；
+- filename 缺失、规范化清理后为空或超过 512 个 code point 时返回 400；
+  create-only 冲突不覆盖或删除来源不明对象，记录保持 FAILED 供审计对账，
+  客户端用新上传获得新 ID；
 - 无 `Prefer`、`respond-async` 和 `wait=0` 立即得到 `202`；
   `wait=10` 在等待窗口内 READY 时得到 `201`，否则得到 `202`；
   `wait>10` 按 10 秒截断；`202` 必有 `Location + Retry-After`，GET
   轮询可到达终态；
 - batch resolve 保持 attachment_ids 顺序；重复 ID 或任一无效项使整个
-  openGauss 事务回滚，全部成功时原子设置 referenced/at/expires；
+  openGauss 事务回滚，全部成功时原子设置 referenced_at/expires_at；
 - Frame 中提交 tenant_id、user_id、URL、path、MIME、filename、size、hash 或
   Base64 均因封闭 Schema 被拒绝，Runtime 的 Prompt、数据库业务投影、事件和日志中没有
-  tenant/user、OBS `object_key`、OBS 凭据、Token 或预签名 URL；
+  tenant/user、OBS Bucket、OBS 凭据、Token 或预签名 URL；
 - Attachment ID READY 后不能改绑；Runtime content 只能经内部 API 读取，
-  不能获得或推导 `object_key`、OBS 凭据或预签名 URL；
+  即使 Object Key 等于 `attachment_id`，也不能获得 Bucket、OBS 凭据或预签名
+  URL，更不能绕过 Session 授权直连 OBS；
 - content 流在成功、异常、取消和超时路径都正确关闭；背压、单文件
   和总流式字节上限有效；实际 length/hash/MIME 不一致、像素/解压炸弹被拒绝；
 - 同一 idempotency key 并发请求只产生一条用户消息、一个 run，
@@ -2284,8 +2340,9 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   不同附件顺序属于不同负载；accepted 重试在 RUN_ACTIVE 或
   Attachment Service 不可用时仍返回原 run_id/user_message_id，不重新查询
   附件，接受前失败可以重试；
-- resolve 成功后注入 Runtime Store commit 失败，referenced 不回滚且不会
-  被 24 小时任务误删；未 resolve 成功的记录满 24 小时后清理；
+- resolve 成功后注入 Runtime Store commit 失败，referenced_at 不回滚且不会
+  被 24 小时任务误删；未 resolve 成功且非 `OBJECT_KEY_CONFLICT` 的记录满
+  24 小时后清理；
 - 输入装配保持“可选非空 TextContent + 请求顺序的附件”，纯附件时不
   生成空文本块；图片可映射到现有
   ImageContent，document/text 的 Provider 中立类型和转换在实现前有显式契约，
@@ -2295,9 +2352,16 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
   只有通过持久化 entry 才能改变 plan，不能为适配模型静默丢附件；
 - content 流的 length/MIME/SHA-256 与公开快照一致；v1 不启用只能接收
   本地文件、完整字节数组或独立派生版本的 Provider 适配器；
-- 未 referenced 的单附件 DELETE 成功且幂等，已 referenced 返回 409；
-  Session 删除统一转 DELETING、删除 OBS 正文并在 openGauss 保留
-  DELETED tombstone；
+- 未 referenced 且非存储冲突隔离的单附件 DELETE 成功且幂等，已 referenced
+  返回 409；`OBJECT_KEY_CONFLICT` 被公共/定时/Session 普通删除门禁排除，直到
+  受审计 reconciliation 确认安全；
+  Session 删除统一转 DELETING、按 `attachment_id` 删除 OBS 正文、删除
+  `attachment_active_detail`，并在 openGauss `attachment` 主表只保留
+  `attachment_id/session_id/status=DELETED/created_at/deleted_at`；
+- `filename/detected_media_type/expected_size_bytes/size_bytes/sha256` 分别支持
+  显示、MIME/大小和完整性校验；`referenced_at/expires_at` 支持引用保护和
+  24 小时清理；`error_code` 与 attempt/next-at/lease/row_version 支持稳定诊断、
+  跨 Pod Worker 重试和崩溃恢复，删除明细后不再保留这些执行字段；
 - 任一 Runtime Pod 都能经共享 Attachment Service/openGauss/OBS 读取同一
   附件，不依赖本地盘或某一 Pod 的进程内对象；
 - 紧急安全撤销显式 abort 或拒绝后续 run，并保留历史快照与审计状态，不静默
@@ -2331,8 +2395,8 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 - run 生命周期独立于连接，重连通过原子快照和 run_seq 恢复；
 - 同一披露策略覆盖实时、快照和历史；
 - 附件由 mate-service 单文件 multipart 接收，正文存 OBS、元数据存
-  openGauss，WebSocket 只传 ID；Runtime 只经内部 resolve/content 读取，
-  历史仅保存元数据快照；
+  openGauss 分层主表/活动明细，Object Key 等于 `attachment_id`，WebSocket
+  只传 ID；Runtime 只经内部 resolve/content 读取，历史仅保存元数据快照；
 - Attachment ID 严格匹配 `^attachment_[0-9A-Za-z]{24}$`，由 Attachment
   Service 服务端签发并以大小写敏感唯一约束保证部署级全局唯一，`READY` 后
   不改绑、删除后不复用，且格式或唯一性不构成授权；
@@ -2346,6 +2410,7 @@ Session 绑定，不能提交 cwd；后续命令仍按各自 Schema 提交消息
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.11.1 | 2026-08-03 | 将 OBS Object Key 固定为 `attachment_id`，删除 openGauss 的对象定位映射；拆分永久 `attachment` 主表和 `attachment_active_detail`，明确活动字段分别承担 MIME/大小、SHA-256、引用保护、24 小时清理及 Worker lease/retry 恢复；OBS 删除完成后清除明细，只保留五字段 `DELETED` tombstone；冻结 filename 规则并为 create-only 冲突增加 quarantine 门禁；同步 Attachment Service 1.1.0、AsyncAPI 2.9.1 和客户端指南 1.5.1 |
 | 1.11.0 | 2026-08-03 | 将附件存储收敛为 OBS 正文 + openGauss 元数据；固定单文件 multipart、`X-Attachment-Size`、`Prefer: respond-async/wait=N`、201/202/422/503 与 GET 轮询；定义 24 小时未引用清理、单向 referenced、内部 resolve/content 和跨 Pod 共享；删除 content_version、面向读取/保留的复杂 claim/reservation/lease、确定性存储路径及 Runtime 直连 OBS，保留 Worker 的短任务租约；同步 AsyncAPI 2.9.0 和客户端指南 1.5.0 |
 | 1.10.0 | 2026-08-03 | 将 `attachment_id` 冻结为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确其由 Attachment Service 服务端签发、大小写敏感、在服务部署内全局唯一、碰撞重签、READY 后不改绑且删除后不复用；补充 binary 唯一约束、逐字节比较、格式与唯一性不等于授权及边界测试；同步 AsyncAPI 2.8.0 和客户端指南 1.4.0 |
 | 1.9.0 | 2026-08-03 | 参考 Anthropic Managed Agents 服务端生成的 `agent_` 资源 ID 示例，将 Campus `agent_id` 冻结为 `^agent_[0-9A-Za-z]{24}$`，将 CampusModel `model_id` 冻结为 `^model_[0-9A-Za-z]{24}$`；明确两者大小写敏感、不透明、由各自管理服务生成，区分 `model_` 资源 ID 与私有 Provider model ID，并增加大小写敏感文件系统、case-fold 冲突和目录/manifest 精确匹配门禁；同步 AsyncAPI 2.7.0 和客户端指南 1.3.0 |

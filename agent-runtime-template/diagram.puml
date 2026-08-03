@@ -556,9 +556,10 @@ end note
 ' Observed behavior: neither baseline implements the CampusMate attachment storage boundary shown here.
 ' Target source: campusmate-attachment-service/README.md
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
-' Target-only architecture: CampusMate stores metadata in shared openGauss and immutable bodies in private OBS.
+' Target-only architecture: CampusMate stores permanent identity tombstones and active processing details in shared openGauss, and immutable bodies in private OBS.
+' Target-only architecture: each OBS object key is exactly the case-sensitive attachment_id; no object-key mapping column exists.
 ' Target-only architecture: agent-service uses internal batch resolve and content streaming APIs and stores only message metadata snapshots.
-' Design reason: attachments must work across Pods without exposing object locations, credentials, or local files to Agent Runtime.
+' Design reason: attachments must work across Pods while deleting short-lived processing data after content deletion and retaining only a minimal ID tombstone.
 !theme plain
 left to right direction
 skinparam backgroundColor white
@@ -576,8 +577,9 @@ title Agent Runtime and CampusMate Attachment Boundary
 actor "Final client" as Client
 component "CampusMate public API" as PublicApi
 component "CampusMate Attachment Service\nany Pod" as AttachmentService
-database "Shared openGauss\nmetadata, status, session binding, object key" as AttachmentDb
-cloud "Private OBS\nimmutable object bodies" as Obs
+database "Shared openGauss attachment\nid, session, status, created, deleted" as AttachmentDb
+database "Shared openGauss active detail\nvalidation, reference, cleanup, worker state" as AttachmentDetail
+cloud "Private OBS\nimmutable body; key = attachment_id" as Obs
 component "agent-service Pod A" as RuntimeA
 component "agent-service Pod B" as RuntimeB
 database "RuntimeSessionStore\nAttachmentContent metadata snapshot" as RuntimeStore
@@ -585,14 +587,17 @@ component "Model input assembler\nbounded stream buffer" as Assembler
 
 Client --> PublicApi : upload and poll status
 PublicApi --> AttachmentService
-AttachmentService --> AttachmentDb : metadata transaction
-AttachmentService --> Obs : write or stream object
+AttachmentService --> AttachmentDb : create identity and update status
+AttachmentService --> AttachmentDetail : create and update active detail
+AttachmentDb -- AttachmentDetail : one detail until DELETED
+AttachmentService --> Obs : put, open, stat, or delete by attachment_id
 RuntimeA --> AttachmentService : POST internal attachments:resolve
 RuntimeB --> AttachmentService : same ID after routing or restart
 RuntimeA --> AttachmentService : GET internal content stream
 RuntimeB --> AttachmentService : GET internal content stream
-AttachmentService --> AttachmentDb : authorize session and locate object
-AttachmentService --> Obs : read immutable body
+AttachmentService --> AttachmentDb : authorize session and read status
+AttachmentService --> AttachmentDetail : read MIME, size, sha256, reference state
+AttachmentService --> Obs : read immutable body by attachment_id
 RuntimeA --> RuntimeStore : persist id, name, MIME, size, sha256
 RuntimeB --> RuntimeStore : restore the same snapshot
 RuntimeA --> Assembler : verify sha256 while streaming
@@ -601,8 +606,24 @@ RuntimeB --> Assembler : verify sha256 while streaming
 note bottom of AttachmentService
   Batch resolve is all-or-nothing and marks accepted rows referenced.
   The first reference time is preserved and expiry is cleared.
-  Responses never expose object keys, OBS URLs, or credentials.
+  No separate storage locator, OBS URL, or credential is returned.
+  Knowing an attachment ID does not authorize direct OBS access.
+  OBJECT_KEY_CONFLICT is quarantined from ordinary delete and cleanup;
+  only audited reconciliation may remove an object after ownership proof.
   No content_version, reservation, or complex retention claim exists.
+end note
+
+note bottom of AttachmentDb
+  The permanent row retains exactly attachment_id, session_id,
+  status, created_at, and deleted_at after deletion.
+end note
+
+note bottom of AttachmentDetail
+  MIME, expected and actual size, and sha256 validate content.
+  referenced_at and expires_at drive reference and 24-hour cleanup.
+  error, attempt, next-at, lease, and row-version fields recover workers.
+  After OBS deletion, one DB transaction removes this detail
+  and leaves the permanent row as a DELETED tombstone.
 end note
 
 note bottom of RuntimeA

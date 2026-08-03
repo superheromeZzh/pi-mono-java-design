@@ -1,4 +1,4 @@
-' Generated for SR-ATTACHMENT-001 v1.0.0 on 2026-08-03.
+' Generated for SR-ATTACHMENT-001 v1.1.0 on 2026-08-03.
 ' Run from this directory: plantuml -tsvg diagram.puml
 ' Design repository baseline: ecf31bc55ca1923dd1c7f90d50ee6763963b7da9.
 ' Target-only design: no corresponding Attachment Service implementation exists.
@@ -45,15 +45,15 @@ participant "Scan Worker Pod B" as Worker
 participant "Security Scanner" as Scanner
 
 Client -> API : POST multipart file\nX-Attachment-Size and Prefer
-API -> API : authorize user and session;\nvalidate 1..20 MiB
-API -> API : generate attachment_id and\nrandom opaque object_key
-API -> DB : INSERT status=UPLOADING\nexpected_size and expires_at
+API -> API : authorize user and session;\nvalidate 1..20 MiB and sanitized filename
+API -> API : generate attachment_id; use it\nas the exact OBS Object Key
+API -> DB : INSERT permanent identity/status\nand one active detail row
 DB --> API : committed row
 API -> OBS : streaming PUT(contentLength)\nwhile count and SHA-256
-OBS --> API : object ETag
+OBS --> API : immutable object persisted
 API -> API : require actual size = declared size;\nverify file part EOF after N bytes
-API -> DB : conditional UPDATE PROCESSING,\nsize, digest and ETag
-DB --> API : row_version advanced
+API -> DB : UPDATE main status=PROCESSING;\nset detail size and digest
+DB --> API : detail row_version advanced
 
 alt Prefer wait=N and scan reaches a terminal state within min(N,10)
   API -> Worker : make PROCESSING task eligible
@@ -94,6 +94,8 @@ note over API,OBS
 No Pod-local file and no complete byte array.
 At most 1 MiB of application in-flight buffers
 per upload. OBS slowdown propagates backpressure.
+Create-only conflict marks the ID FAILED and does not
+overwrite or delete an object of unproven ownership.
 end note
 
 note over DB,Worker
@@ -118,7 +120,9 @@ left to right direction
 ' Target design: shared OBS owns immutable bytes and shared openGauss owns the
 ' resource directory, state machine, authorization binding, and worker leases.
 ' Architecture change: multiple Pods depend only on shared durable services,
-' never on process memory, local disk, sticky routing, or a deterministic path.
+' never on process memory, local disk, sticky routing, or a stored key mapping.
+' Target design: the exact private OBS Object Key is attachment_id; there is no
+' object_key column, prefix, directory, file-name component, or ETag column.
 ' Design reason: isolate large-object throughput from relational state queries,
 ' WAL, database replication, and database backup and restore operations.
 
@@ -138,22 +142,27 @@ rectangle "mate-service deployment" as Mate {
   interface "AttachmentContentStore" as Port
   component "ObsAttachmentContentStore" as Adapter
 
-  PodA --> Port : stream put/open/stat/delete
-  PodB --> Port : stream put/open/stat/delete
-  PodC --> Port : stream open/stat/delete
+  PodA --> Port : stream by attachment_id
+  PodB --> Port : stream by attachment_id
+  PodC --> Port : stat/delete by attachment_id
   Port -down-> Adapter : implemented by
 }
 
 database "Shared openGauss\nmetadata ledger" as DB {
-  rectangle "attachment row" as Row {
+  rectangle "attachment\npermanent identity/status" as Row {
     card "attachment_id PK" as AId
     card "session_id" as SId
-    card "random object_key UK" as Key
-    card "status and row_version" as Status
-    card "size, SHA-256 and MIME" as Integrity
-    card "referenced and expiry" as Reference
-    card "lease and retry fields" as Lease
+    card "status" as Status
+    card "created_at" as Created
+    card "deleted_at" as Deleted
   }
+  rectangle "attachment_active_detail\nremoved after content deletion" as Detail {
+    card "attachment_id PK/FK" as DetailId
+    card "filename, MIME, size, SHA-256" as Integrity
+    card "referenced_at and expires_at" as Reference
+    card "error, lease, retry, row_version" as Lease
+  }
+  Row -- Detail : one-to-one while active
 }
 
 cloud "Shared private OBS\nimmutable file bytes" as OBS
@@ -167,15 +176,16 @@ Agent --> PodB : internal resolve and content stream
 
 note bottom of DB
 No BLOB, BYTEA, Base64, URL, or credentials.
-Rows are the cross-Pod directory and state authority.
-DELETED rows remain as non-reusable ID tombstones.
+No Object Key, ETag, or declared MIME column.
+After deletion only the permanent five-field
+DELETED identity row remains as an ID tombstone.
 end note
 
 note bottom of OBS
 One original object per attachment_id.
-Object keys are random and internal.
-No public deterministic bucket or prefix contract.
-File names never participate in object keys.
+The exact Object Key equals attachment_id.
+There is no prefix, directory, or file-name part.
+The private bucket and authorization remain required.
 end note
 
 note bottom of Mate
@@ -198,8 +208,8 @@ title Cross-Pod attachment resolution and content streaming
 ' reference or cross-service content resolver.
 ' Target design: agent-service resolves one ordered attachment batch atomically,
 ' then streams each fixed attachment through mate-service using the stored digest.
-' Security hardening: agent-service never receives object keys, OBS URLs, bucket
-' names, or credentials; knowing an attachment_id alone does not authorize access.
+' Security hardening: agent-service never receives OBS URLs, bucket names, or
+' credentials; knowing an attachment_id alone does not authorize bucket access.
 ' Design reason: the upload Pod and read Pod can differ because both use the same
 ' shared openGauss directory and private OBS content authority.
 
@@ -232,16 +242,16 @@ alt any item fails authorization or state validation
   API -> DB : ROLLBACK
   API --> Agent : one safe INVALID_ATTACHMENT\nor ATTACHMENT_NOT_READY
 else complete batch is valid
-  API -> DB : set referenced=true; preserve first timestamp;\nclear expiry; increment row_version; COMMIT
+  API -> DB : preserve first referenced_at; clear expiry;\nincrement detail row_version; COMMIT
   DB --> API : complete ordered snapshots
   API --> Agent : attachment_id, filename, MIME,\nsize and SHA-256 in request order
 end
 
 loop each accepted attachment in request order
   Agent -> API : GET content\nsession_id, attachment_id, expected SHA-256
-  API -> DB : authorize READY referenced row;\nread internal random object_key
-  DB --> API : object locator and trusted metadata
-  API -> OBS : streaming GET by internal object_key
+  API -> DB : authorize READY row with referenced_at;\nread trusted active detail
+  DB --> API : size, digest, and detected MIME
+  API -> OBS : streaming GET by attachment_id
   OBS --> API : bounded original byte stream
   API --> Agent : application/octet-stream\nContent-Length and digest
   Agent -> Agent : incrementally verify exact size\nand SHA-256
@@ -305,10 +315,13 @@ participant "Shared private OBS" as OBS
 group Single attachment deletion
   Client -> Mate : DELETE session attachment
   Mate -> DB : conditional read and state update
-  alt referenced=true
+  alt referenced_at is not null
     DB --> Mate : referenced attachment
     Mate --> Client : 409 ATTACHMENT_REFERENCED
-  else unreferenced or already deleting
+  else OBJECT_KEY_CONFLICT quarantine
+    DB --> Mate : retain FAILED active detail
+    Mate --> Client : bounded 503; audited reconciliation required
+  else referenced_at is null or already deleting
     DB --> Mate : DELETING persisted or already present
     Mate --> Client : 202 deletion registered
   end
@@ -325,35 +338,38 @@ group Session deletion
   Client -> Mate : delete Session
   Mate -> Agent : stop or abort Runtime Session
   Agent --> Mate : Runtime no longer reads attachments
-  Mate -> DB : mark all Session attachments DELETING;\ncommit durable deletion work
-  DB --> Mate : deletion registered
-  Mate --> Client : Session deletion accepted
+  Mate -> DB : mark normal Session attachments DELETING;\nexclude OBJECT_KEY_CONFLICT quarantine
+  DB --> Mate : deletion registered; quarantine count
+  Mate --> Client : Session hidden; storage cleanup pending if quarantined
 end
 
 group Background delete on any Pod
   Worker -> DB : claim expired DELETING lease; commit
-  DB --> Worker : random object_key and row_version
-  Worker -> OBS : idempotent DELETE object
+  DB --> Worker : attachment_id and detail row_version
+  Worker -> OBS : idempotent DELETE by attachment_id
   alt object deleted or already absent
     OBS --> Worker : success or NotFound
-    Worker -> DB : conditional UPDATE DELETED,\ndeleted_at; clear lease
+    Worker -> DB : one transaction: DELETE active detail;\nUPDATE main DELETED and deleted_at
   else temporary OBS failure
     OBS --> Worker : retryable failure
     Worker -> DB : increment attempt_count; set\nnext_attempt_at; clear lease
   end
 end
 
-group Periodic reconciliation
-  Worker -> DB : find stale UPLOADING, PROCESSING,\nDELETING, or expired leases
+group Audited reconciliation
+  Worker -> DB : find stale normal rows or quarantined\nFAILED OBJECT_KEY_CONFLICT rows
   DB --> Worker : candidate rows
-  Worker -> OBS : stat by stored random object_key
+  Worker -> OBS : stat by attachment_id
   alt UPLOADING row and complete matching object exists
     OBS --> Worker : object metadata
     Worker -> DB : recover PROCESSING or fail safely
+  else quarantined conflict and object is absent
+    OBS --> Worker : NotFound
+    Worker -> DB : DELETE active detail;\nmark main DELETED and set deleted_at
   else orphan or invalid object
     OBS --> Worker : object state
-    Worker -> OBS : idempotent cleanup
-    Worker -> DB : mark FAILED or DELETED tombstone
+    Worker -> OBS : cleanup only after ownership proof
+    Worker -> DB : mark FAILED; or after safe delete,\nDELETE active detail and mark main DELETED
   end
 end
 
@@ -366,7 +382,8 @@ end note
 
 note over Mate,DB
 Unreferenced attachments expire after 24 hours.
-DELETED rows remain forever so attachment_id
-values are never issued again.
+After deletion, only attachment_id, session_id,
+status=DELETED, created_at, and deleted_at remain.
+The ID is never issued again.
 end note
 @enduml

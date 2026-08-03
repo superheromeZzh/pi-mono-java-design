@@ -2,13 +2,14 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: CampusMate Attachment Service API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     CampusMate 中由 mate-service 承载的附件服务目标契约。
 
-    文件正文只保存到共享私有 OBS；openGauss 只保存附件元数据、状态和
-    attachment_id 到内部 Object Key 的映射。所有上传和读取均为流式处理，
-    不使用 Pod 本地文件或完整内存副本。
+    文件正文只保存到共享私有 OBS，Object Key 精确等于服务端生成的
+    attachment_id。openGauss 使用永久身份/状态主表和仅活动期明细表，
+    不保存第二套 Object Key 映射。所有上传和读取均为流式处理，不使用 Pod 本地文件
+    或完整内存副本。
 
     本文件是 target-only 设计，不表示现有 Java 服务已经实现这些端点。
   contact:
@@ -31,10 +32,17 @@ paths:
       operationId: uploadAttachment
       summary: 流式上传单个附件
       description: |
-        验证调用用户和 Session 后，服务端生成 attachment_id 与内部随机
-        Object Key，在 openGauss 创建 UPLOADING 记录，并将唯一的 file part
-        直接流式写入 OBS。实际字节数必须与 X-Attachment-Size 完全一致；
+        验证调用用户和 Session 后，服务端生成 attachment_id，并将它原样作为
+        完整 OBS Object Key；openGauss 在一个事务中创建 UPLOADING 主表记录和
+        活动明细，再把唯一的 file part 直接流式写入 OBS。实际字节数必须与
+        X-Attachment-Size 完全一致；
         OBS 只读取声明长度后，服务端仍必须验证 file part 已到 EOF。
+
+        OBS PUT 使用 create-only。若同名对象已经存在，服务端不得覆盖、删除
+        来源不明的对象或在不可重放的上传流中更换 ID；当前记录进入 FAILED，
+        活动明细写入 OBJECT_KEY_CONFLICT 并退出普通 24 小时清理，调用方收到
+        有界 503 后以新的上传请求取得新 ID。只有受审计对账确认对象归属并
+        安全删除或确认 NotFound 后，才删除明细并留下 DELETED tombstone。
 
         省略 Prefer 或使用 respond-async 时，在 OBS 写入成功且状态提交为
         PROCESSING 后返回 202。使用 wait=N 时最多等待 min(N, 10) 秒。
@@ -58,11 +66,14 @@ paths:
                 file:
                   type: string
                   format: binary
+                  x-require-content-disposition-filename: true
                   description: |
-                    唯一文件 part。文件名只作为不可信显示名；Content-Type
-                    只作为声明 MIME，不能替代服务端内容嗅探。服务端解析
-                    type/subtype、移除参数并以 Locale.ROOT 小写化；无效声明
-                    不作为可信 media_type。
+                    唯一文件 part。Content-Disposition 必须携带 filename；
+                    服务端进行 Unicode NFC 规范化并移除控制字符和路径分隔符，
+                    结果必须为 1..512 个 Unicode code point，否则返回 400。
+                    文件名只作为不可信显示名；Content-Type
+                    是不可信请求数据，本版不持久化，也不能替代服务端内容嗅探。
+                    只有扫描器产生的 detected media type 可以进入可信元数据。
       responses:
         '201':
           description: 在 wait 窗口内完成扫描，附件已经 READY
@@ -117,8 +128,9 @@ paths:
       description: |
         返回当前 PROCESSING、READY、BLOCKED、FAILED、DELETING 或 DELETED
         状态。当前 Session 的授权调用方可以读取 DELETED tombstone，
-        用于确认异步删除已完成。响应不包含 Object Key、OBS URL、ETag
-        或存储凭据。
+        用于确认异步删除已完成。DELETED 只返回 attachment_id、session_id、
+        status、created_at 和 deleted_at；活动明细已被清除。响应不包含 OBS
+        Bucket、Endpoint、URL 或存储凭据。
       security:
         - CampusMateAccessToken: []
       parameters:
@@ -136,6 +148,8 @@ paths:
                   $ref: '#/components/examples/ReadyAttachment'
                 processing:
                   $ref: '#/components/examples/ProcessingAttachment'
+                deleted:
+                  $ref: '#/components/examples/DeletedAttachment'
         '401':
           $ref: '#/components/responses/Unauthenticated'
         '403':
@@ -151,7 +165,12 @@ paths:
       summary: 删除尚未被消息引用的附件
       description: |
         未引用附件被条件更新为 DELETING，由 Worker 异步删除 OBS 正文。
-        已引用附件不能单独删除。对 DELETING 或 DELETED 重复调用保持幂等。
+        OBS 删除成功或返回 NotFound 后，一个数据库事务删除活动明细并把永久
+        主表更新为 DELETED/deleted_at。已引用附件不能单独删除。对 DELETING
+        或 DELETED 重复调用保持幂等。
+        `FAILED + OBJECT_KEY_CONFLICT` 是来源不明对象的隔离记录，公共 DELETE
+        不改变其状态并返回有界 503；只有受审计 reconciliation 确认归属并
+        安全删除或确认 NotFound 后，才能删除活动明细并收束 tombstone。
       security:
         - CampusMateAccessToken: []
       parameters:
@@ -188,13 +207,15 @@ paths:
       description: |
         只允许 agent-service 的服务身份调用。Attachment Service 在一个短
         openGauss 事务内校验全部 ID 都属于 session_id、状态为 READY、未删除
-        且未过期，然后原子设置 referenced=true、保留首次 referenced_at
-        并清空 expires_at。任一项失败时整体回滚。不存在、跨 Session、
+        且未过期，然后原子保留首次 referenced_at 并清空 expires_at。
+        referenced_at 非空就是已引用状态，不保存重复的 referenced 布尔列。
+        任一项失败时整体回滚。不存在、跨 Session、
         删除、过期或终态失败投影为 INVALID_ATTACHMENT；只有已确认当前
         Session 归属的 UPLOADING/PROCESSING 才投影为 ATTACHMENT_NOT_READY。
 
-        返回数组严格保持 attachment_ids 的请求顺序，不包含 Object Key、
-        OBS URL、ETag、Bucket 或凭据。
+        返回数组严格保持 attachment_ids 的请求顺序。attachment_id 同时是私有
+        Bucket 内的 Object Key，但不是访问能力；响应不包含 Bucket、Endpoint、
+        OBS URL 或凭据。
       security:
         - AgentServiceAccessToken: []
       requestBody:
@@ -211,7 +232,7 @@ paths:
                     - attachment_011CZm8VpK4rNs6WtY2hDqfB
       responses:
         '200':
-          description: 全部附件已经原子解析并标记为 referenced
+          description: 全部附件已原子解析并写入首次 referenced_at
           content:
             application/json:
               schema:
@@ -245,10 +266,10 @@ paths:
       operationId: streamAttachmentContent
       summary: 向 agent-service 流式代理不可变附件正文
       description: |
-        只读取 READY 且 referenced=true 的记录。服务端从 openGauss 取得内部
-        Object Key，再从 OBS 流式代理正文；不创建本地文件，也不聚合完整
-        byte 数组。调用方必须提供 resolve 返回的 SHA-256，并在接收时再次
-        增量校验实际长度和摘要。
+        只读取 READY 且 referenced_at 非空的活动明细。服务端校验主表和明细后，
+        直接把 attachment_id 作为完整 OBS Object Key 并流式代理正文；不创建
+        本地文件，也不聚合完整 byte 数组。调用方必须提供 resolve 返回的
+        SHA-256，并在接收时再次增量校验实际长度和摘要。
       security:
         - AgentServiceAccessToken: []
       parameters:
@@ -374,6 +395,14 @@ components:
     RetryAfter:
       description: 建议再次查询状态前等待的秒数
       required: true
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 60
+      example: 2
+    RetryAfterIfRetryable:
+      description: 仅在 retryable=true 时返回的建议重试秒数
+      required: false
       schema:
         type: integer
         minimum: 1
@@ -509,9 +538,11 @@ components:
         当前请求的 openGauss/OBS 依赖不可用，或 wait 窗口内附件已
         进入终态 FAILED。若上传已稳定进入 PROCESSING，只是后台扫描器
         暂时不可用，则保持 PROCESSING 并返回 202，不使用本终态响应。
+        `OBJECT_KEY_CONFLICT` 也使用该非泄露 HTTP 投影，但 retryable=false，
+        同一 ID 只能等待受审计对账；上传方应发起新的上传请求取得新 ID。
       headers:
         Retry-After:
-          $ref: '#/components/headers/RetryAfter'
+          $ref: '#/components/headers/RetryAfterIfRetryable'
         Location:
           $ref: '#/components/headers/AttachmentLocationIfCreated'
         Preference-Applied:
@@ -520,11 +551,18 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            code: ATTACHMENT_STORAGE_UNAVAILABLE
-            message: Attachment storage is temporarily unavailable.
-            retryable: true
-            retry_after_ms: 2000
+          examples:
+            temporarilyUnavailable:
+              value:
+                code: ATTACHMENT_STORAGE_UNAVAILABLE
+                message: Attachment storage is temporarily unavailable.
+                retryable: true
+                retry_after_ms: 2000
+            quarantinedObjectKeyConflict:
+              value:
+                code: ATTACHMENT_STORAGE_UNAVAILABLE
+                message: Attachment storage requires integrity reconciliation.
+                retryable: false
   schemas:
     SessionId:
       type: string
@@ -579,6 +617,21 @@ components:
       description: |
         服务端清除控制字符和路径分隔符后的显示名。调用方渲染时仍须转义。
     AttachmentResource:
+      description: |
+        活动附件返回运行元数据；DELETED tombstone 只返回永久主表中的五个字段。
+      oneOf:
+        - $ref: '#/components/schemas/ActiveAttachmentResource'
+        - $ref: '#/components/schemas/DeletedAttachmentResource'
+    ActiveAttachmentStatus:
+      type: string
+      enum:
+        - UPLOADING
+        - PROCESSING
+        - READY
+        - BLOCKED
+        - FAILED
+        - DELETING
+    ActiveAttachmentResource:
       type: object
       additionalProperties: false
       required:
@@ -587,21 +640,16 @@ components:
         - status
         - filename
         - expected_size_bytes
-        - referenced
         - created_at
-        - updated_at
       properties:
         attachment_id:
           $ref: '#/components/schemas/AttachmentId'
         session_id:
           $ref: '#/components/schemas/SessionId'
         status:
-          $ref: '#/components/schemas/AttachmentStatus'
+          $ref: '#/components/schemas/ActiveAttachmentStatus'
         filename:
           $ref: '#/components/schemas/DisplayFilename'
-        declared_media_type:
-          $ref: '#/components/schemas/MediaType'
-          description: 解析 multipart 声明后的小写无参数投影，仍然是不可信审计数据。
         media_type:
           $ref: '#/components/schemas/MediaType'
           description: 只有内容嗅探完成后才出现的可信 detected media type。
@@ -617,29 +665,20 @@ components:
           maximum: 20971520
         sha256:
           $ref: '#/components/schemas/Sha256'
-        referenced:
-          type: boolean
         referenced_at:
           type: string
           format: date-time
+          description: 出现即表示已经被当前 Session 引用；值为首次成功 resolve 时间。
         expires_at:
           type: string
           format: date-time
+          description: 只在尚未引用时出现，用于 24 小时自动清理。
         error_code:
           type: string
           minLength: 1
           maxLength: 64
           pattern: '^[A-Z][A-Z0-9_]{0,63}$'
         created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-        ready_at:
-          type: string
-          format: date-time
-        deleted_at:
           type: string
           format: date-time
       allOf:
@@ -654,28 +693,40 @@ components:
               - media_type
               - size_bytes
               - sha256
-              - ready_at
-        - if:
-            properties:
-              status:
-                const: DELETED
+      oneOf:
+        - required:
+            - referenced_at
+          not:
             required:
-              - status
-          then:
-            required:
-              - deleted_at
-        - if:
-            properties:
-              referenced:
-                const: true
-            required:
-              - referenced
-          then:
+              - expires_at
+        - required:
+            - expires_at
+          not:
             required:
               - referenced_at
-            not:
-              required:
-                - expires_at
+    DeletedAttachmentResource:
+      type: object
+      additionalProperties: false
+      required:
+        - attachment_id
+        - session_id
+        - status
+        - created_at
+        - deleted_at
+      properties:
+        attachment_id:
+          $ref: '#/components/schemas/AttachmentId'
+        session_id:
+          $ref: '#/components/schemas/SessionId'
+        status:
+          type: string
+          const: DELETED
+        created_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
     ResolveAttachmentsRequest:
       type: object
       additionalProperties: false
@@ -784,27 +835,27 @@ components:
         session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
         status: PROCESSING
         filename: orders.pdf
-        declared_media_type: application/pdf
         expected_size_bytes: 182734
         size_bytes: 182734
         sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
-        referenced: false
         expires_at: '2026-08-04T10:00:00.000Z'
         created_at: '2026-08-03T10:00:00.000Z'
-        updated_at: '2026-08-03T10:00:01.000Z'
     ReadyAttachment:
       value:
         attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
         session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
         status: READY
         filename: orders.pdf
-        declared_media_type: application/pdf
         media_type: application/pdf
         expected_size_bytes: 182734
         size_bytes: 182734
         sha256: 3b6f75a86ac2f94c6b20252a66f4d71a7b37b1f48e325ef1698025c813b31c5f
-        referenced: false
         expires_at: '2026-08-04T10:00:00.000Z'
         created_at: '2026-08-03T10:00:00.000Z'
-        updated_at: '2026-08-03T10:00:03.000Z'
-        ready_at: '2026-08-03T10:00:03.000Z'
+    DeletedAttachment:
+      value:
+        attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
+        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        status: DELETED
+        created_at: '2026-08-03T10:00:00.000Z'
+        deleted_at: '2026-08-04T11:30:00.000Z'

@@ -731,8 +731,12 @@ title Managed attachment OBS-backed reference lifecycle
 ' Observed behavior: both baselines can carry inline image content but do not
 ' define a generic attachment_id or an external Attachment Service.
 ' Target design: mate-service streams original bytes to shared OBS, records
-' authority and integrity metadata in shared openGauss, and exposes fixed HTTP
-' upload, batch resolve, and content streaming APIs.
+' permanent identity state plus active lifecycle detail in shared openGauss,
+' and exposes fixed HTTP upload, batch resolve, and content streaming APIs.
+' Target design: the private OBS Object Key is exactly attachment_id; it is not
+' an authorization token and never includes a prefix, path, or filename.
+' Target design: deletion removes active detail and retains a five-field
+' permanent DELETED tombstone in the attachment main table.
 ' Design reason: keep large-object transfer off the Chat control plane, support
 ' cross-Pod reads without local files, prevent metadata forgery, and retain
 ' reproducible public metadata snapshots in Runtime history.
@@ -754,8 +758,8 @@ actor "End user" as User
 participant "CampusMate client" as Client
 participant "mate-service\nAttachment Service" as Attach
 participant "background worker" as Worker
-database "openGauss\nmetadata ledger" as DB
-database "private OBS\ncontent store" as OBS
+database "openGauss\nattachment main table\nplus active detail" as DB
+database "private OBS\nObject Key = attachment_id" as OBS
 participant "mate-service\nRuntime client" as Upstream
 participant "ChatWebSocketAdapter" as WS
 participant "ManagedSessionTransport" as Transport
@@ -765,28 +769,28 @@ participant "Model Manager Provider" as Model
 
 User -> Client : select one file
 Client -> Attach : POST /v1/sessions/{session_id}/attachments\nmultipart file + X-Attachment-Size\nPrefer respond-async or wait=N
-Attach -> Attach : authorize user and session;\nrequire size 1..20 MiB
-Attach -> Attach : generate opaque attachment_id\nand random internal object key
-Attach -> DB : INSERT UPLOADING metadata
+Attach -> Attach : authorize user and session;\nrequire size 1..20 MiB and safe filename
+Attach -> Attach : generate opaque attachment_id
+Attach -> DB : INSERT attachment main row\nand attachment_active_detail\nin one transaction
 DB --> Attach : committed
-Attach -> OBS : put(objectKey, bounded stream, declared length)
+Attach -> OBS : put(attachment_id, bounded stream,\nexpected_size_bytes) with create-only semantics
 Attach -> Attach : count bytes, verify file-part EOF,\nand compute SHA-256 with backpressure
 
 alt upload failed or actual size mismatch
-  Attach -> OBS : delete possible residual object
-  Attach -> DB : mark FAILED
+  Attach -> OBS : delete(attachment_id) if an object may exist
+  Attach -> DB : mark main FAILED;\nset bounded error_code in active detail
   Attach --> Client : bounded HTTP error
 else OBS write succeeded
-  OBS --> Attach : ETag and completion
-  Attach -> DB : update PROCESSING, actual size,\ndigest and internal ETag
+  OBS --> Attach : stored object completion
+  Attach -> DB : update main PROCESSING;\nset size_bytes and SHA-256 in active detail
   Attach --> Client : 202 + Location + Retry-After\nunless wait reaches READY
-  Worker -> DB : claim short scan lease for PROCESSING
-  Worker -> OBS : open random object key as stream
+  Worker -> DB : claim short scan lease in active detail\nusing retry time, lease, and row version
+  Worker -> OBS : open(attachment_id) as stream
   OBS --> Worker : bounded byte stream
   Worker -> Worker : verify size and digest;\nsniff MIME and scan security;\nnever execute JavaScript
-  Worker -> DB : mark READY, BLOCKED, or FAILED
+  Worker -> DB : mark main READY, BLOCKED, or FAILED;\nset detected MIME or bounded error_code;\nclear phase lease fields
   Client -> Attach : GET /v1/sessions/{session_id}/attachments/{attachment_id}
-  Attach -> DB : read authorized public state
+  Attach -> DB : read authorized main and active detail
   DB --> Attach : status and public metadata
   Attach --> Client : 200 attachment resource
 end
@@ -804,13 +808,13 @@ alt accepted result exists with the same payload
 else first attempt
   Transport -> Transport : acquire Session single-writer guard;\nreject a different active run
   Transport -> Attach : POST /internal/v1/attachments:resolve\nservice token + session_id + ordered IDs
-  Attach -> DB : short transaction: lock all rows;\nrequire same session, READY,\nnot deleted, and not expired
+  Attach -> DB : short transaction: lock main and detail;\nrequire same session, READY,\nactive detail present, and not expired
   alt any attachment is invalid
     DB --> Attach : rollback all changes
     Attach --> Transport : one safe batch error
     Transport --> WS : failed ResponseFrame; no run
   else all attachments are valid
-    Attach -> DB : atomically set referenced=true,\npreserve first referenced_at, expires_at=NULL
+    Attach -> DB : atomically preserve first referenced_at\nand set expires_at=NULL\nusing row_version compare-and-set
     DB --> Attach : committed public snapshots
     Attach --> Transport : ordered id, filename, media type,\nsize, and SHA-256
     Transport -> Store : commit user Message snapshots,\nidempotency result, run,\nand active run state
@@ -821,9 +825,9 @@ else first attempt
     Transport -> Assembler : ordered public snapshots
     loop each attachment
       Assembler -> Attach : GET /internal/v1/sessions/{session_id}/\nattachments/{attachment_id}/content\nwith expected SHA-256
-      Attach -> DB : require READY, referenced,\nsame session, and matching digest
-      DB --> Attach : internal random object key
-      Attach -> OBS : open(objectKey)
+      Attach -> DB : require main READY, same session,\nreferenced_at not null, and matching digest
+      DB --> Attach : authorized active metadata
+      Attach -> OBS : open(attachment_id)
       OBS --> Attach : original byte stream
       Attach --> Assembler : bounded proxy stream
       Assembler -> Assembler : verify length and SHA-256;\nconstruct provider-neutral input
@@ -839,40 +843,63 @@ group Public deletion
   alt attachment is already referenced
     DB --> Attach : conflict
     Attach --> Client : 409 ATTACHMENT_REFERENCED
+  else OBJECT_KEY_CONFLICT quarantine
+    DB --> Attach : retain FAILED active detail
+    Attach --> Client : bounded 503; audited reconciliation required
   else deletion accepted
     DB --> Attach : DELETING
     Attach --> Client : 202
-    Worker -> OBS : delete object with retry
-    Worker -> DB : mark DELETED tombstone
+    Worker -> DB : claim deletion lease in active detail
+    Worker -> OBS : delete(attachment_id) with retry;\nnot found is success
+    Worker -> DB : transaction: delete active detail;\nmark main DELETED and set deleted_at
   end
 end
 
 group Session deletion
   Upstream -> Transport : stop or abort Runtime Session
   Upstream -> Attach : delete all attachments for session_id
-  Attach -> DB : mark all remaining rows DELETING
-  Worker -> OBS : delete each object with retry
-  Worker -> DB : retain permanent DELETED tombstones
+  Attach -> DB : mark normal non-DELETED rows DELETING; exclude quarantine
+  Worker -> OBS : delete each attachment_id with retry
+  Worker -> DB : delete each active detail and retain\npermanent five-field DELETED tombstones
+  Attach --> Upstream : storage cleanup remains pending if quarantine exists
 end
 
 note over Client,OBS
 Clients never access OBS directly.
-No presigned upload or deterministic object path is part of v1.
+The private Object Key is exactly attachment_id.
+It has no prefix, path, filename, or public URL.
+Knowing the ID is not authorization.
 Upload retries create a new attachment_id.
+Create-only conflict keeps FAILED detail for audited reconciliation
+and never overwrites or deletes an object of unproven ownership.
 The file body exists only in OBS; openGauss stores metadata.
 end note
 
 note over Attach,DB
-The attachment row is a one-way Session binding.
+The permanent main row retains only attachment_id, session_id,
+status, created_at, and deleted_at after deletion.
+The active detail exists only before DELETED.
+referenced_at not null means the Session has referenced the file.
 Referenced rows clear expires_at and cannot be deleted alone.
 If Runtime persistence later fails, conservative retention lasts
 until Session deletion; there is no release protocol.
 end note
 
+note over DB,Worker
+Active detail roles:
+filename is display metadata only.
+detected_media_type and expected/actual sizes enforce content policy.
+SHA-256 protects upload, scan, proxy, and Runtime integrity.
+referenced_at and expires_at govern one-way reference and 24-hour cleanup.
+error_code records a bounded safe failure reason.
+attempt_count, next_attempt_at, lease_owner, lease_until,
+and row_version provide retry, crash recovery, and race protection.
+end note
+
 note over WS,Attach
 The WebSocket carries only ordered attachment_ids.
-agent-service never receives object keys, OBS URLs, ETags,
-storage credentials, or a complete in-memory file.
+agent-service has no OBS endpoint, credentials, or direct access.
+Object Key equality does not widen its authorization.
 end note
 
 note over Store,Model

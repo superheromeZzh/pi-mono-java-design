@@ -3,7 +3,7 @@ id: urn:campusagent:chat-websocket:v2
 x-locale: zh-CN
 info:
   title: CampusAgent 会话 WebSocket API
-  version: 2.9.0
+  version: 2.9.1
   description: |
     调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
     安全 WebSocket。
@@ -30,7 +30,7 @@ info:
     可信元数据写入 openGauss；WebSocket `chat.send` 只传
     `attachment_ids`。附件引用是协议 2 的标准可选字段，不是 capability。
     CampusAgent Runtime 只调用 Attachment Service 内部 resolve/content，
-    不直连 OBS，不接触 object_key、存储凭据、预签名 URL、
+    不直连 OBS，不接触 Bucket、存储凭据、预签名 URL、
     客户端 MIME/文件名/Base64 或 tenant/user 字段。
 
     URL 中的 `/v1` 是 `agent-service` 对外服务 API 版本；首帧协商的
@@ -828,8 +828,8 @@ components:
         traceparent 不参与。相同 key 携带
         不同幂等负载返回 INVALID_REQUEST。服务端先返回已经接受的同 key 结果，
         再处理 RUN_ACTIVE 或重新解析附件；首次请求只有在全部附件原子解析为
-        可信元数据快照且 Attachment Service 已在 openGauss 中单向标记
-        referenced，并验证
+        可信元数据快照且 Attachment Service 已在 openGauss 中单向设置
+        referenced_at，并验证
         “有效历史附件 + 本次新附件”的完整 AttachmentContextPlan 符合模型输入
         策略、持久化用户消息后，才可以提交 accepted=true。
         message 可以省略或为空字符串，但此时 attachment_ids 必须非空；
@@ -1591,7 +1591,7 @@ components:
         已接受用户消息中的稳定附件快照，用于 RuntimeSessionStore、
         chat.history 和 UI 恢复。
         字段来自 Attachment Service 的可信描述，不来自 chat.send。它只允许
-        出现在 role=user 的持久化 Message；不包含 URL、OBS object_key、认证凭据、
+        出现在 role=user 的持久化 Message；不包含 URL、OBS Bucket、认证凭据、
         预签名 URL、Base64 或任何运行时凭据。filename 仅用于转义后的 UI
         显示，不能解释为路径。
       required:
@@ -1941,9 +1941,9 @@ components:
         不因原 run 已处于 active 状态或 Attachment Service 当前不可用而返回
         RUN_ACTIVE 或重新校验失败。存在附件时，accepted=true 还表示用户消息已经
         保存可信附件
-        元数据快照，且 Attachment Service 已在同一 openGauss 事务中将整批
-        资源原子地标记为 referenced。Runtime 后续通过内部 content API 流式
-        读取正文，不获得 OBS object_key、凭据或预签名 URL。
+        元数据快照，且 Attachment Service 已在同一 openGauss 事务中为整批
+        资源原子设置 referenced_at。Runtime 后续通过内部 content API 流式
+        读取正文，不获得 OBS Bucket、凭据或预签名 URL。
       required:
         - run_id
         - user_message_id
@@ -3349,7 +3349,7 @@ x-runtime-persistence:
   description: |
     目标设计的 Session 权威状态完全保存在数据库中，不生成 Session
     文件。RuntimeSessionStore 是逻辑端口；物理表、索引、事务和
-    保留策略另行设计。凭据、OBS object_key、预签名 URL、内部 Header
+    保留策略另行设计。凭据、OBS Bucket、预签名 URL、内部 Header
     和执行器秘密
     不得持久化。每个状态变更的幂等结果必须与对应 Session
     状态在同一原子提交中对外可见。
@@ -3372,6 +3372,10 @@ x-attachments:
     contentType: multipart/form-data
     exactFileParts: 1
     filePartName: file
+    filenameRequired: true
+    filenameNormalization: Unicode NFC, remove controls and path separators
+    filenameMinCodePoints: 1
+    filenameMaxCodePoints: 512
     requiredSizeHeader: X-Attachment-Size
     requireFilePartEofAfterDeclaredBytes: true
     minBytes: 1
@@ -3391,14 +3395,15 @@ x-attachments:
   externalDelete:
     method: DELETE
     path: /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
-    unreferenced: deletable
+    unreferenced: deletable unless quarantined by OBJECT_KEY_CONFLICT
     referencedStatus: 409
+    objectKeyConflictStatus: 503
   internalResolve:
     method: POST
     path: /mate-service/internal/v1/attachments:resolve
     body: session_id plus ordered attachment_ids
-    transaction: validate the complete ordered batch and atomically set referenced=true, preserve the first referenced_at, and set expires_at=null in one openGauss transaction
-    referencedFlag: one-way
+    transaction: validate the complete ordered batch and atomically preserve the first referenced_at and set expires_at=null in one openGauss transaction
+    referencedAt: null-to-timestamp, one-way
   internalContent:
     method: GET
     path: /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}/content
@@ -3408,8 +3413,28 @@ x-attachments:
     body: OBS
     sharedAcrossReplicas: true
     runtimeDirectObsAccess: false
-    deterministicObjectPath: false
+    objectKeyEqualsAttachmentId: true
+    objectKeyStoredInDatabase: false
+    objectKeyContainsFilenameOrSessionPath: false
+    overwriteExistingObject: false
+    permanentTable: attachment
+    activeDetailTable: attachment_active_detail
+    deletedTombstoneFields:
+      - attachment_id
+      - session_id
+      - status
+      - created_at
+      - deleted_at
+    activeDetailDeletedAfterObjectDeletion: true
   unreferencedCleanupHours: 24
+  unreferencedCleanupExclusions:
+    - status FAILED and error_code OBJECT_KEY_CONFLICT
+  sessionDeleteQuarantine:
+    errorCode: OBJECT_KEY_CONFLICT
+    runtimeUseStopped: true
+    userVisibilityRemoved: true
+    storageCompletionPending: true
+    onlyAuditedReconciliationMayDelete: true
   acceptedStates:
     - READY
   authoritativeUploadStates:
@@ -3426,6 +3451,8 @@ x-attachments:
     `file` multipart part，并必须携带 `X-Attachment-Size: 1..20971520`。
     OBS SDK 读取声明长度后，Attachment Service 还必须确认 file part 已到
     EOF；尾部仍有字节时删除已写对象并拒绝请求。
+    file part 必须包含 filename；服务端进行 Unicode NFC 规范化并移除控制字符
+    和路径分隔符，结果必须为 1..512 个 code point，否则返回 INVALID_REQUEST。
     不携带 Prefer 或使用 `Prefer: respond-async` 时立即返回 202；使用
     `Prefer: wait=N` 时最多等待 `min(N,10)` 秒；期间进入 READY 返回
     201，进入 BLOCKED 返回 422，进入终态 FAILED 返回 503，到期仍为
@@ -3433,11 +3460,30 @@ x-attachments:
     保持 PROCESSING 并重试，不把可重试中间态投影为终态 503。调用方通过 Location
     对应的 GET 端点轮询，只有 READY 附件才能进入 chat.send。
 
-    Attachment Service 将正文写入 OBS，将状态、Session 绑定、实际大小、
-    可信 MIME、SHA-256、referenced 和内部 object_key 写入 openGauss。
-    object_key 不从 attachment_id 确定性推导，不返回外部调用方或
-    CampusAgent Runtime。所有 Attachment Service 副本共享 openGauss 和 OBS；
+    Attachment Service 将正文写入私有 OBS，Object Key 精确等于大小写敏感的
+    attachment_id；不使用文件名或 Session 目录，不在 openGauss 保存第二套
+    Object Key 映射，也不允许覆盖既有对象。attachment_id 仍只是资源引用，
+    不包含 Bucket、凭据或预签名 URL，知道该 ID 不授予 OBS 访问权。
+    所有 Attachment Service 副本共享 openGauss 和 OBS；
     Runtime Pod 不使用本地盘传递或缓存权威附件。
+
+    create-only PUT 发现同名对象时，服务端不得覆盖、删除来源不明对象或在
+    不可重放的上传流中更换 ID；当前记录进入 FAILED，明细保存
+    OBJECT_KEY_CONFLICT 并退出普通 24 小时清理，调用方重新上传获得新 ID。
+    只有受审计对账确认对象归属并安全删除或确认 NotFound 后，才删除明细并
+    收束为五字段 DELETED tombstone。
+
+    openGauss 永久 attachment 主表只保存 attachment_id、session_id、status、
+    created_at 和 deleted_at。每个非 DELETED 主表行都有
+    attachment_active_detail，包括上传、失败、对账和待删除状态；明细保存
+    filename、detected_media_type、expected_size_bytes、size_bytes、sha256、
+    referenced_at、expires_at、error_code、attempt_count、next_attempt_at、
+    lease_owner、lease_until 和 row_version。filename 只用于安全显示；检测 MIME
+    和声明/实际大小用于类型与 20 MiB 校验；sha256 用于完整性复核；
+    referenced_at 非空表示已被 Session 引用；expires_at 驱动 24 小时未引用
+    清理；error_code 和 Worker retry/lease/version 字段驱动稳定诊断、退避、
+    崩溃接管与并发保护。OBS 删除完成后删除活动明细，仅留下五字段
+    DELETED tombstone。
 
     Attachment Service 只能在服务端签发 attachment_id，并用经实际
     openGauss/JDBC 验证的大小写敏感比较语义和主键唯一约束，保证一个服务
@@ -3460,24 +3506,28 @@ x-attachments:
     resolve -> ModelInputPolicy 校验 -> 用户 Message 元数据快照、幂等结果和
     active-run 原子提交”的顺序执行。resolve 必须在一个 openGauss
     事务中校验整个有序 ID 集合，并原子设置
-    `referenced=true, referenced_at=COALESCE(referenced_at, now()), expires_at=NULL`。任一附件
+    `referenced_at=COALESCE(referenced_at, now()), expires_at=NULL`。任一附件
     失败时整体拒绝且不创建 run；接受前错误不占用幂等键。已接受重试直接返回
-    原 run_id 和 user_message_id，不重新解释附件当前状态。referenced
-    标记只能从 false 转为 true，对外不提供逆向变更接口。
+    原 run_id 和 user_message_id，不重新解释附件当前状态。referenced_at
+    只能从 null 转为时间戳，对外不提供逆向变更接口。
     Runtime 后续输入策略拒绝或 RuntimeSessionStore 提交失败时，
-    允许保守多保留，不得回滚 referenced。
+    允许保守多保留，不得清空 referenced_at。
 
     RuntimeSessionStore 保存接受时的 AttachmentContent 元数据快照。
     当前 turn、后续 turn 和进程恢复都通过内部 content API 按
     session_id + attachment_id 读取。Attachment Service 重新校验 Session、
-    READY 和 referenced，再用仅它可见的 object_key 从 OBS 读取并
-    返回有界字节流。Runtime 不直连 OBS，也不持有 object_key、OBS 凭据、
-    预签名 URL 或可确定性推导的存储路径。
+    READY 和 referenced_at，再以 attachment_id 为 Object Key 从私有 OBS
+    读取并返回有界字节流。Runtime 不直连 OBS，也不持有 Bucket、OBS 凭据
+    或预签名 URL；Object Key 与资源 ID 相等不构成授权。
 
-    未引用附件在创建 24 小时后由 Attachment Service 删除 OBS 正文，
-    并把 openGauss 记录转为永久 DELETED tombstone。外部 DELETE 只能删除未引用附件；已引用返回
-    409。Session 删除先进入 DELETING，阻止新请求并由 Attachment
-    Service 删除对应 OBS 正文，并在 openGauss 保留 DELETED tombstone。
+    除 `FAILED + OBJECT_KEY_CONFLICT` 隔离行外，未引用附件在创建 24 小时后
+    由 Attachment Service 删除 OBS 正文，并把 openGauss 主表记录转为永久
+    DELETED tombstone、删除活动明细。外部 DELETE 只能删除未引用且非隔离的
+    附件；已引用返回 409，隔离行返回有界 503 且不改变状态。Session 删除会
+    停止 Runtime 使用并让 Session 对用户不可见，但普通删除和 Worker claim
+    必须排除隔离行；存在隔离时存储完成状态保持 pending/quarantined。只有受审计
+    reconciliation 证明对象归属并安全删除或确认 NotFound 后，才删除明细并在
+    openGauss 主表只保留五字段 DELETED tombstone。
 
     Session Context Builder 在 model.set 和首次接受新的 chat.send 前生成下一次
     模型调用的 AttachmentContextPlan；它包含有效 transcript（经过已持久化

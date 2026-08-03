@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.3.0 |
+| 文档版本 | 1.4.0 |
 | 状态 | 目标设计，尚未实施 |
 | 更新日期 | 2026-08-03 |
 | pi-mono 源码基线 | `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee` |
@@ -238,9 +238,42 @@ active RunRecord，必须把 RunRecord 及相关 Message 稳定标记为
 
 附件不属于 `AgentRuntimeTemplate`、bundle revision 或 Agent cwd。最终客户端把
 文件上传给 CampusMate `mate-service` 承载的 Attachment Service；该服务只把正文
-写入共享私有 OBS，把状态、归属、可信 MIME、大小、SHA-256 和
-`attachment_id -> object_key` 映射写入共享 openGauss。CampusMate 任一 Pod 都从
-这两个共享权威恢复，不依赖本地文件、临时目录或 Pod 粘性。
+写入共享私有 OBS，并以大小写敏感的 `attachment_id` 本身作为 OBS
+Object Key。Object Key 不加文件名、Session 目录或其他前缀，openGauss 也不
+再保存 `object_key` 映射。知道 `attachment_id` 不构成 OBS 访问授权；
+Bucket 仍为私有，且只有 Attachment Service 持有访问凭据。CampusMate 任一 Pod
+都从共享 openGauss 与 OBS 恢复，不依赖本地文件、临时目录或 Pod 粘性。
+
+openGauss 把永久身份与活动期细节分成两表：
+
+| 表 | 存活期 | 字段边界 |
+|---|---|---|
+| `attachment` | 永久保留，包括删除后 tombstone | `attachment_id`、`session_id`、`status`、`created_at`、`deleted_at` |
+| `attachment_active_detail` | 仅在附件尚未进入 `DELETED` 时存在 | 文件展示与内容校验、引用/过期、错误以及 Worker lease/retry 字段 |
+
+创建附件时，主表行和活动明细行在同一 openGauss 事务中写入。OBS 正文
+删除成功后，清理 Worker 在一个数据库事务中删除
+`attachment_active_detail`，并把主表更新为 `status=DELETED` 和非空
+`deleted_at`。因此 Attachment Service 的附件记录在删除后不再保留文件名、
+MIME、大小、hash 或 Worker 信息，
+但仍能用五个主表字段证明 ID 已使用、它属于哪个 Session，以及何时创建和删除。
+
+活动明细字段不是永久审计负担，而是完成以下运行任务的最小工作集：
+
+| 字段 | 作用 |
+|---|---|
+| `filename` | 保留经规范化的用户展示名，供历史投影和 Model Provider 构造文件名；不参与 Object Key、路径或授权。 |
+| `detected_media_type` | 安全扫描器从内容嗅探得到的可信 MIME，用于类型策略和 Model Provider 内容组装；不以客户端 `Content-Type` 替代。 |
+| `expected_size_bytes` | 上传前通过 1..20 MiB 校验的声明长度，同时作为 OBS 流式 `contentLength`。 |
+| `size_bytes` | 服务端在流经时累计的实际长度；必须与 `expected_size_bytes` 一致，并用于 Model/Provider 容量限制。 |
+| `sha256` | 对完整 OBS 正文的内容完整性标识；扫描、Runtime 恢复读取和 Model 输入组装均复核它，不用 OBS ETag 代替。 |
+| `referenced_at` | 为空表示尚未被 Session 成功引用；批量 `resolve` 成功时只写入一次首次引用时间，之后禁止单独删除和未引用清理。 |
+| `expires_at` | 未引用附件的清理截止时间，通常为 `created_at + 24h`；首次引用事务内清空，供后台索引扫描过期行。 |
+| `error_code` | 记录有界、稳定且已脱敏的扫描/上传/删除错误类型；不保存 OBS 响应正文、凭据或堆栈。 |
+| `attempt_count` | 记录当前处理阶段的尝试次数，用于限制重试并计算退避；进入新阶段时重置。 |
+| `next_attempt_at` | Worker 下次可以认领扫描、对账或删除任务的最早时间。 |
+| `lease_owner` / `lease_until` | 短期标识当前 Worker 和 lease 截止时间；Pod 崩溃后 lease 过期，其他 Pod 可重新认领，数据库事务不跨越 OBS I/O。 |
+| `row_version` | 为 Worker 认领、扫描结果、`resolve` 和删除竞态提供乐观 CAS，防止过期 Worker 覆盖新状态。 |
 
 `agent-service` 收到 `chat.send.attachment_ids[]` 后只调用两个内部接口：
 
@@ -250,20 +283,28 @@ GET  /mate-service/internal/v1/sessions/{session_id}/attachments/{attachment_id}
 ```
 
 批量 `resolve` 在一个 openGauss 事务中按调用服务和 `session_id` 全有或全无地
-校验 READY、归属和未过期状态，并单向标为已引用、保留首次引用时间、
+校验 READY、归属和未过期状态，并单向设置 `referenced_at`、保留首次引用时间、
 清空过期时间；响应只返回稳定
-元数据，不返回 `object_key`、OBS URL 或凭据。`content` 由 CampusMate 从 OBS
+元数据，不返回存储字段、OBS URL 或凭据。`content` 由 CampusMate 以
+`attachment_id` 作为 Key 从 OBS
 流式代理，Runtime 使用接受时保存的 `sha256` 复核正文。Runtime 不直连 OBS，
 不把附件写到 `revisionRoot`、cwd、本地缓存或临时文件；Pod 内只保留有界流式
 缓冲，目标上限为 1 MiB。
 
 目标协议不引入 `content_version`、跨服务 XA、reservation 或复杂 retention claim。
-不可覆盖的 OBS 对象、不可复用的 `attachment_id` 和 SHA-256 共同固定内容身份；
+以 `attachment_id` 为 Key 的不可覆盖 OBS 对象、永久不复用的 ID tombstone
+和 SHA-256 共同固定内容身份；
 `RuntimeSessionStore` 只随 User Message 保存
 `attachment_id/filename/media_type/size_bytes/sha256` 快照。已被 Session 引用的
 附件不能单独删除；Session 删除由 CampusMate 进入 `DELETING` 并清理正文和
 可用元数据，最终保留 `DELETED` tombstone。附件存储可以跨 Pod 使用，不改变 active run 仍只属于一个
 `agent-service` Pod 的约束。
+
+create-only PUT 若发现同名来源不明对象，当前非 `DELETED` 行保持
+`FAILED + OBJECT_KEY_CONFLICT` 与活动明细。公共 DELETE、24 小时清理、Session
+普通删除和普通 Worker claim 都必须排除该 quarantine；Session 可以停止 Runtime
+使用，但不能宣称存储已清除。只有受审计 reconciliation 确认对象归属并安全删除
+或确认 OBS `NotFound` 后，才能删除明细并留下五字段 tombstone。
 
 ## 5. AgentRuntimeTemplate 数据合约
 
@@ -1001,7 +1042,7 @@ revision root；如为兼容保留 cwd，只能作为诊断字段。
 generation、原子 revision 引用计数和按 history sequence 提交。它逻辑
 保存 Session、Message、RunRecord、幂等结果、Agent/Model/bundle revision 与
 User Message 的 AttachmentContent 元数据快照；目标设计不生成
-`<session-id>.jsonl`，也不保存 OBS object key、URL、读取凭据或附件正文。物理表、
+`<session-id>.jsonl`，也不保存 OBS Bucket、URL、读取凭据或附件正文。物理表、
 索引和分区策略留待数据库设计。
 
 run 被接受时先持久化 `active` RunRecord；Message 内容只在内容块
@@ -1238,7 +1279,7 @@ session_create_duration_seconds{cache_result}
 | `ManagedAgentSessionFactory` | acquire/pin Template；创建 per-session Tool binding 和独立 Agent/Session | 架构改造 |
 | `SessionPool.getOrCreate()` | 改为每 Pod `session_id -> SessionLifecycleSlot`，统一 create/resume/run/evict/delete；完成持久化且持有 owner generation 后才发布 ready | 并发修复 |
 | `RuntimeSessionStore` | 使用数据库持久化 Session/Message/RunRecord/history sequence/幂等结果/revision 和 AttachmentContent 元数据快照；不保存附件正文、OBS 定位或 Session JSONL | 架构改造 |
-| CampusMate Attachment Service | 共享 openGauss 保存元数据和 `attachment_id -> object_key` 映射，私有 OBS 保存不可覆盖正文；向 Runtime 提供内部批量 resolve 和 content 流 | 架构改造、安全加固 |
+| CampusMate Attachment Service | 共享 openGauss 以 `attachment` 永久主表和 `attachment_active_detail` 活动明细表分离 ID tombstone 与运行字段；私有 OBS 以 `attachment_id` 为 Key 保存不可覆盖正文；向 Runtime 提供内部批量 resolve 和 content 流 | 架构改造、安全加固 |
 | WebSocket Session adapter | 同 Pod 只允许一个活动读写连接；resume 递增 `connection_generation` 并以 `4409 SESSION_REPLACED` 关闭旧连接 | 并发修复 |
 | `agent-service` 部署 | 每 Pod 独立 Template Registry/SessionPool/RunHub；可信网关按最终用户 IP 粘性路由，不承诺跨 Pod active run 接管 | 产品约束 |
 | `Agent` | 第一阶段继续每 Session 创建；静态字段由 Template 注入 | 兼容迁移 |
@@ -1324,7 +1365,19 @@ session_create_duration_seconds{cache_result}
   读取同一 `attachment_id`；CampusMate 以共享 openGauss 与 OBS 提供跨 Pod
   权威，Runtime 不直连 OBS、不写本地文件或临时文件，流式缓冲始终受 1 MiB
   上限约束；
-- resolve 不返回 object key、URL 或凭据，整批附件必须同时 READY、匹配当前
+- OBS `put/open/stat/delete` 始终以大小写敏感的 `attachment_id` 作为唯一 Key，
+  openGauss 不存在 `object_key` 列，文件名和 Session 也不参与 Key 拼接；
+- `attachment` 永久主表始终只有
+  `attachment_id/session_id/status/created_at/deleted_at`；非 `DELETED` 行具有一条
+  `attachment_active_detail`，OBS 删除成功后在同一数据库事务中删除明细并留下
+  `DELETED` tombstone；
+- 上传和扫描校验 `detected_media_type`、`expected_size_bytes`、`size_bytes`
+  与 `sha256`；`referenced_at/expires_at` 决定引用禁删和 24 小时未引用清理；
+  `error_code` 及 attempt/next-at/lease/row-version 字段支持扫描和删除 Worker 的有界重试、
+  跨 Pod 接管与过期结果 fencing；
+- `OBJECT_KEY_CONFLICT` quarantine 被公共、定时、Session 普通删除和 Worker claim
+  排除，只有受审计 reconciliation 可以在证明安全后删除未知对象并完成 tombstone；
+- resolve 不返回存储字段、URL 或凭据，整批附件必须同时 READY、匹配当前
   Session 且未过期；Runtime 历史只保存
   `attachment_id/filename/media_type/size_bytes/sha256`，不出现
   `content_version`、reservation 或复杂 retention claim；
@@ -1382,6 +1435,7 @@ session_create_duration_seconds{cache_result}
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.0 | 2026-08-03 | 附件存储收敛为“永久 `attachment` 身份/状态主表 + 非 DELETED `attachment_active_detail` 工作明细表”；OBS Object Key 精确等于 `attachment_id`，不再保存 object-key 映射；说明 MIME/大小、SHA-256、首次引用、24 小时清理与 Worker lease/retry 字段责任；冻结 create-only 冲突 quarantine 门禁；OBS 删除后清除明细，只留五字段 `DELETED` tombstone |
 | 1.3.0 | 2026-08-03 | 同步 CampusMate Attachment Service 的简化存储边界：共享私有 OBS 保存正文、共享 openGauss 保存元数据和对象映射；Agent Runtime 只调用内部批量 resolve/content 并使用有界流式缓冲，不直连 OBS 或写本地文件；RuntimeSessionStore 只保存 AttachmentContent 快照，不引入 content_version、reservation 或复杂 retention claim |
 | 1.2.0 | 2026-08-03 | 统一 Agent 与 Model 资源标识：分别使用 `agent_` / `model_` 加 24 位大小写敏感字母数字，明确其为 Manager 签发的 opaque ID，规定 Template、Session 与 Model Manager 的比较和映射边界，并增加大小写敏感 Repository、case-fold 冲突与 manifest 精确匹配门禁 |
 | 1.1.0 | 2026-08-03 | 对外统一为 CampusAgent Runtime / `agent-service`；Managed 资源改为 `.campusagent` 且不双读 Legacy `.campusclaw`；Session 持久化改为数据库 `RuntimeSessionStore`；补充每 Pod Template/revision pinning、用户 IP 粘性限制、单连接 generation 接管和 Pod 重启 `interrupted`/完整块恢复语义 |
