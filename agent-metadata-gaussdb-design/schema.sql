@@ -1,4 +1,4 @@
--- SR-AGENT-DB-001 v0.7.0
+-- SR-AGENT-DB-001 v0.8.0
 -- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
 -- The base DDL intentionally omits physical foreign keys so it can be used
 -- with GaussDB Distributed. The service maintains logical relationships in
@@ -12,14 +12,7 @@ CREATE TABLE t_agent_definition (
     name            VARCHAR(128) NOT NULL,
     display_name    VARCHAR(128) NOT NULL,
     description     TEXT         NOT NULL,
-    role            TEXT         NOT NULL,
-    objective       TEXT         NOT NULL,
-    instructions    TEXT         NOT NULL,
-    tool_policy     TEXT         NOT NULL,
-    safety          TEXT         NOT NULL,
-    completion      TEXT         NOT NULL,
-    response_style  TEXT         NOT NULL,
-    example         TEXT,
+    system          TEXT         NOT NULL,
     use_cases       JSONB        NOT NULL DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -29,12 +22,13 @@ CREATE TABLE t_agent_definition (
     CONSTRAINT ck_t_agent_definition_version CHECK (version >= 1),
     CONSTRAINT ck_t_agent_definition_name CHECK (name <> ''),
     CONSTRAINT ck_t_agent_definition_display_name CHECK (display_name <> ''),
+    CONSTRAINT ck_t_agent_definition_system CHECK (btrim(system) <> ''),
     CONSTRAINT ck_t_agent_definition_use_cases CHECK (
         jsonb_typeof(use_cases) = 'array'
     )
 );
 
-COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, system prompt fields, and use cases';
+COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, complete system prompt, and use cases';
 COMMENT ON COLUMN t_agent_definition.id IS 'Stable Agent identifier mapped directly from JSON id';
 COMMENT ON COLUMN t_agent_definition.type IS 'Resource type mapped from JSON type; fixed to agent';
 COMMENT ON COLUMN t_agent_definition.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
@@ -42,14 +36,7 @@ COMMENT ON COLUMN t_agent_definition.enabled IS 'Whether the Agent accepts new r
 COMMENT ON COLUMN t_agent_definition.name IS 'Stable internal Agent name; unique and not editable in the management UI';
 COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; editable in the management UI';
 COMMENT ON COLUMN t_agent_definition.description IS 'Agent description';
-COMMENT ON COLUMN t_agent_definition.role IS 'Agent identity, expertise, and responsibility scope';
-COMMENT ON COLUMN t_agent_definition.objective IS 'Long-term objective and success criteria';
-COMMENT ON COLUMN t_agent_definition.instructions IS 'General work principles, priorities, and behavior requirements';
-COMMENT ON COLUMN t_agent_definition.tool_policy IS 'Rules for tool selection, result verification, and direct answers';
-COMMENT ON COLUMN t_agent_definition.safety IS 'Untrusted-content handling, permission boundaries, and confirmation rules';
-COMMENT ON COLUMN t_agent_definition.completion IS 'Completion conditions, self-checks, and failure reporting';
-COMMENT ON COLUMN t_agent_definition.response_style IS 'Default language, length, format, and reporting style';
-COMMENT ON COLUMN t_agent_definition.example IS 'Optional example; NULL omits the example section from the assembled prompt';
+COMMENT ON COLUMN t_agent_definition.system IS 'Complete non-blank system prompt sent to the model';
 COMMENT ON COLUMN t_agent_definition.use_cases IS 'JSON array of intent-recognition use case strings';
 COMMENT ON COLUMN t_agent_definition.created_at IS 'Database creation time';
 COMMENT ON COLUMN t_agent_definition.updated_at IS 'Time of the latest successful Agent metadata update';

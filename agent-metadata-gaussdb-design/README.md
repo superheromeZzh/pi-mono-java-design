@@ -1,17 +1,17 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.7.0`<br>
+> 版本：`v0.8.0`<br>
 > 日期：`2026-08-04`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`8c8f10c`（输入 JSON 使用下述工作区 SHA-256）<br>
+> 仓库基线：`bef5ecd`（输入 JSON 使用下述工作区 SHA-256）<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
 
 基于当前 [`AGENT元数据设计.json`](../AGENT元数据设计.json)，最终使用 4 张表：
 
-1. `t_agent_definition`：基本字段、System Prompt 字段和 JSONB `use_cases`。
+1. `t_agent_definition`：基本字段、单一 `system` Prompt 和 JSONB `use_cases`。
 2. `t_agent_models`：`models[]`，保留数组顺序。
 3. `t_agent_binding_tools`：合并 `binding_tools[]` 与 `permission`。
 4. `t_agent_binding_skills`：`binding_skills[]`，不保存数组顺序。
@@ -21,7 +21,7 @@
 - 主表主键使用 `id`，与元数据顶层 `id` 对齐。
 - `enabled` 使用 `BOOLEAN NOT NULL DEFAULT TRUE`。
 - `name`、`display_name` 都使用 `VARCHAR(128)`。
-- System Prompt 展开列去掉 `system_` 前缀，使用 `role`、`objective`、`instructions` 等名称。
+- System Prompt 使用单一 `system TEXT NOT NULL`，并拒绝空白字符串。
 - `model_id`、`tool_id`、`skill_id` 统一使用 `VARCHAR(64)`。
 - `use_cases` 使用主表 `JSONB`。
 - 只有模型表保留 `sort_order`。
@@ -68,14 +68,7 @@ CREATE TABLE t_agent_definition (
     name            VARCHAR(128) NOT NULL,
     display_name    VARCHAR(128) NOT NULL,
     description     TEXT         NOT NULL,
-    role            TEXT         NOT NULL,
-    objective       TEXT         NOT NULL,
-    instructions    TEXT         NOT NULL,
-    tool_policy     TEXT         NOT NULL,
-    safety          TEXT         NOT NULL,
-    completion      TEXT         NOT NULL,
-    response_style  TEXT         NOT NULL,
-    example         TEXT,
+    system          TEXT         NOT NULL,
     use_cases       JSONB        NOT NULL DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -85,6 +78,7 @@ CREATE TABLE t_agent_definition (
     CONSTRAINT ck_t_agent_definition_version CHECK (version >= 1),
     CONSTRAINT ck_t_agent_definition_name CHECK (name <> ''),
     CONSTRAINT ck_t_agent_definition_display_name CHECK (display_name <> ''),
+    CONSTRAINT ck_t_agent_definition_system CHECK (btrim(system) <> ''),
     CONSTRAINT ck_t_agent_definition_use_cases
         CHECK (jsonb_typeof(use_cases) = 'array')
 );
@@ -122,7 +116,7 @@ CREATE TABLE t_agent_binding_skills (
         CHECK (skill_version IS NULL OR skill_version >= 1)
 );
 
-COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, system prompt fields, and use cases';
+COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, complete system prompt, and use cases';
 COMMENT ON COLUMN t_agent_definition.id IS 'Stable Agent identifier mapped directly from JSON id';
 COMMENT ON COLUMN t_agent_definition.type IS 'Resource type mapped from JSON type; fixed to agent';
 COMMENT ON COLUMN t_agent_definition.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
@@ -130,14 +124,7 @@ COMMENT ON COLUMN t_agent_definition.enabled IS 'Whether the Agent accepts new r
 COMMENT ON COLUMN t_agent_definition.name IS 'Stable internal Agent name; unique and not editable in the management UI';
 COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; editable in the management UI';
 COMMENT ON COLUMN t_agent_definition.description IS 'Agent description';
-COMMENT ON COLUMN t_agent_definition.role IS 'Agent identity, expertise, and responsibility scope';
-COMMENT ON COLUMN t_agent_definition.objective IS 'Long-term objective and success criteria';
-COMMENT ON COLUMN t_agent_definition.instructions IS 'General work principles, priorities, and behavior requirements';
-COMMENT ON COLUMN t_agent_definition.tool_policy IS 'Rules for tool selection, result verification, and direct answers';
-COMMENT ON COLUMN t_agent_definition.safety IS 'Untrusted-content handling, permission boundaries, and confirmation rules';
-COMMENT ON COLUMN t_agent_definition.completion IS 'Completion conditions, self-checks, and failure reporting';
-COMMENT ON COLUMN t_agent_definition.response_style IS 'Default language, length, format, and reporting style';
-COMMENT ON COLUMN t_agent_definition.example IS 'Optional example; NULL omits the example section from the assembled prompt';
+COMMENT ON COLUMN t_agent_definition.system IS 'Complete non-blank system prompt sent to the model';
 COMMENT ON COLUMN t_agent_definition.use_cases IS 'JSON array of intent-recognition use case strings';
 COMMENT ON COLUMN t_agent_definition.created_at IS 'Database creation time';
 COMMENT ON COLUMN t_agent_definition.updated_at IS 'Time of the latest successful Agent metadata update';
@@ -174,36 +161,18 @@ COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version;
 | `name` | `name` | `VARCHAR(128)` | 否 | 内部稳定名称；唯一 |
 | `display_name` | `display_name` | `VARCHAR(128)` | 否 | 与 `name` 类型一致 |
 | `description` | `description` | `TEXT` | 否 | Agent 描述 |
-| `system_prompt.role` | `role` | `TEXT` | 否 | 身份、能力与责任范围 |
-| `system_prompt.objective` | `objective` | `TEXT` | 否 | 长期目标和成功条件 |
-| `system_prompt.instructions` | `instructions` | `TEXT` | 否 | 工作原则和行为要求 |
-| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 否 | Tool 使用与结果验证规则 |
-| `system_prompt.safety` | `safety` | `TEXT` | 否 | 安全边界 |
-| `system_prompt.completion` | `completion` | `TEXT` | 否 | 完成与自检要求 |
-| `system_prompt.response_style` | `response_style` | `TEXT` | 否 | 默认输出风格 |
-| `system_prompt.example` | `example` | `TEXT` | 是 | 可选示例 |
+| `system_prompt` | `system` | `TEXT` | 否 | 完整系统提示词；兼容导入时由旧结构按固定模板组装 |
 | `use_cases` | `use_cases` | `JSONB` | 否 | 使用场景字符串数组 |
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
 
-### 5.2 System Prompt 空值与展示规则
+### 5.2 `system` 约束与展示规则
 
-System Prompt 不以一个冗余全文字段存储，而是由结构化列在读取时按固定顺序组装。字段约束如下：
+`system` 是实际发送给模型的完整系统提示词。数据库使用 `TEXT NOT NULL`，并以 `CHECK (btrim(system) <> '')` 拒绝空字符串和纯空白内容；API 和应用层执行相同校验。
 
-| 字段 | 数据库约束 | 展示规则 |
-|---|---|---|
-| `role` | `NOT NULL` | 固定展示，定义 Agent 身份和职责 |
-| `objective` | `NOT NULL` | 固定展示，定义目标和成功条件 |
-| `instructions` | `NOT NULL` | 固定展示，定义工作原则和行为要求 |
-| `tool_policy` | `NOT NULL` | 固定展示，避免 Tool 使用规则因缺失而语义不明 |
-| `safety` | `NOT NULL` | 固定展示，安全边界不得依赖前端默认值 |
-| `completion` | `NOT NULL` | 固定展示，保证完成条件明确 |
-| `response_style` | `NOT NULL` | 固定展示，保证默认输出约束明确 |
-| `example` | 允许 `NULL` | 有值时展示并加入完整 Prompt；`NULL` 时隐藏该节 |
+管理前端固定展示一个必填的全宽 System Prompt 编辑器，不再根据子字段进行动态显隐。角色、目标、指令、Tool 策略、安全规则、完成条件、响应风格和示例仅作为写作模板建议，不是数据库字段，也不要求每个 Agent 都包含全部章节。前端可以提供“插入推荐模板”、Token 估算和预览，但保存值始终是编辑器中的完整 `system` 字符串。
 
-管理前端采用固定结构表单：七个必填字段始终展示，`example` 作为可选区块按需展开。前端同时提供按上述固定顺序生成的“完整系统提示词”只读预览；预览是派生结果，不单独入库。运行时使用与预览相同的组装规则，避免前端预览和实际 Prompt 不一致。
-
-后端必须拒绝七个必填字段的 `NULL`；应用层还应拒绝仅包含空白字符的值。对于历史数据，不能把缺失的安全或工具策略静默转换为空字符串，应在迁移或发布前补齐。
+当前输入基线仍使用结构化 `system_prompt` 对象。兼容导入时，服务按 `role`、`objective`、`instructions`、`tool_policy`、`safety`、`completion`、`response_style`、`example` 的固定顺序生成一个非空 `system` 字符串；导入完成后的数据库和目标 API 只读写 `system`。这是对输入基线的架构收敛，不把旧结构误认为 Anthropic Managed Agents 的现有字段模型。
 
 ### 5.3 `enabled` 语义
 
@@ -450,7 +419,7 @@ COMMIT
 4. 按非空 `permission` 分组，生成 `deny`、`ask`、`allow`。
 5. 查询 `t_agent_binding_skills`，按 `skill_id` 排序生成 `binding_skills[]`。
 6. `use_cases` 直接读取主表 JSONB。
-7. 把 `role` 等列重新组装为 `system_prompt`。
+7. 直接返回主表 `system`，不做子字段重组。
 
 不建议把三个一对多子表放进同一个 Join，否则会产生行数相乘。
 
@@ -458,7 +427,7 @@ COMMIT
 
 | 对象 | 用途 |
 |---|---|
-| `t_agent_definition` | Agent 当前标量字段、启停状态、System Prompt 和 Use Cases |
+| `t_agent_definition` | Agent 当前标量字段、启停状态、完整 System Prompt 和 Use Cases |
 | `uk_t_agent_definition_name` | 保证 `name` 唯一 |
 | `idx_t_agent_definition_display_name` | 展示名查询 |
 | `idx_t_agent_definition_updated_at` | 管理列表排序 |
@@ -485,6 +454,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.8.0` | 2026-08-04 | 将八个 System Prompt 子列收敛为单一必填 `system TEXT`；增加非空白约束；前端改为固定的完整 Prompt 编辑器；保留旧 `system_prompt` 对象的导入组装规则 |
 | `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type`；在 SQL 章节补充表和字段 COMMENT 语句 |
 | `v0.6.0` | 2026-08-04 | 在表关系后增加 SQL 语句章节，集中展示四张目标表的可执行建表 DDL |
 | `v0.5.0` | 2026-08-04 | 表名统一采用 `t_` 前缀和小写 snake_case；四张表分别更名为 `t_agent_definition`、`t_agent_models`、`t_agent_binding_tools`、`t_agent_binding_skills`，同步调整约束名和索引名 |

@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.7.0 on 2026-08-04.
+' Generated for SR-AGENT-DB-001 v0.8.0 on 2026-08-04.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: 8c8f10c; input JSON is identified by its working-tree hash.
+' Repository baseline: bef5ecd; input JSON is identified by its working-tree hash.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
@@ -27,10 +27,10 @@ skinparam classAttributeIconSize 0
 ' - Skill bindings at lines 31-36 have no order column.
 ' Observed behavior: the current JSON is a current-state Agent resource with a
 ' monotonically increasing version and no separate history resource.
-' Design reason: fixed scalar and system prompt fields use typed columns,
-' use_cases remains one JSON array, and independently queried references use tables.
-' Design reason: all system prompt fields except example are required so runtime
-' prompt assembly cannot silently omit behavior, safety, or completion rules.
+' Design reason: the complete system prompt uses one required TEXT column to match
+' the managed-agent configuration model and avoid a rigid prompt-section schema.
+' Architecture change: the legacy structured system_prompt input is assembled into
+' one system string during import; the target database and API store only system.
 ' Product constraint: only model order is persisted; Tool and Skill order is not.
 ' GaussDB divergence: physical foreign keys are optional because GaussDB
 ' Distributed does not support them; the base DDL uses logical relationships.
@@ -43,14 +43,7 @@ class t_agent_definition <<current Agent>> {
   name: VARCHAR UK
   display_name: VARCHAR
   description: TEXT
-  role: TEXT
-  objective: TEXT
-  instructions: TEXT
-  tool_policy: TEXT
-  safety: TEXT
-  completion: TEXT
-  response_style: TEXT
-  example: TEXT?
+  system: TEXT
   use_cases: JSONB
   created_at: TIMESTAMPTZ
   updated_at: TIMESTAMPTZ
@@ -84,7 +77,7 @@ name and display_name are VARCHAR(128).
 use_cases is a JSON array.
 version is the optimistic-lock value.
 enabled gates new runtime invocations.
-All prompt fields except example are required.
+system is required and must not be blank.
 end note
 
 note right of t_agent_models
