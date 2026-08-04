@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.4.0 on 2026-07-29.
+' Generated for SR-AGENT-DB-001 v0.5.0 on 2026-08-04.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: 027ca1ed43343cc68af5984f17e7d362b7a31a87.
+' Repository baseline: 52e49fa; input JSON is identified by its working-tree hash.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
@@ -21,7 +21,7 @@ skinparam classAttributeIconSize 0
 ' Source evidence:
 ' - Repository-relative path, Git-escaped:
 '   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-47.
-' - Fields at lines 2-24 map to agent_metadata; enabled is Boolean.
+' - Fields at lines 2-24 map to t_agent_definition; enabled is Boolean.
 ' - models at line 11 maps to the only ordered child table.
 ' - Tool binding and permission fields at lines 25-30 and 37-47 are merged.
 ' - Skill bindings at lines 31-36 have no order column.
@@ -33,7 +33,7 @@ skinparam classAttributeIconSize 0
 ' GaussDB divergence: physical foreign keys are optional because GaussDB
 ' Distributed does not support them; the base DDL uses logical relationships.
 
-class agent_metadata <<current Agent>> {
+class t_agent_definition <<current Agent>> {
   id: VARCHAR PK
   resource_type: VARCHAR
   version: BIGINT
@@ -54,54 +54,54 @@ class agent_metadata <<current Agent>> {
   updated_at: TIMESTAMPTZ
 }
 
-class agent_model <<models>> {
+class t_agent_models <<models>> {
   agent_id: VARCHAR PK
   model_id: VARCHAR PK
   sort_order: INTEGER UK
 }
 
-class agent_tool_binding <<binding_tools and permission>> {
+class t_agent_binding_tools <<binding_tools and permission>> {
   agent_id: VARCHAR PK
   tool_id: VARCHAR PK
   tool_version: BIGINT?
   permission: deny | ask | allow | NULL
 }
 
-class agent_skill_binding <<binding_skills>> {
+class t_agent_binding_skills <<binding_skills>> {
   agent_id: VARCHAR PK
   skill_id: VARCHAR PK
   skill_version: BIGINT?
 }
 
-agent_metadata *-- "1..*" agent_model : has
-agent_metadata *-- "0..*" agent_tool_binding : binds and governs
-agent_metadata *-- "0..*" agent_skill_binding : binds
+t_agent_definition *-- "1..*" t_agent_models : has
+t_agent_definition *-- "0..*" t_agent_binding_tools : binds and governs
+t_agent_definition *-- "0..*" t_agent_binding_skills : binds
 
-note right of agent_metadata
+note right of t_agent_definition
 name and display_name are VARCHAR(128).
 use_cases is a JSON array.
 version is the optimistic-lock value.
 enabled gates new runtime invocations.
 end note
 
-note right of agent_model
+note right of t_agent_models
 Only models preserves JSON array order.
 model_id is VARCHAR(64).
 end note
 
-note bottom of agent_tool_binding
+note bottom of t_agent_binding_tools
 tool_id is VARCHAR(64).
 NULL tool_version means latest.
 NULL permission means inherit Tool permission.
 Every permission Tool must also be bound.
 end note
 
-note bottom of agent_skill_binding
+note bottom of t_agent_binding_skills
 skill_id is VARCHAR(64).
 NULL skill_version means latest.
 end note
 
-note bottom of agent_metadata
+note bottom of t_agent_definition
 Base DDL omits physical foreign keys for
 GaussDB Distributed compatibility.
 The service writes the root and child rows

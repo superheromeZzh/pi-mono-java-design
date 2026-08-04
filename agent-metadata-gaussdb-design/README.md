@@ -1,20 +1,20 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.4.0`<br>
-> 日期：`2026-07-29`<br>
+> 版本：`v0.5.0`<br>
+> 日期：`2026-08-04`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`027ca1ed43343cc68af5984f17e7d362b7a31a87`<br>
+> 仓库基线：`52e49fa`（输入 JSON 使用下述工作区 SHA-256）<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
 
 基于当前 [`AGENT元数据设计.json`](../AGENT元数据设计.json)，最终使用 4 张表：
 
-1. `agent_metadata`：基本字段、System Prompt 字段和 JSONB `use_cases`。
-2. `agent_model`：`models[]`，保留数组顺序。
-3. `agent_tool_binding`：合并 `binding_tools[]` 与 `permission`。
-4. `agent_skill_binding`：`binding_skills[]`，不保存数组顺序。
+1. `t_agent_definition`：基本字段、System Prompt 字段和 JSONB `use_cases`。
+2. `t_agent_models`：`models[]`，保留数组顺序。
+3. `t_agent_binding_tools`：合并 `binding_tools[]` 与 `permission`。
+4. `t_agent_binding_skills`：`binding_skills[]`，不保存数组顺序。
 
 本版采用以下字段规则：
 
@@ -53,9 +53,9 @@ c2b7c9f5046cf94c3cf7e042642609c181b41b50f6ff8ebf70bce4f457977fff
 
 PlantUML：[查看源码](./diagram.puml#L6)
 
-所有子表通过 `agent_id` 逻辑关联 `agent_metadata.id`。
+所有子表通过 `agent_id` 逻辑关联 `t_agent_definition.id`。表名统一使用小写 snake_case 和 `t_` 前缀。
 
-## 4. 主表 `agent_metadata`
+## 4. 主表 `t_agent_definition`
 
 ### 4.1 字段映射
 
@@ -91,14 +91,9 @@ PlantUML：[查看源码](./diagram.puml#L6)
 
 数据库使用 `NOT NULL DEFAULT TRUE`。`DEFAULT TRUE` 用于兼容存量 Agent，API 创建和更新时仍应传递明确的布尔值。启停更新必须与其他可编辑字段一样更新 `version` 和 `updated_at`。
 
-如果已经按 `v0.3.0` 建表，兼容迁移为：
+当前仍是 target-only 设计，没有已部署数据库基线；因此本版直接以新表名提供完整建表 DDL，不提供旧表在线更名脚本。
 
-```sql
-ALTER TABLE agent_metadata
-    ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE;
-```
-
-`enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_agent_metadata_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
+`enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_t_agent_definition_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
 
 ### 4.3 `use_cases` JSONB
 
@@ -116,7 +111,7 @@ ALTER TABLE agent_metadata
 
 ```sql
 use_cases JSONB NOT NULL DEFAULT '[]'::jsonb,
-CONSTRAINT ck_agent_metadata_use_cases
+CONSTRAINT ck_t_agent_definition_use_cases
     CHECK (jsonb_typeof(use_cases) = 'array')
 ```
 
@@ -128,11 +123,11 @@ CONSTRAINT ck_agent_metadata_use_cases
 
 `use_cases` 通常随 Agent 整体读取，当前也没有按单个场景执行关系查询的需求，因此不再单独建表。
 
-## 5. 模型表 `agent_model`
+## 5. 模型表 `t_agent_models`
 
 | 字段 | 类型 | 约束 |
 |---|---|---|
-| `agent_id` | `VARCHAR(64)` | 逻辑关联 `agent_metadata.id` |
+| `agent_id` | `VARCHAR(64)` | 逻辑关联 `t_agent_definition.id` |
 | `model_id` | `VARCHAR(64)` | 模型网关 Model ID |
 | `sort_order` | `INTEGER` | 从 0 开始 |
 
@@ -147,7 +142,7 @@ UNIQUE (agent_id, sort_order)
 
 一个 Agent 至少需要一个模型。该跨表约束由应用在同一事务中校验。
 
-## 6. Tool 绑定与权限表 `agent_tool_binding`
+## 6. Tool 绑定与权限表 `t_agent_binding_tools`
 
 ### 6.1 合并结构
 
@@ -155,7 +150,7 @@ UNIQUE (agent_id, sort_order)
 
 | 字段 | 类型 | 可空 | 说明 |
 |---|---|---:|---|
-| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `agent_metadata.id` |
+| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `t_agent_definition.id` |
 | `tool_id` | `VARCHAR(64)` | 否 | Tool ID |
 | `tool_version` | `BIGINT` | 是 | 固定版本；`NULL` 表示最新版本 |
 | `permission` | `VARCHAR(8)` | 是 | `deny` / `ask` / `allow`；`NULL` 表示继承 Tool 权限 |
@@ -219,11 +214,11 @@ CHECK (tool_version IS NULL OR tool_version >= 1)
 CHECK (permission IS NULL OR permission IN ('deny', 'ask', 'allow'))
 ```
 
-## 7. Skill 绑定表 `agent_skill_binding`
+## 7. Skill 绑定表 `t_agent_binding_skills`
 
 | 字段 | 类型 | 可空 | 说明 |
 |---|---|---:|---|
-| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `agent_metadata.id` |
+| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `t_agent_definition.id` |
 | `skill_id` | `VARCHAR(64)` | 否 | Skill ID |
 | `skill_version` | `BIGINT` | 是 | 固定版本；`NULL` 表示最新版本 |
 
@@ -240,9 +235,9 @@ DDL 使用行存表、`VARCHAR`、`TEXT`、`JSONB`、`BIGINT`、`INTEGER`、`TIM
 因此 [`schema.sql`](./schema.sql) 的基础 DDL 不声明物理外键。服务必须在同一事务内维护：
 
 ```text
-agent_model.agent_id         -> agent_metadata.id
-agent_tool_binding.agent_id  -> agent_metadata.id
-agent_skill_binding.agent_id -> agent_metadata.id
+t_agent_models.agent_id         -> t_agent_definition.id
+t_agent_binding_tools.agent_id  -> t_agent_definition.id
+t_agent_binding_skills.agent_id -> t_agent_definition.id
 ```
 
 如果最终使用支持外键的集中式 GaussDB，可启用 DDL 末尾的可选外键。
@@ -253,10 +248,10 @@ agent_skill_binding.agent_id -> agent_metadata.id
 
 ```text
 BEGIN
-  INSERT agent_metadata
-  INSERT agent_model
-  INSERT agent_tool_binding
-  INSERT agent_skill_binding
+  INSERT t_agent_definition
+  INSERT t_agent_models
+  INSERT t_agent_binding_tools
+  INSERT t_agent_binding_skills
 COMMIT
 ```
 
@@ -273,7 +268,7 @@ COMMIT
 ### 9.2 更新 `display_name`
 
 ```sql
-UPDATE agent_metadata
+UPDATE t_agent_definition
 SET display_name = :display_name,
     version = version + 1,
     updated_at = CURRENT_TIMESTAMP
@@ -286,7 +281,7 @@ WHERE id = :id
 ### 9.3 更新 `enabled`
 
 ```sql
-UPDATE agent_metadata
+UPDATE t_agent_definition
 SET enabled = :enabled,
     version = version + 1,
     updated_at = CURRENT_TIMESTAMP
@@ -301,17 +296,17 @@ WHERE id = :id
 ```text
 BEGIN
   SELECT id, version
-  FROM agent_metadata
+  FROM t_agent_definition
   WHERE id = :id
   FOR UPDATE
 
   verify version = expected_version
   verify models is not empty and model IDs are unique
 
-  DELETE FROM agent_model WHERE agent_id = :id
+  DELETE FROM t_agent_models WHERE agent_id = :id
   INSERT every model with zero-based sort_order
 
-  UPDATE agent_metadata
+  UPDATE t_agent_definition
   SET version = version + 1,
       updated_at = CURRENT_TIMESTAMP
   WHERE id = :id
@@ -324,11 +319,11 @@ COMMIT
 
 查询步骤：
 
-1. 管理面按 `agent_metadata.id` 查询主表，不过滤 `enabled`；运行时增加 `enabled = TRUE`。
-2. 查询 `agent_model`，按 `sort_order` 还原 `models[]`。
-3. 查询 `agent_tool_binding`，按 `tool_id` 排序并生成 `binding_tools[]`。
+1. 管理面按 `t_agent_definition.id` 查询主表，不过滤 `enabled`；运行时增加 `enabled = TRUE`。
+2. 查询 `t_agent_models`，按 `sort_order` 还原 `models[]`。
+3. 查询 `t_agent_binding_tools`，按 `tool_id` 排序并生成 `binding_tools[]`。
 4. 按非空 `permission` 分组，生成 `deny`、`ask`、`allow`。
-5. 查询 `agent_skill_binding`，按 `skill_id` 排序生成 `binding_skills[]`。
+5. 查询 `t_agent_binding_skills`，按 `skill_id` 排序生成 `binding_skills[]`。
 6. `use_cases` 直接读取主表 JSONB。
 7. 把 `role` 等列重新组装为 `system_prompt`。
 
@@ -338,17 +333,17 @@ COMMIT
 
 | 对象 | 用途 |
 |---|---|
-| `agent_metadata` | Agent 当前标量字段、启停状态、System Prompt 和 Use Cases |
-| `uk_agent_metadata_name` | 保证 `name` 唯一 |
-| `idx_agent_metadata_display_name` | 展示名查询 |
-| `idx_agent_metadata_updated_at` | 管理列表排序 |
-| `agent_model` | 有序模型列表 |
-| `idx_agent_model_model_id` | 按模型反查 Agent |
-| `agent_tool_binding` | Tool 绑定与权限 |
-| `idx_agent_tool_binding_tool_id` | 按 Tool 反查 Agent |
-| `idx_agent_tool_binding_permission` | 按权限反查 Agent |
-| `agent_skill_binding` | Skill 绑定 |
-| `idx_agent_skill_binding_skill_id` | 按 Skill 反查 Agent |
+| `t_agent_definition` | Agent 当前标量字段、启停状态、System Prompt 和 Use Cases |
+| `uk_t_agent_definition_name` | 保证 `name` 唯一 |
+| `idx_t_agent_definition_display_name` | 展示名查询 |
+| `idx_t_agent_definition_updated_at` | 管理列表排序 |
+| `t_agent_models` | 有序模型列表 |
+| `idx_t_agent_models_model_id` | 按模型反查 Agent |
+| `t_agent_binding_tools` | Tool 绑定与权限 |
+| `idx_t_agent_binding_tools_tool_id` | 按 Tool 反查 Agent |
+| `idx_t_agent_binding_tools_permission` | 按权限反查 Agent |
+| `t_agent_binding_skills` | Skill 绑定 |
+| `idx_t_agent_binding_skills_skill_id` | 按 Skill 反查 Agent |
 
 ## 12. 图表生成与验证
 
@@ -365,6 +360,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.5.0` | 2026-08-04 | 表名统一采用 `t_` 前缀和小写 snake_case；四张表分别更名为 `t_agent_definition`、`t_agent_models`、`t_agent_binding_tools`、`t_agent_binding_skills`，同步调整约束名和索引名 |
 | `v0.4.0` | 2026-07-29 | 增加 `enabled BOOLEAN NOT NULL DEFAULT TRUE`；定义管理面、运行时、乐观锁和存量迁移语义 |
 | `v0.3.0` | 2026-07-29 | 主表 ID 对齐元数据；`display_name` 改为 `VARCHAR(128)`；System Prompt 列去掉 `system_` 前缀；Model/Tool/Skill ID 统一为 `VARCHAR(64)`；`use_cases` 改为主表 JSONB；仅 Model 保留顺序；合并 Tool 绑定与权限 |
 | `v0.2.0` | 2026-07-29 | 按当前 Agent JSON 收敛为 1 张主表和 5 张数组子表；增加 GaussDB DDL |
