@@ -1370,6 +1370,20 @@ Response 可以乱序并与 Event 交错。AsyncAPI 的 `x-method-contracts` 是
 | `model.set` | `ModelSetParams` | `model_id` |
 | `thinking.set` | `ThinkingSetParams` | `thinking` |
 
+对应的 RequestFrame 示例：
+
+```json
+{"type":"req","id":"req-1","method":"connect","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","client":{"id":"mate-service","version":"1.0.0","platform":"service"}}}
+{"type":"req","id":"req-2","method":"chat.send","params":{"message":"查询订单状态","idempotency_key":"send-key-001"}}
+{"type":"req","id":"req-3","method":"chat.steer","params":{"run_id":"run-01","message":"优先给出物流状态","idempotency_key":"steer-key-001"}}
+{"type":"req","id":"req-4","method":"chat.abort","params":{"run_id":"run-01","idempotency_key":"abort-key-001"}}
+{"type":"req","id":"req-5","method":"chat.history","params":{"run_id":"run-01","through_history_seq":41,"limit":50}}
+{"type":"req","id":"req-6","method":"session.get","params":{}}
+{"type":"req","id":"req-7","method":"models.list","params":{}}
+{"type":"req","id":"req-8","method":"model.set","params":{"model_id":"model_011CZq2GkV8aD4NwP7sLmXfR"}}
+{"type":"req","id":"req-9","method":"thinking.set","params":{"thinking":"full"}}
+```
+
 一个完整 WebSocket UTF-8 Text Message 恰好承载一个 JSON Frame。允许底层
 WebSocket fragmentation，但大小在解压和重组后按完整 JSON 的 UTF-8 字节数
 计算；Binary Message 使用 1003 关闭，非法 UTF-8 或 JSON 使用 1007 关闭。

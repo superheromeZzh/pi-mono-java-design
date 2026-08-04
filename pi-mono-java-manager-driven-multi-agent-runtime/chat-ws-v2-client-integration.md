@@ -365,6 +365,20 @@ EventFrame    = {type:"event", event, seq, payload}
 | `model.set` | `ModelSetParams` | `model_id` |
 | `thinking.set` | `ThinkingSetParams` | `thinking` |
 
+完整 RequestFrame 示例：
+
+```json
+{"type":"req","id":"req-1","method":"connect","params":{"mode":"create","min_protocol":2,"max_protocol":2,"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agent_id":"agent_011CZkYqphY8vELVzwCUpqiQ","model_id":"model_011CZq2GkV8aD4NwP7sLmXfR","client":{"id":"mate-service","version":"1.0.0","platform":"service"}}}
+{"type":"req","id":"req-2","method":"chat.send","params":{"message":"查询订单状态","idempotency_key":"send-key-001"}}
+{"type":"req","id":"req-3","method":"chat.steer","params":{"run_id":"run-01","message":"优先给出物流状态","idempotency_key":"steer-key-001"}}
+{"type":"req","id":"req-4","method":"chat.abort","params":{"run_id":"run-01","idempotency_key":"abort-key-001"}}
+{"type":"req","id":"req-5","method":"chat.history","params":{"run_id":"run-01","through_history_seq":41,"limit":50}}
+{"type":"req","id":"req-6","method":"session.get","params":{}}
+{"type":"req","id":"req-7","method":"models.list","params":{}}
+{"type":"req","id":"req-8","method":"model.set","params":{"model_id":"model_011CZq2GkV8aD4NwP7sLmXfR"}}
+{"type":"req","id":"req-9","method":"thinking.set","params":{"thinking":"full"}}
+```
+
 ResponseFrame 没有 `method`。客户端发送请求时，必须把 method 和预期 payload
 decoder 保存到 pending map，再根据响应 `id` 找回：
 
