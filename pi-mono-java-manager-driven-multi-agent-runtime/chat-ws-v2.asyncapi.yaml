@@ -1,11 +1,13 @@
 asyncapi: 3.1.0
-id: urn:campusagent:chat-websocket:v2
+id: urn:campusagent:internal-runtime-chat-websocket:v2
 x-locale: zh-CN
+x-visibility: internal
 info:
-  title: CampusAgent 会话 WebSocket API
-  version: 2.9.1
+  title: CampusAgent 内部 Runtime 会话 WebSocket API
+  version: 2.11.0
   description: |
-    调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
+    mate-service Runtime bridge 使用
+    `wss://agent-service.internal/agent-service/internal/v1/ws/chat` 请求建立
     安全 WebSocket。
     客户端库先建立 TCP/TLS 连接，再通过 HTTP opening handshake 协商切换
     协议；服务端返回 101 后，WebSocket 才正式建立。
@@ -21,8 +23,8 @@ info:
     活动读写连接；新的 `resume` 原子递增 connection generation 并接管
     Session，旧连接使用私有关闭码 `4409 SESSION_REPLACED` 结束。
 
-    上层会话服务负责创建和管理 `session_id`，以及用户会话列表、数量限制和
-    业务删除。CampusAgent 将 `session_id` 作为不透明的 Runtime Session 标识，
+    mate-service 负责公共 `chat_id`、用户会话列表、数量限制和业务删除，并为
+    每个 Chat 分配内部 `session_id`。CampusAgent 只将 `session_id` 作为不透明的 Runtime Session 标识，
     不接收或维护 tenant_id、user_id。调用方提供的 `session_id` 必须在一个
     CampusAgent Runtime 部署范围内全局唯一，删除后不得复用。
 
@@ -33,7 +35,7 @@ info:
     不直连 OBS，不接触 Bucket、存储凭据、预签名 URL、
     客户端 MIME/文件名/Base64 或 tenant/user 字段。
 
-    URL 中的 `/v1` 是 `agent-service` 对外服务 API 版本；首帧协商的
+    URL 中的 `/v1` 是 `agent-service` 内部服务 API 版本；首帧协商的
     `protocol: 2` 是 WebSocket Frame 协议版本，二者独立演进。协议 2 固定
     使用 request/response/event Frame 和结构化消息增量，不通过 capability
     协商累计 Message 格式。它是 CampusAgent 的目标协议；当前
@@ -41,10 +43,12 @@ info:
     或 URL token 传递身份及 Session
     信息，也不能在已绑定的连接内创建另一个 Session。
 
-    实现调用方、请求关联、消息归并、断线恢复和错误处理时，先阅读同目录的
+    本规范只允许内部服务客户端使用；UI 公共协议由同目录
+    `mate-chat-ws-v2.asyncapi.yaml` 定义，公共 Frame 不得出现 `session_id`，
+    内部 Frame 不需要 `chat_id`。实现调用方、请求关联、消息归并、断线恢复和错误处理时，先阅读同目录的
     `chat-ws-v2-client-integration.md`；字段和取值仍以本文件为规范来源。
 
-    `https://api.example.com/agent-service/v1/ws/chat` 只是同一 host、port 和
+    `https://agent-service.internal/agent-service/internal/v1/ws/chat` 只是同一 host、port 和
     path 的 HTTP 握手视角，不是 RESTful API，也不表示第二条连接。
   contact:
     name: CampusAgent
@@ -53,30 +57,30 @@ info:
 defaultContentType: application/json
 servers:
   production:
-    host: api.example.com
-    pathname: /agent-service
+    host: agent-service.internal
+    pathname: /agent-service/internal
     protocol: wss
     description: |
-      本通道只供 `mate-service`、其他获授权服务端调用方和服务端 SDK
+      本通道只供 `mate-service` Runtime bridge 和明确获授权的内部服务端 SDK
       连接。调用方按现有内部网关认证能力在 HTTP opening handshake 中
       建立服务身份；本公开规范不复制私有 Header、claim 或密钥格式。
       私钥原文不得在 HTTP 或 WebSocket 中传输。
       服务端在返回 101 前完成认证，并拒绝业务查询参数、URL token 或
       缺少合法 Upgrade headers 的普通 HTTP 请求。浏览器到
-      `mate-service` 的协议另行定义，不直接连接 CampusAgent Runtime。
+      `mate-service` 的公共协议由独立 AsyncAPI 定义，UI 不直接连接 CampusAgent Runtime。
   local:
     host: localhost:3000
-    pathname: /agent-service
+    pathname: /agent-service/internal
     protocol: ws
     description: |
-      开发客户端使用 `ws://localhost:3000/agent-service/v1/ws/chat` 建立连接。
+      开发客户端使用 `ws://localhost:3000/agent-service/internal/v1/ws/chat` 建立连接。
       开发部署也必须按该环境现有内部网关和服务认证配置完成身份校验；
       只有 URL 使用 `ws`，HTTP opening handshake、首帧 `connect` 和后续 Frame
       协议边界不变。
 channels:
   sessionChat:
     address: /v1/ws/chat
-    title: 会话范围的对话通道
+    title: 内部 Runtime Session 范围的对话通道
     description: |
       调用方完成 HTTP opening handshake 并收到 101 后，才可以在这条连接上
       传输 JSON Frame。调用方必须在五秒内发送 `connect` RequestFrame；服务端
@@ -120,7 +124,7 @@ components:
         - name: 新建会话
           payload:
             type: req
-            id: connect-1
+            id: req-1
             method: connect
             params:
               mode: create
@@ -136,7 +140,7 @@ components:
         - name: 恢复会话
           payload:
             type: req
-            id: connect-2
+            id: req-1
             method: connect
             params:
               mode: resume
@@ -155,6 +159,7 @@ components:
             type: req
             id: send-text-1
             method: chat.send
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
             params:
               message: 查询订单 20260730001
               idempotency_key: b27da7cc-98e8-42c9-bc4c-1a0fc694956e
@@ -162,9 +167,8 @@ components:
         - name: 发送文本和附件用户消息
           payload:
             type: req
-            id: send-1
+            id: req-2
             method: chat.send
-            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
             params:
               message: 查询订单 20260730001
               attachment_ids:
@@ -192,7 +196,7 @@ components:
         - name: 连接成功并返回 active run 快照
           payload:
             type: res
-            id: connect-2
+            id: req-1
             ok: true
             payload:
               protocol: 2
@@ -268,7 +272,7 @@ components:
         - name: 发送消息已接受
           payload:
             type: res
-            id: send-1
+            id: req-2
             ok: true
             payload:
               run_id: run-01
@@ -277,7 +281,7 @@ components:
         - name: 读取权威历史
           payload:
             type: res
-            id: history-1
+            id: req-5
             ok: true
             payload:
               items:
@@ -366,7 +370,7 @@ components:
         - name: active run 冲突
           payload:
             type: res
-            id: send-2
+            id: req-2
             ok: false
             error:
               code: RUN_ACTIVE
@@ -375,7 +379,7 @@ components:
         - name: 附件仍在处理
           payload:
             type: res
-            id: send-3
+            id: req-3
             ok: false
             error:
               code: ATTACHMENT_NOT_READY
@@ -385,7 +389,7 @@ components:
         - name: 当前模型不支持附件
           payload:
             type: res
-            id: send-4
+            id: req-4
             ok: false
             error:
               code: ATTACHMENT_NOT_SUPPORTED
@@ -561,7 +565,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/Identifier'
       description: |
-        调用方在 connect 中提供上层会话服务生成的 session_id。服务端用它创建
+        mate-service Runtime bridge 在 connect 中提供其为 Chat 生成的内部 session_id。服务端用它创建
         或恢复 CampusAgent Runtime Session。该值必须在 CampusAgent Runtime
         部署范围内全局唯一，删除
         后不得复用；推荐使用 UUIDv7 或 ULID，不接受仅在某个 tenant 或 user
@@ -608,7 +612,7 @@ components:
         - $ref: '#/components/schemas/Identifier'
       description: |
         服务端首次接受新的 chat.send 时生成 run_id；同一 idempotency_key 且
-        负载一致的重试返回原 run_id，负载不一致时返回 INVALID_REQUEST；连接
+        负载一致的重试返回原 run_id，负载不一致时返回 IDEMPOTENCY_CONFLICT；连接
         断开或重连不会改变该值。
     ToolCallId:
       allOf:
@@ -678,7 +682,8 @@ components:
         中断后，调用方使用新的 RequestFrame.id 和原 idempotency_key 重试。
         traceparent 和 RequestFrame.id 不参与业务负载等价比较。服务端在
         Session 未删除期间保留已接受结果。chat.send 在执行 active-run 与附件
-        当前状态检查前，先查询已接受的同 key 结果；接受前错误不占用幂等键。
+        当前状态检查前，先查询已接受的同 key 结果；同 key 不同负载返回
+        IDEMPOTENCY_CONFLICT；接受前错误不占用幂等键。
     Timestamp:
       type: string
       format: date-time
@@ -686,10 +691,10 @@ components:
       type: string
       enum:
         - hidden
-        - summary
         - full
       description: |
-        当前连接的 thinking 投影级别。full 只有在 connect 返回的
+        当前连接的 reasoning content 可见性。该字段不控制模型是否
+        推理或推理强度。full 只有在 connect 返回的
         features.capabilities 包含 full_thinking 时才合法；capability 只开放
         选择上限，不会自动把级别切换为 full。
     ClientInfo:
@@ -697,7 +702,7 @@ components:
       additionalProperties: false
       description: |
         只用于可观测和协议兼容判断，不构成授权。本通道的调用方必须是
-        mate-service、其他获授权服务端调用方或服务端 SDK；浏览器不得
+        mate-service Runtime bridge 或明确获授权的内部服务端 SDK；浏览器不得
         通过修改本字段直连 agent-service。
       required:
         - id
@@ -759,6 +764,10 @@ components:
         UNSUPPORTED_PROTOCOL。create 请求的响应丢失时，调用方必须在新连接上
         使用完全相同的 session_id + agent_id + model_id 重试 mode=create；不得直接
         改用 resume，因为原 create 可能尚未提交。
+        内部 connect 不使用 idempotency_key；它是以 session_id 为资源定位键、
+        以 agent_id + 初始 model_id 为 immutable binding 的资源幂等。
+        同一 session_id 携带不同 immutable binding 返回 INVALID_REQUEST，
+        不使用 IDEMPOTENCY_CONFLICT。
       required:
         - mode
         - min_protocol
@@ -826,7 +835,7 @@ components:
         具体值共同决定；message 省略与空字符串规范化为同一值，
         attachment_ids 省略与空数组也规范化为同一值。RequestFrame.id 和
         traceparent 不参与。相同 key 携带
-        不同幂等负载返回 INVALID_REQUEST。服务端先返回已经接受的同 key 结果，
+        不同幂等负载返回 IDEMPOTENCY_CONFLICT。服务端先返回已经接受的同 key 结果，
         再处理 RUN_ACTIVE 或重新解析附件；首次请求只有在全部附件原子解析为
         可信元数据快照且 Attachment Service 已在 openGauss 中单向设置
         referenced_at，并验证
@@ -904,6 +913,7 @@ components:
       description: |
         v1 服务 API 的 steering 只接受非空文本，不接受 attachment_ids。
         需要增加附件时，调用方必须等当前 run 结束后发起新的 chat.send。
+        规范化幂等负载是 run_id + message；接受前失败不占用幂等键。
       required:
         - run_id
         - message
@@ -951,6 +961,8 @@ components:
           $ref: '#/components/schemas/RunId'
         idempotency_key:
           $ref: '#/components/schemas/IdempotencyKey'
+      description: |
+        规范化幂等负载只包含 run_id；接受前失败不占用幂等键。
     ChatAbortRequest:
       type: object
       additionalProperties: false
@@ -1198,6 +1210,8 @@ components:
             required:
               - max_attachments
           then:
+            required:
+              - completed_at
             properties:
               modalities:
                 maxItems: 1
@@ -1402,7 +1416,6 @@ components:
           type: string
           enum:
             - hidden
-            - summary
             - full
       allOf:
         - if:
@@ -1426,9 +1439,7 @@ components:
               - text
       description: |
         Thinking 内容块始终占用原 content_index，因此 hidden 投影也保留
-        一个不含 text 的占位块，后续可见块的索引不会前移。disclosure=summary
-        时 text 可选：只有 Model Manager 明确提供非空安全摘要时才携带；没有
-        安全摘要时省略 text，不从原始 thinking 合成文字或伪造占位文案。
+        一个不含 text 的占位块，后续可见块的索引不会前移。
         disclosure=full 只允许出现在有效 capability 包含 full_thinking 的连接投影中。
     ToolResultRef:
       type: string
@@ -1438,6 +1449,57 @@ components:
         agent-service 为已持久的完整脱敏工具值生成的不透明引用。
         调用方不得解析或将它当作 URL、存储 key 或授权凭据；服务 API v1
         不提供通过 result_ref 读取完整值的公开接口。
+    SafeJsonScalar:
+      oneOf:
+        - type: string
+          maxLength: 65536
+          x-maxUtf8Bytes: 65536
+        - type: number
+        - type: boolean
+        - type: 'null'
+    SafeJsonLeafContainer:
+      oneOf:
+        - $ref: '#/components/schemas/SafeJsonScalar'
+        - type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/SafeJsonScalar'
+        - type: object
+          maxProperties: 128
+          propertyNames:
+            maxLength: 128
+          additionalProperties:
+            $ref: '#/components/schemas/SafeJsonScalar'
+      description: 最多一层容器；容器成员只能是有界标量。
+    SafeJsonValue:
+      oneOf:
+        - $ref: '#/components/schemas/SafeJsonScalar'
+        - type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/SafeJsonLeafContainer'
+        - type: object
+          maxProperties: 128
+          propertyNames:
+            maxLength: 128
+          additionalProperties:
+            $ref: '#/components/schemas/SafeJsonLeafContainer'
+      description: |
+        Tool 业务值的有界 JSON 投影。标准 JSON Schema 验证结构、项数和
+        字符数；agent-service 还必须在序列化前验证规范化 JSON 的
+        UTF-8 总字节数。
+      x-maxDepth: 2
+      x-maxSerializedBytes: 524288
+    SafeJsonObject:
+      type: object
+      maxProperties: 128
+      propertyNames:
+        maxLength: 128
+      additionalProperties:
+        $ref: '#/components/schemas/SafeJsonLeafContainer'
+      description: Tool parameters 的有界 JSON object 投影。
+      x-maxDepth: 2
+      x-maxSerializedBytes: 524288
     CompleteToolValueProjection:
       type: object
       additionalProperties: false
@@ -1447,7 +1509,8 @@ components:
       properties:
         truncated:
           const: false
-        value: {}
+        value:
+          $ref: '#/components/schemas/SafeJsonValue'
       description: |
         脱敏后的完整业务 parameters 或 result。服务端必须先移除凭据、
         内部 Header、执行器秘密和不允许披露的字段，再计算规范化 JSON
@@ -1490,13 +1553,16 @@ components:
         `truncated=true` 时只返回预览和不透明引用。两种形态都不得包含凭据、
         内部 Header 或执行器秘密。
     CompleteToolParametersProjection:
-      allOf:
-        - $ref: '#/components/schemas/CompleteToolValueProjection'
-        - type: object
-          properties:
-            value:
-              type: object
-              additionalProperties: true
+      type: object
+      additionalProperties: false
+      required:
+        - truncated
+        - value
+      properties:
+        truncated:
+          const: false
+        value:
+          $ref: '#/components/schemas/SafeJsonObject'
       description: 完整脱敏 parameters；value 必须是 JSON object。
     ToolParametersProjection:
       oneOf:
@@ -1704,17 +1770,52 @@ components:
         - if:
             properties:
               role:
-                enum:
-                  - assistant
-                  - tool
+                const: assistant
             required:
               - role
           then:
             properties:
               content:
-                not:
-                  contains:
-                    $ref: '#/components/schemas/AttachmentContent'
+                type: array
+                items:
+                  oneOf:
+                    - $ref: '#/components/schemas/TextContent'
+                    - $ref: '#/components/schemas/ThinkingContent'
+                    - $ref: '#/components/schemas/ToolCallContent'
+        - if:
+            properties:
+              role:
+                const: tool
+            required:
+              - role
+          then:
+            required:
+              - completed_at
+            properties:
+              status:
+                const: completed
+              content:
+                type: array
+                minItems: 1
+                maxItems: 1
+                items:
+                  $ref: '#/components/schemas/ToolResultContent'
+        - if:
+            properties:
+              status:
+                const: streaming
+            required:
+              - status
+          then:
+            properties:
+              role:
+                const: assistant
+            not:
+              required:
+                - completed_at
+          else:
+            required:
+              - completed_at
     TerminalProjectedMessage:
       allOf:
         - $ref: '#/components/schemas/ProjectedMessage'
@@ -1738,9 +1839,22 @@ components:
         - $ref: '#/components/schemas/ProjectedMessage'
         - type: object
           properties:
+            role:
+              const: assistant
             status:
               const: streaming
+          not:
+            required:
+              - completed_at
       description: active-run 快照中当前未完成的 Assistant Message。
+    TerminalAssistantProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/TerminalProjectedMessage'
+        - type: object
+          properties:
+            role:
+              const: assistant
+      description: message.completed 事件中的完整 Assistant Message。
     OpenTextContentState:
       type: object
       additionalProperties: false
@@ -1762,7 +1876,6 @@ components:
           type: string
           enum:
             - hidden
-            - summary
             - full
     OpenToolCallContentState:
       type: object
@@ -2225,6 +2338,7 @@ components:
         - SESSION_NOT_FOUND
         - MODEL_REQUIRED
         - MODEL_NOT_ALLOWED
+        - IDEMPOTENCY_CONFLICT
         - RUN_ACTIVE
         - RUN_NOT_FOUND
         - INVALID_ATTACHMENT
@@ -2492,7 +2606,6 @@ components:
           type: string
           enum:
             - hidden
-            - summary
             - full
           description: 当前连接对该 thinking 块的有效投影级别。
     ThinkingDeltaUpdate:
@@ -2500,7 +2613,7 @@ components:
       additionalProperties: false
       description: |
         只在当前连接对 run 的投影级别为 full 且有效 capability 包含
-        full_thinking 时发送。summary/hidden 连接在同一 run_seq 位置收到
+        full_thinking 时发送。hidden 连接在同一 run_seq 位置收到
         thinking_redacted，使 run_seq 在不同投影中仍保持稳定连续。
       required:
         - type
@@ -2509,25 +2622,6 @@ components:
         type:
           const: thinking_delta
         delta:
-          type: string
-          minLength: 1
-    ThinkingSummaryUpdate:
-      type: object
-      additionalProperties: false
-      description: |
-        只在 disclosure=summary 且 Model Manager 明确提供非空安全摘要时
-        发送，每个 thinking 块最多一次。summary 是当前块的完整安全
-        摘要，客户端以它替换当前摘要，不做字符串追加。如果没有安全
-        摘要，summary 投影在 canonical summary 序列位置也收到
-        thinking_redacted，终态 ThinkingContent 保留 disclosure=summary 但省略 text。
-        full/hidden 投影在同一 run_seq 位置收到 thinking_redacted。
-      required:
-        - type
-        - summary
-      properties:
-        type:
-          const: thinking_summary
-        summary:
           type: string
           minLength: 1
     ThinkingRedactedUpdate:
@@ -2543,10 +2637,9 @@ components:
           type: string
           enum:
             - delta
-            - summary
       description: |
         不含 thinking 内容的序列占位。服务端对每个被当前连接投影策略抑制的
-        canonical thinking_delta 或 thinking_summary 发送一条，使同一 run
+        canonical thinking_delta 发送一条，使同一 run
         在断线前后保持连续的 run_seq 域。客户端只推进序列，不创建可见正文。
     ThinkingEndUpdate:
       type: object
@@ -2615,7 +2708,6 @@ components:
         - $ref: '#/components/schemas/TextEndUpdate'
         - $ref: '#/components/schemas/ThinkingStartUpdate'
         - $ref: '#/components/schemas/ThinkingDeltaUpdate'
-        - $ref: '#/components/schemas/ThinkingSummaryUpdate'
         - $ref: '#/components/schemas/ThinkingRedactedUpdate'
         - $ref: '#/components/schemas/ThinkingEndUpdate'
         - $ref: '#/components/schemas/ToolCallStartUpdate'
@@ -2626,8 +2718,8 @@ components:
       additionalProperties: false
       description: |
         content_index 在同一 message_id 内标识最终 content 数组位置。每个位置
-        遵循匹配类型的 start -> update* -> end；Thinking update 可以是 delta、
-        一次 summary 或不含内容的 redacted 占位。不同位置可以交错。客户端先按
+        遵循匹配类型的 start -> update* -> end；Thinking update 可以是 delta
+        或不含内容的 redacted 占位。不同位置可以交错。客户端先按
         run_seq 去重和检查缺口，再应用 update。快照 open_contents 可以初始化
         一个在重连前已经 start 的位置，因此快照后的第一帧可以直接是 delta。
       required:
@@ -2851,7 +2943,7 @@ components:
         timestamp:
           $ref: '#/components/schemas/Timestamp'
         message:
-          $ref: '#/components/schemas/TerminalProjectedMessage'
+          $ref: '#/components/schemas/TerminalAssistantProjectedMessage'
     Usage:
       type: object
       additionalProperties: false
@@ -3111,7 +3203,7 @@ components:
         interrupted Message/RunRecord 为准。
 
         run_seq 属于 canonical run 事件域，不因连接的 thinking 投影而变化。
-        当 canonical thinking delta 或 summary 不允许向当前连接披露时，该连接
+        当 canonical thinking delta 不允许向当前连接披露时，该连接
         仍在相同 run_seq 位置收到不含内容的 thinking_redacted，因此
         断线恢复前后的 run_seq 连续且可比较。
       oneOf:
@@ -3167,15 +3259,15 @@ x-method-contracts:
   chat.send:
     requestSchema: '#/components/schemas/ChatSendRequest'
     successPayloadSchema: '#/components/schemas/ChatSendResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, INVALID_ATTACHMENT, ATTACHMENT_NOT_READY, ATTACHMENT_NOT_SUPPORTED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
+    errors: [INVALID_REQUEST, FORBIDDEN, IDEMPOTENCY_CONFLICT, RUN_ACTIVE, INVALID_ATTACHMENT, ATTACHMENT_NOT_READY, ATTACHMENT_NOT_SUPPORTED, MANAGER_AUTH_FAILED, MANAGER_UNAVAILABLE]
   chat.steer:
     requestSchema: '#/components/schemas/ChatSteerRequest'
     successPayloadSchema: '#/components/schemas/ChatSteerResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
+    errors: [INVALID_REQUEST, FORBIDDEN, IDEMPOTENCY_CONFLICT, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
   chat.abort:
     requestSchema: '#/components/schemas/ChatAbortRequest'
     successPayloadSchema: '#/components/schemas/ChatAbortResult'
-    errors: [INVALID_REQUEST, FORBIDDEN, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
+    errors: [INVALID_REQUEST, FORBIDDEN, IDEMPOTENCY_CONFLICT, RUN_NOT_FOUND, MANAGER_UNAVAILABLE]
   chat.history:
     requestSchema: '#/components/schemas/ChatHistoryRequest'
     successPayloadSchema: '#/components/schemas/HistoryResult'
@@ -3205,8 +3297,8 @@ x-websocket:
     binaryMessageCloseCode: 1003
     invalidUtf8OrJsonCloseCode: 1007
   handshake:
-    clientUri: wss://api.example.com/agent-service/v1/ws/chat
-    conceptualHttpTarget: https://api.example.com/agent-service/v1/ws/chat
+    clientUri: wss://agent-service.internal/agent-service/internal/v1/ws/chat
+    conceptualHttpTarget: https://agent-service.internal/agent-service/internal/v1/ws/chat
     http11Method: GET
     requiredHttp11Headers:
       - 'Connection: Upgrade'
@@ -3230,7 +3322,8 @@ x-websocket:
       - accept HTTP 101 Switching Protocols
       - exchange WebSocket Frames on the same TCP/TLS connection
     description: |
-      调用方使用 `wss://api.example.com/agent-service/v1/ws/chat` 请求建立
+      mate-service Runtime bridge 使用
+      `wss://agent-service.internal/agent-service/internal/v1/ws/chat` 请求建立
       安全 WebSocket。
       客户端库先建立 TCP/TLS 连接，再通过 HTTP WebSocket opening handshake
       协商切换协议；服务端返回 101 后，WebSocket 才正式建立。
@@ -3246,8 +3339,8 @@ x-websocket:
 
       该握手方式使调用方和服务端复用 443、TLS、HTTP 路由、代理、防火墙和
       认证设施，同时在同一条连接上明确完成从 HTTP 到 WebSocket Frame 的
-      切换。公开 Gateway 和 agent-service 都使用完整路径
-      `/agent-service/v1/ws/chat`，本协议不定义前缀剔除。入站凭据只形成
+      切换。内部 Gateway 和 agent-service 都使用完整路径
+      `/agent-service/internal/v1/ws/chat`，本协议不定义前缀剔除。入站凭据只形成
       不可变连接认证上下文，不得原样传给 Model Manager 或 Tool Manager；
       agent-service 调用内部服务时按现有能力生成面向目标服务的新
       access-token。任何凭据都不得进入 Prompt、RuntimeSessionStore、Frame
@@ -3284,16 +3377,16 @@ x-websocket:
       读写该 Session，旧连接不得再接收事件或执行请求。此代次只解决
       同 Pod 并发，不是跨 Pod 分布式所有权。
   deploymentRouting:
-    strategy: trusted gateway user-IP affinity
+    strategy: trusted session-affinity metadata
     distributedOwner: false
     redisCoordination: false
     crossPodForwarding: false
-    sessionRoutingHeader: false
+    sessionRoutingMetadata: private and not part of the public Frame contract
     description: |
-      多副本服务 API v1 依赖可信网关按有效用户 IP 将同一调用方稳定路由到
-      同一 Pod。本规范不定义私有路由 Header，也不使用 Redis、分布式
-      owner 或跨 Pod 转发。如果网关只能看到 mate-service/NAT IP、用户 IP
-      改变、粘性失效或 Pod 重启，active run 就无法在另一 Pod 继续。
+      多副本服务 API v1 由 mate-service 在用户授权和 chat_id 映射之后，以
+      session_id 派生不可由 UI 伪造的受信路由元数据，使同一 Session 尽量回到
+      同一 Pod。本规范不冻结私有 Header 名或签名格式，也不使用 Redis、分布式
+      owner 或跨 Pod转发。亲和失效或 Pod 重启时，active run 无法在另一 Pod 继续。
       这是 v1 的明确可用性限制，不得在客户端文档中表述为跨 Pod 无缝恢复。
   recovery:
     clientCursorInConnect: false
@@ -3306,7 +3399,7 @@ x-websocket:
       Message、open contents 与 active tools，最后按 run_seq 释放缓冲事件。
 
       canonical thinking 事件如果被当前连接投影抑制，服务端仍发送
-      thinking_redacted 占位，所以 run_seq 不会因 full/summary/hidden 而出现缺口。
+      thinking_redacted 占位，所以 run_seq 不会因 full/hidden 而出现缺口。
       调用方观察到 seq/run_seq 缺口、1001、1006、1011 或 1013 时，使用带抖动的
       指数退避重新连接并执行 mode=resume。如果请求被路由到不持有原
       run 的其他 Pod，该 Pod 不能返回 active_run 快照，也不得仅因本地缺少
@@ -3368,7 +3461,7 @@ x-attachments:
   contentAdapter: AttachmentInputAssembler
   externalUpload:
     method: POST
-    path: /mate-service/v1/sessions/{session_id}/attachments
+    path: /mate-service/v1/chats/{chat_id}/attachments
     contentType: multipart/form-data
     exactFileParts: 1
     filePartName: file
@@ -3391,10 +3484,10 @@ x-attachments:
         - Retry-After
   externalPolling:
     method: GET
-    path: /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+    path: /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
   externalDelete:
     method: DELETE
-    path: /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+    path: /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
     unreferenced: deletable unless quarantined by OBJECT_KEY_CONFLICT
     referencedStatus: 409
     objectKeyConflictStatus: 503
@@ -3417,8 +3510,8 @@ x-attachments:
     objectKeyStoredInDatabase: false
     objectKeyContainsFilenameOrSessionPath: false
     overwriteExistingObject: false
-    permanentTable: attachment
-    activeDetailTable: attachment_active_detail
+    permanentTable: t_attachment
+    activeDetailTable: t_attachment_active_detail
     deletedTombstoneFields:
       - attachment_id
       - session_id
@@ -3447,7 +3540,7 @@ x-attachments:
     - DELETED
   description: |
     附件引用是协议 2 的标准可选字段，不通过 capability 开启。调用方使用
-    `POST /mate-service/v1/sessions/{session_id}/attachments` 提交恰好一个
+    `POST /mate-service/v1/chats/{chat_id}/attachments` 提交恰好一个
     `file` multipart part，并必须携带 `X-Attachment-Size: 1..20971520`。
     OBS SDK 读取声明长度后，Attachment Service 还必须确认 file part 已到
     EOF；尾部仍有字节时删除已写对象并拒绝请求。
@@ -3473,9 +3566,9 @@ x-attachments:
     只有受审计对账确认对象归属并安全删除或确认 NotFound 后，才删除明细并
     收束为五字段 DELETED tombstone。
 
-    openGauss 永久 attachment 主表只保存 attachment_id、session_id、status、
+    openGauss 永久 t_attachment 主表只保存 attachment_id、session_id、status、
     created_at 和 deleted_at。每个非 DELETED 主表行都有
-    attachment_active_detail，包括上传、失败、对账和待删除状态；明细保存
+    t_attachment_active_detail，包括上传、失败、对账和待删除状态；明细保存
     filename、detected_media_type、expected_size_bytes、size_bytes、sha256、
     referenced_at、expires_at、error_code、attempt_count、next_attempt_at、
     lease_owner、lease_until 和 row_version。filename 只用于安全显示；检测 MIME
@@ -3492,7 +3585,9 @@ x-attachments:
     释放 ID；READY 后不能改绑其他内容，DELETED 后不能复用。客户端和 Runtime
     必须原样保存并逐字节比较，不能生成、规范化大小写或解析后缀。
 
-    CampusAgent Runtime 不维护 tenant_id/user_id，也不把 attachment_id
+    公共附件接口先由 mate-service 使用当前认证上下文校验 chat_id，再从 Mate
+    Chat Store 解析对应 session_id；公共请求和响应不披露 session_id，且
+    t_attachment 不重复保存 chat_id。CampusAgent Runtime 不维护 tenant_id/user_id，也不把 attachment_id
     当作授权凭据；格式校验和唯一性检查都不能代替资源授权。
     AttachmentResolver 使用 Upgrade 固化的调用服务身份以及当前
     Session 的 session_id 批量解析全部 ID。Attachment

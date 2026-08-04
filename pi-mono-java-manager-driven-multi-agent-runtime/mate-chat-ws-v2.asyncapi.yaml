@@ -1,0 +1,1877 @@
+asyncapi: 3.1.0
+id: urn:campusmate:public-chat-websocket:v2
+x-locale: zh-CN
+info:
+  title: CampusMate 公共 Chat WebSocket API
+  version: 1.0.0
+  description: |
+    UI 或获授权客户端使用 `wss://api.example.com/mate-service/v1/ws/chat`
+    请求建立安全 WebSocket。客户端库先建立 TCP/TLS 连接，再通过 HTTP
+    WebSocket opening handshake 协商切换协议；服务端返回 101 后，WebSocket
+    才正式建立。101 只表示传输建立，不表示 Chat 已经创建或恢复。
+
+    客户端必须在 101 后五秒内发送首个 `connect` RequestFrame。`mode=create`
+    由 mate-service 校验调用用户、协议、幂等键、每用户最多 50 个未删除 Chat、
+    Agent 和 Model，随后生成公共 `chat_id` 与私有 Runtime `session_id`，保存
+    映射并通过内部 WebSocket 创建 agent-service Runtime Session。公共成功
+    响应只返回 `chat_id`；`session_id` 永远不进入公共 Frame。
+
+    `mode=resume` 只提交 `chat_id`。mate-service 从权威 Chat 记录恢复保存的
+    Agent、Model 和私有 Runtime 映射；客户端不得在 resume 中重新声明
+    `agent_id`、`model_id` 或任何 Runtime Session 标识。
+
+    本文件定义 mate-service 对外目标协议。它不是当前 pi-mono-java v1 已实现
+    行为，也不是 agent-service 内部 Runtime WebSocket 规范。公共和内部两跳
+    分别拥有连接 ID、请求 ID、连接事件序列、连接代次、认证、心跳和背压；
+    本 URL 固定为 Agent Channel，只有被 Runtime 接受的 `chat.send` 返回成功。
+    非 Agent 产品分支在接受前返回 `CHANNEL_NOT_APPLICABLE`，不伪造 run。
+    mate-service 解析、鉴权、编排并重建 Frame，不做透明字节转发。
+  contact:
+    name: CampusMate
+defaultContentType: application/json
+servers:
+  production:
+    host: api.example.com
+    pathname: /mate-service
+    protocol: wss
+    description: |
+      生产公共入口。opening handshake 在返回 HTTP 101 前使用 mate-service
+      既有网关认证能力建立用户身份并校验 Origin；业务查询参数和 URL token
+      均被拒绝。认证凭据不得进入 Frame、Prompt、数据库业务字段或应用日志。
+  local:
+    host: localhost:3000
+    pathname: /mate-service
+    protocol: ws
+    description: 本地入口为 `ws://localhost:3000/mate-service/v1/ws/chat`。
+channels:
+  publicChat:
+    address: /v1/ws/chat
+    title: 单 Chat 公共通道
+    description: |
+      一条已 connect 的公共连接只绑定一个 chat_id。创建其他 Chat 或恢复另一个
+      Chat 必须建立新连接。101 之前的失败使用 HTTP 状态；101 之后使用
+      ResponseFrame、EventFrame 或 WebSocket close code。
+    messages:
+      ClientRequestFrame:
+        $ref: '#/components/messages/ClientRequestFrame'
+      ServerResponseFrame:
+        $ref: '#/components/messages/ServerResponseFrame'
+      ServerEventFrame:
+        $ref: '#/components/messages/ServerEventFrame'
+operations:
+  receiveRequest:
+    action: receive
+    channel:
+      $ref: '#/channels/publicChat'
+    summary: mate-service 接收首个 connect；成功后接收当前 Chat 的命令。
+    messages:
+      - $ref: '#/channels/publicChat/messages/ClientRequestFrame'
+  sendResponseOrEvent:
+    action: send
+    channel:
+      $ref: '#/channels/publicChat'
+    summary: mate-service 返回关联响应，并向当前 Chat 发送有序事件。
+    messages:
+      - $ref: '#/channels/publicChat/messages/ServerResponseFrame'
+      - $ref: '#/channels/publicChat/messages/ServerEventFrame'
+components:
+  messages:
+    ClientRequestFrame:
+      name: ClientRequestFrame
+      title: 公共客户端请求 Frame
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/AnyRequestFrame'
+      examples:
+        - name: 创建 Chat
+          payload:
+            type: req
+            id: connect-create-1
+            method: connect
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+            params:
+              mode: create
+              min_protocol: 2
+              max_protocol: 2
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+              idempotency_key: 2ebc12d0-451a-4b9e-8b42-63c260cf5742
+              client:
+                id: campusmate-web
+                version: 1.0.0
+                platform: web
+              capabilities:
+                - full_thinking
+        - name: 恢复 Chat
+          payload:
+            type: req
+            id: connect-resume-1
+            method: connect
+            params:
+              mode: resume
+              min_protocol: 2
+              max_protocol: 2
+              chat_id: chat_011CZy2QmR7vTf4KpN8sLxWd
+              client:
+                id: campusmate-web
+                version: 1.0.0
+                platform: web
+        - name: 发送文本和附件
+          payload:
+            type: req
+            id: req-2
+            method: chat.send
+            params:
+              message: 分析附件中的订单数据
+              attachment_ids:
+                - attachment_011CZm8VpK4rNs6WtY2hDqfB
+              idempotency_key: 6f46bc26-8a14-4d63-b7b1-8f1f933a0d50
+    ServerResponseFrame:
+      name: ServerResponseFrame
+      title: 公共命令响应 Frame
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/AnyResponseFrame'
+      examples:
+        - name: 创建 Chat 成功
+          payload:
+            type: res
+            id: connect-create-1
+            ok: true
+            payload:
+              protocol: 2
+              connection_id: conn-public-01
+              connection_generation: 1
+              chat_id: chat_011CZy2QmR7vTf4KpN8sLxWd
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              model:
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+                name: Model A
+                reasoning: true
+                input:
+                  modalities: [text, image, document]
+                  attachment_media_types: [image/png, image/jpeg, application/pdf, text/plain]
+                  max_attachments: 10
+                  max_attachment_bytes: 20971520
+                  max_total_attachment_bytes: 52428800
+              chat:
+                state: idle
+                thinking: hidden
+              limits:
+                max_message_bytes: 1048576
+                max_connection_buffer_bytes: 4194304
+                heartbeat_seconds: 20
+                pong_timeout_seconds: 10
+                connect_timeout_seconds: 5
+              features:
+                methods: [chat.send, chat.steer, chat.abort, chat.history, chat.get, models.list, model.set, thinking.set]
+                events: [run.started, message.started, message.updated, tool.started, tool.updated, tool.completed, message.completed, run.completed]
+                capabilities: []
+              active_run: null
+        - name: Chat 数量达到上限
+          payload:
+            type: res
+            id: connect-create-2
+            ok: false
+            error:
+              code: CHAT_LIMIT_EXCEEDED
+              message: 当前用户的未删除 Chat 数量已达到 50。
+              retryable: false
+        - name: Runtime 暂时不可用
+          payload:
+            type: res
+            id: connect-create-3
+            ok: false
+            error:
+              code: RUNTIME_UNAVAILABLE
+              message: Runtime Session 暂时无法创建。
+              retryable: true
+              retry_after_ms: 1000
+    ServerEventFrame:
+      name: ServerEventFrame
+      title: 公共有序 Chat 事件 Frame
+      payload:
+        $ref: '#/components/schemas/AnyEventFrame'
+      examples:
+        - name: 文本增量
+          payload:
+            type: event
+            event: message.updated
+            seq: 3
+            payload:
+              chat_id: chat_011CZy2QmR7vTf4KpN8sLxWd
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              run_id: run-01
+              message_id: message-01
+              run_seq: 3
+              content_index: 0
+              timestamp: '2026-08-04T08:00:01Z'
+              update:
+                type: text_delta
+                delta: 订单已发货
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    ChatId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: |
+        mate-service 在 create 成功时生成的、不透明且不可复用的公共 Chat 标识。
+        客户端用它恢复和管理业务 Chat，不得据此推导 Runtime 标识或路由位置。
+      example: chat_011CZy2QmR7vTf4KpN8sLxWd
+    ConnectionId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+      description: mate-service 为当前公共物理连接生成；重连后变化，只用于观测。
+    AgentId:
+      type: string
+      minLength: 30
+      maxLength: 30
+      pattern: '^agent_[0-9A-Za-z]{24}$'
+      example: agent_011CZkYqphY8vELVzwCUpqiQ
+      description: Agent 元数据服务签发的大小写敏感、不透明资源 ID。
+    ModelId:
+      type: string
+      minLength: 30
+      maxLength: 30
+      pattern: '^model_[0-9A-Za-z]{24}$'
+      example: model_011CZq2GkV8aD4NwP7sLmXfR
+      description: model-service 签发的大小写敏感、不透明 CampusModel 资源 ID。
+    MessageId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+    RunId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+    ToolCallId:
+      allOf:
+        - $ref: '#/components/schemas/Identifier'
+    AttachmentId:
+      type: string
+      minLength: 35
+      maxLength: 35
+      pattern: '^attachment_[0-9A-Za-z]{24}$'
+      example: attachment_011CZm8VpK4rNs6WtY2hDqfB
+    RequestId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      description: 调用方生成，在当前公共物理连接的整个生命周期内唯一。
+    Traceparent:
+      type: string
+      minLength: 55
+      maxLength: 128
+      pattern: '^(?!ff-)[0-9a-f]{2}-(?!00000000000000000000000000000000-)[0-9a-f]{32}-(?!0000000000000000-)[0-9a-f]{16}-[0-9a-f]{2}(?:-.+)?$'
+      description: |
+        可选 W3C Trace Context traceparent。mate-service 必须使用标准解析器校验，
+        并为内部 Runtime 请求创建子 span；不得写入 Prompt、Chat 业务字段、
+        Runtime 历史或普通凭据日志。
+    IdempotencyKey:
+      type: string
+      minLength: 8
+      maxLength: 128
+      description: |
+        副作用操作的业务幂等键。重连重试使用新的 RequestFrame.id 和原键；
+        connect create 的作用域是认证用户 + connect，其他命令的作用域是
+        认证用户 + chat_id + method。公共/内部 RequestFrame.id、traceparent、
+        connection_id、连接代次和 seq 均不参与业务负载等价比较。
+        同 key 同规范化负载返回原结果；同 key 不同负载返回
+        IDEMPOTENCY_CONFLICT。
+    Timestamp:
+      type: string
+      format: date-time
+    ThinkingLevel:
+      type: string
+      enum: [hidden, full]
+      description: reasoning content 可见性；full 需要有效 full_thinking capability。
+    ClientInfo:
+      type: object
+      additionalProperties: false
+      required: [id, version, platform]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        platform:
+          type: string
+          enum: [web, ios, android, desktop, sdk, service]
+    ClientCapabilities:
+      type: array
+      uniqueItems: true
+      default: []
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+      x-known-capabilities: [full_thinking]
+      description: 未知值被忽略且不回显；typed delta 是协议 2 基线，不是 capability。
+    CreateConnectParams:
+      type: object
+      additionalProperties: false
+      required: [mode, min_protocol, max_protocol, agent_id, model_id, idempotency_key, client]
+      properties:
+        mode:
+          const: create
+        min_protocol:
+          type: integer
+          minimum: 1
+        max_protocol:
+          type: integer
+          minimum: 1
+        agent_id:
+          $ref: '#/components/schemas/AgentId'
+        model_id:
+          $ref: '#/components/schemas/ModelId'
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+        client:
+          $ref: '#/components/schemas/ClientInfo'
+        capabilities:
+          $ref: '#/components/schemas/ClientCapabilities'
+      description: |
+        create 不接受 chat_id；Chat 和 Runtime 标识均由服务端生成。
+        相同认证用户、幂等键和等价 Agent/Model 负载返回同一创建结果；
+        同键不同负载返回 IDEMPOTENCY_CONFLICT。min_protocol 不得大于 max_protocol。
+    ResumeConnectParams:
+      type: object
+      additionalProperties: false
+      required: [mode, min_protocol, max_protocol, chat_id, client]
+      properties:
+        mode:
+          const: resume
+        min_protocol:
+          type: integer
+          minimum: 1
+        max_protocol:
+          type: integer
+          minimum: 1
+        chat_id:
+          $ref: '#/components/schemas/ChatId'
+        client:
+          $ref: '#/components/schemas/ClientInfo'
+        capabilities:
+          $ref: '#/components/schemas/ClientCapabilities'
+      description: |
+        resume 只按认证用户 + chat_id 恢复。Agent、Model 和 Runtime 绑定均从
+        mate-service 权威记录读取；任何额外的 agent_id、model_id 或私有
+        Runtime 标识都会因封闭 Schema 被拒绝。
+    ConnectParams:
+      oneOf:
+        - $ref: '#/components/schemas/CreateConnectParams'
+        - $ref: '#/components/schemas/ResumeConnectParams'
+    ConnectRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type:
+          const: req
+        id:
+          $ref: '#/components/schemas/RequestId'
+        traceparent:
+          $ref: '#/components/schemas/Traceparent'
+        method:
+          const: connect
+        params:
+          $ref: '#/components/schemas/ConnectParams'
+      description: 101 后五秒内唯一合法的首个应用 Frame。
+    ChatSendParams:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key]
+      properties:
+        message:
+          type: string
+          maxLength: 262144
+        attachment_ids:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          default: []
+          items:
+            $ref: '#/components/schemas/AttachmentId'
+        idempotency_key:
+          $ref: '#/components/schemas/IdempotencyKey'
+        thinking:
+          $ref: '#/components/schemas/ThinkingLevel'
+      anyOf:
+        - required: [message]
+          properties:
+            message:
+              minLength: 1
+        - required: [attachment_ids]
+          properties:
+            attachment_ids:
+              minItems: 1
+      description: |
+        允许纯文本、纯附件或文本加附件；两者不能同时为空。附件顺序参与幂等
+        比较和历史投影。纯附件请求不会获得隐藏默认 Prompt。规范化
+        幂等负载是 message、有序 attachment_ids 和 thinking 的省略状态/值：
+        message 省略与空字符串等价，attachment_ids 省略与空数组等价，
+        thinking 省略与显式值不等价。接受前失败不占用幂等键。
+    ChatSendRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: chat.send}
+        params: {$ref: '#/components/schemas/ChatSendParams'}
+    ChatSteerParams:
+      type: object
+      additionalProperties: false
+      required: [run_id, message, idempotency_key]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        message:
+          type: string
+          minLength: 1
+          maxLength: 262144
+        idempotency_key: {$ref: '#/components/schemas/IdempotencyKey'}
+      description: |
+        v1 只接受文本；附件必须在当前 run 结束后通过新的 chat.send 提交。
+        规范化幂等负载是 run_id + message；接受前失败不占用幂等键。
+    ChatSteerRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: chat.steer}
+        params: {$ref: '#/components/schemas/ChatSteerParams'}
+    ChatAbortParams:
+      type: object
+      additionalProperties: false
+      required: [run_id, idempotency_key]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        idempotency_key: {$ref: '#/components/schemas/IdempotencyKey'}
+      description: |
+        规范化幂等负载只包含 run_id；接受前失败不占用幂等键。
+    ChatAbortRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: chat.abort}
+        params: {$ref: '#/components/schemas/ChatAbortParams'}
+    ChatHistoryFirstPageParams:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        run_id: {$ref: '#/components/schemas/RunId'}
+        through_history_seq:
+          type: integer
+          minimum: 0
+    ChatHistoryCursorParams:
+      type: object
+      additionalProperties: false
+      required: [cursor]
+      properties:
+        cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+    ChatHistoryParams:
+      oneOf:
+        - $ref: '#/components/schemas/ChatHistoryFirstPageParams'
+        - $ref: '#/components/schemas/ChatHistoryCursorParams'
+    ChatHistoryRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: chat.history}
+        params: {$ref: '#/components/schemas/ChatHistoryParams'}
+    ChatGetRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: chat.get}
+    ModelsListRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: models.list}
+    ModelSetParams:
+      type: object
+      additionalProperties: false
+      required: [model_id]
+      properties:
+        model_id: {$ref: '#/components/schemas/ModelId'}
+    ModelSetRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: model.set}
+        params: {$ref: '#/components/schemas/ModelSetParams'}
+    ThinkingSetParams:
+      type: object
+      additionalProperties: false
+      required: [level]
+      properties:
+        level: {$ref: '#/components/schemas/ThinkingLevel'}
+    ThinkingSetRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id, method, params]
+      properties:
+        type: {const: req}
+        id: {$ref: '#/components/schemas/RequestId'}
+        traceparent: {$ref: '#/components/schemas/Traceparent'}
+        method: {const: thinking.set}
+        params: {$ref: '#/components/schemas/ThinkingSetParams'}
+    AnyRequestFrame:
+      oneOf:
+        - $ref: '#/components/schemas/ConnectRequest'
+        - $ref: '#/components/schemas/ChatSendRequest'
+        - $ref: '#/components/schemas/ChatSteerRequest'
+        - $ref: '#/components/schemas/ChatAbortRequest'
+        - $ref: '#/components/schemas/ChatHistoryRequest'
+        - $ref: '#/components/schemas/ChatGetRequest'
+        - $ref: '#/components/schemas/ModelsListRequest'
+        - $ref: '#/components/schemas/ModelSetRequest'
+        - $ref: '#/components/schemas/ThinkingSetRequest'
+    ModelInputPolicy:
+      type: object
+      additionalProperties: false
+      required: [modalities, attachment_media_types, max_attachments, max_attachment_bytes, max_total_attachment_bytes]
+      properties:
+        modalities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          contains: {const: text}
+          items:
+            type: string
+            enum: [text, image, document]
+        attachment_media_types:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 127
+        max_attachments:
+          type: integer
+          minimum: 0
+          maximum: 32
+        max_attachment_bytes:
+          type: integer
+          minimum: 0
+        max_total_attachment_bytes:
+          type: integer
+          minimum: 0
+    ModelSummary:
+      type: object
+      additionalProperties: false
+      required: [model_id, name, input]
+      properties:
+        model_id: {$ref: '#/components/schemas/ModelId'}
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        reasoning: {type: boolean}
+        context_window:
+          type: integer
+          minimum: 1
+        max_output_tokens:
+          type: integer
+          minimum: 1
+        input: {$ref: '#/components/schemas/ModelInputPolicy'}
+    ChatSummary:
+      type: object
+      additionalProperties: false
+      required: [state, thinking]
+      properties:
+        state:
+          type: string
+          enum: [idle, running]
+        thinking: {$ref: '#/components/schemas/ThinkingLevel'}
+    ConnectionLimits:
+      type: object
+      additionalProperties: false
+      required: [max_message_bytes, max_connection_buffer_bytes, heartbeat_seconds, pong_timeout_seconds, connect_timeout_seconds]
+      properties:
+        max_message_bytes:
+          type: integer
+          minimum: 1024
+          default: 1048576
+        max_connection_buffer_bytes:
+          type: integer
+          minimum: 1024
+          default: 4194304
+        heartbeat_seconds:
+          type: integer
+          minimum: 1
+          default: 20
+        pong_timeout_seconds:
+          type: integer
+          minimum: 1
+          default: 10
+        connect_timeout_seconds:
+          type: integer
+          minimum: 1
+          default: 5
+    NegotiatedMethods:
+      type: array
+      minItems: 8
+      maxItems: 8
+      uniqueItems: true
+      items:
+        type: string
+        enum: [chat.send, chat.steer, chat.abort, chat.history, chat.get, models.list, model.set, thinking.set]
+      description: 稳定按枚举顺序返回完整公共方法集；发现结果不替代逐请求授权和状态校验。
+    NegotiatedEvents:
+      type: array
+      minItems: 8
+      maxItems: 8
+      uniqueItems: true
+      items:
+        type: string
+        enum: [run.started, message.started, message.updated, tool.started, tool.updated, tool.completed, message.completed, run.completed]
+      description: |
+        稳定按枚举顺序返回 Agent Channel 支持的完整 run 事件集；
+        这是协议发现列表，不表示每个请求都会产生全部事件。
+    EffectiveCapabilities:
+      type: array
+      uniqueItems: true
+      items:
+        type: string
+        enum: [full_thinking]
+    NegotiatedFeatures:
+      type: object
+      additionalProperties: false
+      required: [methods, events, capabilities]
+      properties:
+        methods: {$ref: '#/components/schemas/NegotiatedMethods'}
+        events: {$ref: '#/components/schemas/NegotiatedEvents'}
+        capabilities: {$ref: '#/components/schemas/EffectiveCapabilities'}
+    TextContent:
+      type: object
+      additionalProperties: false
+      required: [type, text]
+      properties:
+        type: {const: text}
+        text: {type: string, minLength: 1}
+    ThinkingContent:
+      type: object
+      additionalProperties: false
+      required: [type, disclosure]
+      properties:
+        type: {const: thinking}
+        disclosure: {type: string, enum: [hidden, full]}
+        text: {type: string, minLength: 1}
+      allOf:
+        - if:
+            properties:
+              disclosure: {const: hidden}
+          then:
+            not:
+              required: [text]
+        - if:
+            properties:
+              disclosure: {const: full}
+          then:
+            required: [text]
+    SafeJsonScalar:
+      oneOf:
+        - type: string
+          maxLength: 65536
+          x-maxUtf8Bytes: 65536
+        - type: number
+        - type: boolean
+        - type: 'null'
+    SafeJsonLeafContainer:
+      oneOf:
+        - $ref: '#/components/schemas/SafeJsonScalar'
+        - type: array
+          maxItems: 128
+          items: {$ref: '#/components/schemas/SafeJsonScalar'}
+        - type: object
+          maxProperties: 128
+          propertyNames: {maxLength: 128}
+          additionalProperties: {$ref: '#/components/schemas/SafeJsonScalar'}
+      description: 最多一层容器；容器成员只能是有界标量。
+    SafeJsonValue:
+      oneOf:
+        - $ref: '#/components/schemas/SafeJsonScalar'
+        - type: array
+          maxItems: 128
+          items: {$ref: '#/components/schemas/SafeJsonLeafContainer'}
+        - type: object
+          maxProperties: 128
+          propertyNames: {maxLength: 128}
+          additionalProperties: {$ref: '#/components/schemas/SafeJsonLeafContainer'}
+      description: |
+        Tool 业务值的有界 JSON 投影。最多两层容器；规范化 JSON 的 UTF-8
+        大小还必须在序列化前单独校验，不能只依赖字符数和属性数。
+      x-maxDepth: 2
+      x-maxSerializedBytes: 524288
+    SafeJsonObject:
+      type: object
+      maxProperties: 128
+      propertyNames: {maxLength: 128}
+      additionalProperties: {$ref: '#/components/schemas/SafeJsonLeafContainer'}
+      description: Tool parameters 的有界 JSON object 投影。
+      x-maxDepth: 2
+      x-maxSerializedBytes: 524288
+    CompleteToolValueProjection:
+      type: object
+      additionalProperties: false
+      required: [truncated, value]
+      properties:
+        truncated: {const: false}
+        value: {$ref: '#/components/schemas/SafeJsonValue'}
+    CompleteToolParametersProjection:
+      type: object
+      additionalProperties: false
+      required: [truncated, value]
+      properties:
+        truncated: {const: false}
+        value: {$ref: '#/components/schemas/SafeJsonObject'}
+    ToolResultRef:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: |
+        mate-service 投影的不透明引用，v1 不提供读取接口。客户端只能
+        原样保存用于客服或审计关联，不得解析或当作下载 URL。
+    TruncatedToolValueProjection:
+      type: object
+      additionalProperties: false
+      required: [truncated, preview, original_size_bytes, result_ref]
+      properties:
+        truncated: {const: true}
+        preview:
+          type: string
+          maxLength: 65536
+          x-maxUtf8Bytes: 65536
+        original_size_bytes: {type: integer, minimum: 1, maximum: 9007199254740991}
+        result_ref: {$ref: '#/components/schemas/ToolResultRef'}
+      description: 超限完整值已经安全持久化；公共协议只返回预览和不透明引用。
+    ToolValueProjection:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteToolValueProjection'
+        - $ref: '#/components/schemas/TruncatedToolValueProjection'
+      description: 脱敏业务值；超限时只返回有界预览和不可读取的不透明引用。
+    ToolParametersProjection:
+      oneOf:
+        - $ref: '#/components/schemas/CompleteToolParametersProjection'
+        - $ref: '#/components/schemas/TruncatedToolValueProjection'
+      description: Tool parameters 必须是完整的有界 JSON object 或截断投影。
+    ToolCallContent:
+      type: object
+      additionalProperties: false
+      required: [type, tool_call_id, tool_id, arguments]
+      properties:
+        type: {const: tool_call}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, maxLength: 256}
+        arguments: {$ref: '#/components/schemas/ToolParametersProjection'}
+    ToolResultContent:
+      type: object
+      additionalProperties: false
+      required: [type, tool_call_id, status]
+      properties:
+        type: {const: tool_result}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        status: {type: string, enum: [done, error, aborted]}
+        result: {$ref: '#/components/schemas/ToolValueProjection'}
+        error: {$ref: '#/components/schemas/Error'}
+      allOf:
+        - if:
+            properties:
+              status: {const: done}
+            required: [status]
+          then:
+            required: [result]
+            not:
+              required: [error]
+        - if:
+            properties:
+              status: {const: error}
+            required: [status]
+          then:
+            required: [error]
+            not:
+              required: [result]
+        - if:
+            properties:
+              status: {const: aborted}
+            required: [status]
+          then:
+            not:
+              anyOf:
+                - required: [result]
+                - required: [error]
+    AttachmentContent:
+      type: object
+      additionalProperties: false
+      required: [type, attachment_id, filename, media_type, size_bytes, sha256]
+      properties:
+        type: {const: attachment}
+        attachment_id: {$ref: '#/components/schemas/AttachmentId'}
+        filename: {type: string, minLength: 1, maxLength: 512}
+        media_type: {type: string, minLength: 3, maxLength: 127}
+        size_bytes: {type: integer, minimum: 1, maximum: 20971520}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+    ProjectedMessage:
+      type: object
+      additionalProperties: false
+      description: |
+        mate-service 向 UI 投影的权威 Message。User Message 只能是文本、
+        附件，或第一项文本后跟有序附件；Assistant 不得含附件或
+        ToolResultContent；Tool Message 只能含一个 ToolResultContent。
+      required: [message_id, role, status, content, created_at]
+      properties:
+        message_id: {$ref: '#/components/schemas/MessageId'}
+        role: {type: string, enum: [user, assistant, tool]}
+        status: {type: string, enum: [streaming, completed, aborted, error, interrupted]}
+        content:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/TextContent'
+              - $ref: '#/components/schemas/ThinkingContent'
+              - $ref: '#/components/schemas/ToolCallContent'
+              - $ref: '#/components/schemas/ToolResultContent'
+              - $ref: '#/components/schemas/AttachmentContent'
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+      allOf:
+        - if:
+            properties:
+              role: {const: user}
+            required: [role]
+          then:
+            required: [completed_at]
+            properties:
+              status: {const: completed}
+              content:
+                oneOf:
+                  - type: array
+                    minItems: 1
+                    maxItems: 1
+                    items:
+                      - $ref: '#/components/schemas/TextContent'
+                    additionalItems: false
+                  - type: array
+                    minItems: 1
+                    maxItems: 32
+                    items: {$ref: '#/components/schemas/AttachmentContent'}
+                  - type: array
+                    minItems: 2
+                    maxItems: 33
+                    items:
+                      - $ref: '#/components/schemas/TextContent'
+                    additionalItems: {$ref: '#/components/schemas/AttachmentContent'}
+        - if:
+            properties:
+              role: {const: assistant}
+            required: [role]
+          then:
+            properties:
+              content:
+                type: array
+                items:
+                  oneOf:
+                    - $ref: '#/components/schemas/TextContent'
+                    - $ref: '#/components/schemas/ThinkingContent'
+                    - $ref: '#/components/schemas/ToolCallContent'
+        - if:
+            properties:
+              role: {const: tool}
+            required: [role]
+          then:
+            required: [completed_at]
+            properties:
+              status: {const: completed}
+              content:
+                type: array
+                minItems: 1
+                maxItems: 1
+                items: {$ref: '#/components/schemas/ToolResultContent'}
+        - if:
+            properties:
+              status: {const: streaming}
+            required: [status]
+          then:
+            properties:
+              role: {const: assistant}
+            not:
+              required: [completed_at]
+          else:
+            required: [completed_at]
+    TerminalProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          required: [completed_at]
+          properties:
+            status:
+              type: string
+              enum: [completed, aborted, error, interrupted]
+      description: message.completed 和 chat.history 使用的终态 Message。
+    StreamingProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          properties:
+            role: {const: assistant}
+            status: {const: streaming}
+          not:
+            required: [completed_at]
+      description: active-run 快照中当前未完成的 Assistant Message。
+    TerminalAssistantProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/TerminalProjectedMessage'
+        - type: object
+          properties:
+            role: {const: assistant}
+      description: message.completed 事件中的完整 Assistant Message。
+    OpenContentState:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: {const: text}
+        - type: object
+          additionalProperties: false
+          required: [type, disclosure]
+          properties:
+            type: {const: thinking}
+            disclosure: {type: string, enum: [hidden, full]}
+        - type: object
+          additionalProperties: false
+          required: [type, tool_call_id, tool_id, arguments_delta]
+          properties:
+            type: {const: tool_call}
+            tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+            tool_id: {$ref: '#/components/schemas/Identifier'}
+            arguments_delta: {type: string, maxLength: 262144}
+    ActiveTool:
+      type: object
+      additionalProperties: false
+      required: [tool_call_id, tool_id, status, parameters]
+      properties:
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string, enum: [starting, running]}
+        parameters: {$ref: '#/components/schemas/ToolParametersProjection'}
+    ActiveRunSnapshot:
+      type: object
+      additionalProperties: false
+      required: [run_id, run_seq, history_seq, model_id, thinking, message_snapshot, open_contents, active_tools]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 0}
+        history_seq: {type: integer, minimum: 0}
+        model_id: {$ref: '#/components/schemas/ModelId'}
+        thinking: {$ref: '#/components/schemas/ThinkingLevel'}
+        message_snapshot:
+          oneOf:
+            - $ref: '#/components/schemas/StreamingProjectedMessage'
+            - type: 'null'
+        open_contents:
+          type: object
+          propertyNames:
+            pattern: '^(0|[1-9][0-9]*)$'
+          additionalProperties:
+            $ref: '#/components/schemas/OpenContentState'
+        active_tools:
+          type: array
+          items: {$ref: '#/components/schemas/ActiveTool'}
+    ConnectResult:
+      type: object
+      additionalProperties: false
+      required: [protocol, connection_id, connection_generation, chat_id, agent_id, model, chat, limits, features, active_run]
+      properties:
+        protocol: {const: 2}
+        connection_id: {$ref: '#/components/schemas/ConnectionId'}
+        connection_generation:
+          type: integer
+          minimum: 1
+          description: mate-service 为同一 Chat 的公共连接分配；不等于内部连接代次。
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        model: {$ref: '#/components/schemas/ModelSummary'}
+        chat: {$ref: '#/components/schemas/ChatSummary'}
+        limits: {$ref: '#/components/schemas/ConnectionLimits'}
+        features: {$ref: '#/components/schemas/NegotiatedFeatures'}
+        active_run:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+      description: |
+        公共 connect 成功响应。不得添加 Runtime Session 标识、内部连接 ID、
+        内部请求 ID、内部 seq 或内部认证字段。响应必须先于当前公共连接的任何
+        EventFrame 写出。
+    ChatSendResult:
+      type: object
+      additionalProperties: false
+      required: [run_id, user_message_id, accepted]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        user_message_id: {$ref: '#/components/schemas/MessageId'}
+        accepted: {const: true}
+    ChatSteerResult:
+      type: object
+      additionalProperties: false
+      required: [run_id, user_message_id, accepted, idempotent]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        user_message_id: {$ref: '#/components/schemas/MessageId'}
+        accepted: {type: boolean}
+        idempotent: {type: boolean}
+    ChatAbortResult:
+      type: object
+      additionalProperties: false
+      required: [run_id, accepted, idempotent]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        accepted: {type: boolean}
+        idempotent: {type: boolean}
+    RunRecord:
+      type: object
+      additionalProperties: false
+      required: [run_id, outcome, completed_at]
+      properties:
+        run_id: {$ref: '#/components/schemas/RunId'}
+        outcome: {type: string, enum: [done, aborted, error, interrupted]}
+        completed_at: {$ref: '#/components/schemas/Timestamp'}
+        usage: {$ref: '#/components/schemas/Usage'}
+        stop_reason: {type: string, maxLength: 256}
+        error: {$ref: '#/components/schemas/RunTerminalError'}
+      allOf:
+        - if:
+            properties:
+              outcome: {const: error}
+            required: [outcome]
+          then:
+            required: [error]
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+        - if:
+            properties:
+              outcome: {const: interrupted}
+            required: [outcome]
+          then:
+            required: [error]
+            properties:
+              error: {$ref: '#/components/schemas/RunInterruptedError'}
+        - if:
+            properties:
+              outcome:
+                enum: [done, aborted]
+            required: [outcome]
+          then:
+            not:
+              required: [error]
+    HistoryMessageItem:
+      type: object
+      additionalProperties: false
+      required: [type, history_seq, run_id, message]
+      properties:
+        type: {const: message}
+        history_seq: {type: integer, minimum: 1}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        message: {$ref: '#/components/schemas/TerminalProjectedMessage'}
+    HistoryRunItem:
+      type: object
+      additionalProperties: false
+      required: [type, history_seq, run]
+      properties:
+        type: {const: run}
+        history_seq: {type: integer, minimum: 1}
+        run: {$ref: '#/components/schemas/RunRecord'}
+    HistoryItem:
+      oneOf:
+        - $ref: '#/components/schemas/HistoryMessageItem'
+        - $ref: '#/components/schemas/HistoryRunItem'
+    HistoryResult:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/HistoryItem'}
+        next_cursor: {type: string, minLength: 1, maxLength: 1024}
+        has_more: {type: boolean}
+    ChatGetResult:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, model, chat, active_run]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        model: {$ref: '#/components/schemas/ModelSummary'}
+        chat: {$ref: '#/components/schemas/ChatSummary'}
+        active_run:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+    ModelsListResult:
+      type: object
+      additionalProperties: false
+      required: [models, effective_model_id]
+      properties:
+        models:
+          type: array
+          items: {$ref: '#/components/schemas/ModelSummary'}
+        effective_model_id: {$ref: '#/components/schemas/ModelId'}
+    ModelSetResult:
+      type: object
+      additionalProperties: false
+      required: [model]
+      properties:
+        model: {$ref: '#/components/schemas/ModelSummary'}
+    ThinkingSetResult:
+      type: object
+      additionalProperties: false
+      required: [thinking]
+      properties:
+        thinking: {$ref: '#/components/schemas/ThinkingLevel'}
+    SuccessPayload:
+      oneOf:
+        - $ref: '#/components/schemas/ConnectResult'
+        - $ref: '#/components/schemas/ChatSendResult'
+        - $ref: '#/components/schemas/ChatSteerResult'
+        - $ref: '#/components/schemas/ChatAbortResult'
+        - $ref: '#/components/schemas/HistoryResult'
+        - $ref: '#/components/schemas/ChatGetResult'
+        - $ref: '#/components/schemas/ModelsListResult'
+        - $ref: '#/components/schemas/ModelSetResult'
+        - $ref: '#/components/schemas/ThinkingSetResult'
+    ErrorCode:
+      type: string
+      minLength: 1
+      maxLength: 128
+      not:
+        const: RUN_INTERRUPTED
+      x-known-values:
+        - INVALID_REQUEST
+        - UNAUTHENTICATED
+        - FORBIDDEN
+        - UNSUPPORTED_PROTOCOL
+        - AGENT_NOT_FOUND
+        - MODEL_REQUIRED
+        - MODEL_NOT_ALLOWED
+        - CHAT_NOT_FOUND
+        - CHAT_LIMIT_EXCEEDED
+        - CHAT_CREATING
+        - CHANNEL_NOT_APPLICABLE
+        - IDEMPOTENCY_CONFLICT
+        - RUN_ACTIVE
+        - RUN_NOT_FOUND
+        - INVALID_ATTACHMENT
+        - ATTACHMENT_NOT_READY
+        - ATTACHMENT_NOT_SUPPORTED
+        - RUNTIME_UNAVAILABLE
+      description: |
+        调用方必须保留未知错误码分支；内部 Session 错误必须映射为公共
+        Chat 或 Runtime 错误。RUN_INTERRUPTED 只能出现在 RunInterruptedError，
+        不是 RequestFrame 请求错误码。
+    SafeErrorDetailScalar:
+      oneOf:
+        - type: string
+          maxLength: 4096
+          x-maxUtf8Bytes: 4096
+        - type: number
+        - type: boolean
+        - type: 'null'
+    SafeErrorDetailValue:
+      oneOf:
+        - $ref: '#/components/schemas/SafeErrorDetailScalar'
+        - type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/SafeErrorDetailScalar'}
+        - type: object
+          maxProperties: 32
+          propertyNames: {maxLength: 128}
+          additionalProperties: {$ref: '#/components/schemas/SafeErrorDetailScalar'}
+      description: 最多一层容器的有界诊断值；容器内不允许继续嵌套。
+      x-maxDepth: 2
+    SafeErrorDetails:
+      type: object
+      maxProperties: 32
+      propertyNames: {maxLength: 128}
+      additionalProperties: {$ref: '#/components/schemas/SafeErrorDetailValue'}
+      description: |
+        只允许有界、脱敏、可操作的诊断字段。规范化 JSON 的 UTF-8 大小
+        不得超过 16384 字节；不得包含凭据、内部 Header、私有 Runtime 标识、
+        堆栈、Prompt、原始 thinking 或执行器秘密。无法安全投影时应省略。
+      x-maxSerializedBytes: 16384
+      x-maxDepth: 2
+      x-maxStringUtf8Bytes: 4096
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {$ref: '#/components/schemas/ErrorCode'}
+        message: {type: string, minLength: 1, maxLength: 2048}
+        details: {$ref: '#/components/schemas/SafeErrorDetails'}
+        retryable: {type: boolean, default: false}
+        retry_after_ms: {type: integer, minimum: 0}
+      allOf:
+        - if:
+            required: [retry_after_ms]
+          then:
+            required: [retryable]
+            properties:
+              retryable: {const: true}
+    RunInterruptedError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: {const: RUN_INTERRUPTED}
+        message: {type: string, minLength: 1, maxLength: 2048}
+        details: {$ref: '#/components/schemas/SafeErrorDetails'}
+    RunTerminalError:
+      oneOf:
+        - $ref: '#/components/schemas/Error'
+        - $ref: '#/components/schemas/RunInterruptedError'
+    SuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required: [type, id, ok, payload]
+      properties:
+        type: {const: res}
+        id: {$ref: '#/components/schemas/RequestId'}
+        ok: {const: true}
+        payload: {$ref: '#/components/schemas/SuccessPayload'}
+    ErrorResponseFrame:
+      type: object
+      additionalProperties: false
+      required: [type, id, ok, error]
+      properties:
+        type: {const: res}
+        id: {$ref: '#/components/schemas/RequestId'}
+        ok: {const: false}
+        error: {$ref: '#/components/schemas/Error'}
+    AnyResponseFrame:
+      oneOf:
+        - $ref: '#/components/schemas/SuccessResponseFrame'
+        - $ref: '#/components/schemas/ErrorResponseFrame'
+    EventBaseProperties:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+    RunStartedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp, model_id, thinking]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        model_id: {$ref: '#/components/schemas/ModelId'}
+        thinking: {$ref: '#/components/schemas/ThinkingLevel'}
+    MessageStartedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, message_id, run_seq, timestamp, role]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        message_id: {$ref: '#/components/schemas/MessageId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        role: {const: assistant}
+    TextStartUpdate:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: {const: text_start}
+    TextDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, delta]
+      properties:
+        type: {const: text_delta}
+        delta: {type: string, minLength: 1}
+    TextEndUpdate:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: {const: text_end}
+    ThinkingStartUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, disclosure]
+      properties:
+        type: {const: thinking_start}
+        disclosure: {type: string, enum: [hidden, full]}
+    ThinkingDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, delta]
+      properties:
+        type: {const: thinking_delta}
+        delta: {type: string, minLength: 1}
+    ThinkingRedactedUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, redacted_type]
+      properties:
+        type: {const: thinking_redacted}
+        redacted_type: {const: delta}
+    ThinkingEndUpdate:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: {const: thinking_end}
+    ToolCallStartUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, tool_call_id, tool_id]
+      properties:
+        type: {const: toolcall_start}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        name: {type: string, maxLength: 256}
+    ToolCallDeltaUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, tool_call_id, delta]
+      properties:
+        type: {const: toolcall_delta}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        delta: {type: string, minLength: 1, maxLength: 262144}
+    ToolCallEndUpdate:
+      type: object
+      additionalProperties: false
+      required: [type, tool_call_id, arguments]
+      properties:
+        type: {const: toolcall_end}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        arguments: {$ref: '#/components/schemas/ToolParametersProjection'}
+    AssistantMessageUpdate:
+      oneOf:
+        - $ref: '#/components/schemas/TextStartUpdate'
+        - $ref: '#/components/schemas/TextDeltaUpdate'
+        - $ref: '#/components/schemas/TextEndUpdate'
+        - $ref: '#/components/schemas/ThinkingStartUpdate'
+        - $ref: '#/components/schemas/ThinkingDeltaUpdate'
+        - $ref: '#/components/schemas/ThinkingRedactedUpdate'
+        - $ref: '#/components/schemas/ThinkingEndUpdate'
+        - $ref: '#/components/schemas/ToolCallStartUpdate'
+        - $ref: '#/components/schemas/ToolCallDeltaUpdate'
+        - $ref: '#/components/schemas/ToolCallEndUpdate'
+    MessageUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, message_id, run_seq, content_index, timestamp, update]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        message_id: {$ref: '#/components/schemas/MessageId'}
+        run_seq: {type: integer, minimum: 1}
+        content_index: {type: integer, minimum: 0}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        update: {$ref: '#/components/schemas/AssistantMessageUpdate'}
+    ToolStartedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp, tool_call_id, tool_id, parameters]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        parameters: {$ref: '#/components/schemas/ToolParametersProjection'}
+    ToolUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp, tool_call_id, tool_id, update]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        update:
+          type: object
+          minProperties: 1
+          maxProperties: 3
+          additionalProperties: false
+          properties:
+            message: {type: string, maxLength: 4096}
+            progress: {type: number, minimum: 0, maximum: 1}
+            data: {$ref: '#/components/schemas/ToolValueProjection'}
+    ToolCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp, tool_call_id, tool_id, status]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        tool_call_id: {$ref: '#/components/schemas/ToolCallId'}
+        tool_id: {$ref: '#/components/schemas/Identifier'}
+        status: {type: string, enum: [done, error, aborted]}
+        result: {$ref: '#/components/schemas/ToolValueProjection'}
+        error: {$ref: '#/components/schemas/Error'}
+      allOf:
+        - if:
+            properties:
+              status: {const: done}
+            required: [status]
+          then:
+            required: [result]
+            not:
+              required: [error]
+        - if:
+            properties:
+              status: {const: error}
+            required: [status]
+          then:
+            required: [error]
+            not:
+              required: [result]
+        - if:
+            properties:
+              status: {const: aborted}
+            required: [status]
+          then:
+            not:
+              anyOf:
+                - required: [result]
+                - required: [error]
+    MessageCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, message_id, run_seq, timestamp, message]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        message_id: {$ref: '#/components/schemas/MessageId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        message: {$ref: '#/components/schemas/TerminalAssistantProjectedMessage'}
+    Usage:
+      type: object
+      additionalProperties: false
+      properties:
+        input_tokens: {type: integer, minimum: 0}
+        output_tokens: {type: integer, minimum: 0}
+        cached_input_tokens: {type: integer, minimum: 0}
+        total_tokens: {type: integer, minimum: 0}
+    RunCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [chat_id, agent_id, run_id, run_seq, timestamp, outcome]
+      properties:
+        chat_id: {$ref: '#/components/schemas/ChatId'}
+        agent_id: {$ref: '#/components/schemas/AgentId'}
+        run_id: {$ref: '#/components/schemas/RunId'}
+        run_seq: {type: integer, minimum: 1}
+        timestamp: {$ref: '#/components/schemas/Timestamp'}
+        outcome: {type: string, enum: [done, aborted, error, interrupted]}
+        usage: {$ref: '#/components/schemas/Usage'}
+        stop_reason: {type: string, maxLength: 256}
+        error: {$ref: '#/components/schemas/RunTerminalError'}
+      allOf:
+        - if:
+            properties:
+              outcome: {const: error}
+            required: [outcome]
+          then:
+            required: [error]
+            properties:
+              error: {$ref: '#/components/schemas/Error'}
+        - if:
+            properties:
+              outcome: {const: interrupted}
+            required: [outcome]
+          then:
+            required: [error]
+            properties:
+              error: {$ref: '#/components/schemas/RunInterruptedError'}
+        - if:
+            properties:
+              outcome:
+                enum: [done, aborted]
+            required: [outcome]
+          then:
+            not:
+              required: [error]
+    RunStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: run.started}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/RunStartedPayload'}
+    MessageStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: message.started}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/MessageStartedPayload'}
+    MessageUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: message.updated}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/MessageUpdatedPayload'}
+    ToolStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: tool.started}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/ToolStartedPayload'}
+    ToolUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: tool.updated}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/ToolUpdatedPayload'}
+    ToolCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: tool.completed}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/ToolCompletedPayload'}
+    MessageCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: message.completed}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/MessageCompletedPayload'}
+    RunCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [type, event, seq, payload]
+      properties:
+        type: {const: event}
+        event: {const: run.completed}
+        seq: {type: integer, minimum: 1}
+        payload: {$ref: '#/components/schemas/RunCompletedPayload'}
+    AnyEventFrame:
+      oneOf:
+        - $ref: '#/components/schemas/RunStartedEvent'
+        - $ref: '#/components/schemas/MessageStartedEvent'
+        - $ref: '#/components/schemas/MessageUpdatedEvent'
+        - $ref: '#/components/schemas/ToolStartedEvent'
+        - $ref: '#/components/schemas/ToolUpdatedEvent'
+        - $ref: '#/components/schemas/ToolCompletedEvent'
+        - $ref: '#/components/schemas/MessageCompletedEvent'
+        - $ref: '#/components/schemas/RunCompletedEvent'
+      description: |
+        这是 Agent Channel 支持的 Runtime run 事件集，不表示每个请求都会
+        产生全部事件。在接受前返回 CHANNEL_NOT_APPLICABLE 的请求不产生
+        run/message/tool 事件。
+        seq 是 mate-service 当前公共连接级序列，从 1 开始并在重连后重置；
+        run_seq 是业务 run 序列，跨公共和内部重连连续。重复、倒退或缺口必须
+        触发 resume，不得猜测缺失文本。hidden thinking 使用
+        thinking_redacted 占位以保持 run_seq 连续。
+x-method-contracts:
+  description: RequestFrame.id 关联 method 与成功 payload；客户端不得根据 payload 形状猜测类型。
+  connect:
+    requestSchema: '#/components/schemas/ConnectRequest'
+    successPayloadSchema: '#/components/schemas/ConnectResult'
+    errors: [INVALID_REQUEST, UNAUTHENTICATED, FORBIDDEN, UNSUPPORTED_PROTOCOL, AGENT_NOT_FOUND, MODEL_REQUIRED, MODEL_NOT_ALLOWED, CHAT_NOT_FOUND, CHAT_LIMIT_EXCEEDED, CHAT_CREATING, IDEMPOTENCY_CONFLICT, RUNTIME_UNAVAILABLE]
+  chat.send:
+    requestSchema: '#/components/schemas/ChatSendRequest'
+    successPayloadSchema: '#/components/schemas/ChatSendResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, CHANNEL_NOT_APPLICABLE, IDEMPOTENCY_CONFLICT, RUN_ACTIVE, INVALID_ATTACHMENT, ATTACHMENT_NOT_READY, ATTACHMENT_NOT_SUPPORTED, RUNTIME_UNAVAILABLE]
+  chat.steer:
+    requestSchema: '#/components/schemas/ChatSteerRequest'
+    successPayloadSchema: '#/components/schemas/ChatSteerResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, IDEMPOTENCY_CONFLICT, RUN_NOT_FOUND, RUNTIME_UNAVAILABLE]
+  chat.abort:
+    requestSchema: '#/components/schemas/ChatAbortRequest'
+    successPayloadSchema: '#/components/schemas/ChatAbortResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, IDEMPOTENCY_CONFLICT, RUN_NOT_FOUND, RUNTIME_UNAVAILABLE]
+  chat.history:
+    requestSchema: '#/components/schemas/ChatHistoryRequest'
+    successPayloadSchema: '#/components/schemas/HistoryResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, CHAT_NOT_FOUND, CHAT_CREATING, RUNTIME_UNAVAILABLE]
+  chat.get:
+    requestSchema: '#/components/schemas/ChatGetRequest'
+    successPayloadSchema: '#/components/schemas/ChatGetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, CHAT_NOT_FOUND, CHAT_CREATING, RUNTIME_UNAVAILABLE]
+  models.list:
+    requestSchema: '#/components/schemas/ModelsListRequest'
+    successPayloadSchema: '#/components/schemas/ModelsListResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUNTIME_UNAVAILABLE]
+  model.set:
+    requestSchema: '#/components/schemas/ModelSetRequest'
+    successPayloadSchema: '#/components/schemas/ModelSetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, MODEL_NOT_ALLOWED, ATTACHMENT_NOT_SUPPORTED, RUNTIME_UNAVAILABLE]
+  thinking.set:
+    requestSchema: '#/components/schemas/ThinkingSetRequest'
+    successPayloadSchema: '#/components/schemas/ThinkingSetResult'
+    errors: [INVALID_REQUEST, FORBIDDEN, RUN_ACTIVE, RUNTIME_UNAVAILABLE]
+x-connect-create-orchestration:
+  targetOnly: true
+  maximumNonDeletedChatsPerUser: 50
+  steps:
+    - order: 1
+      owner: mate-service
+      action: 从 Upgrade 认证上下文取得用户身份
+    - order: 2
+      owner: mate-service
+      action: 检查协议版本和封闭 Frame Schema
+    - order: 3
+      owner: mate-service
+      action: 查询 connect 幂等结果
+    - order: 4
+      owner: mate-service
+      action: 检查用户未删除 Chat 数量小于 50
+    - order: 5
+      owner: mate-service
+      action: 校验 agent_id 可用且用户有权使用
+    - order: 6
+      owner: mate-service
+      action: 校验 model_id 属于该 Agent 的允许集合
+    - order: 7
+      owner: mate-service
+      action: 生成 chat_id
+    - order: 8
+      owner: mate-service
+      action: 生成私有 Runtime Session 标识
+    - order: 9
+      owner: mate-service
+      action: 持久化 CREATING Chat 与私有映射
+    - order: 10
+      owner: mate-service
+      action: 建立到 agent-service 的内部 WebSocket
+    - order: 11
+      owner: mate-service
+      action: 发送 internal connect(mode=create) 与私有 Runtime 绑定
+    - order: 12
+      owner: agent-service
+      action: 创建 Runtime Session 并返回内部成功响应
+    - order: 13
+      owner: mate-service
+      action: 原子标记 Chat ACTIVE、保存幂等结果并返回公共 connect 成功响应
+  description: |
+    步骤 13 之前不得向公共客户端返回成功。步骤 3 命中已完成的等价结果时
+    直接返回同一 chat_id；命中处理中记录时返回 CHAT_CREATING 或等待有界时间。
+    内部创建失败不得暴露私有标识，返回 RUNTIME_UNAVAILABLE，并由同一幂等键
+    的后续重试继续对账或补偿。
+x-hop-boundary:
+  publicOwner: mate-service
+  internalOwner: agent-service
+  publicChatIdentifier: chat_id
+  privateRuntimeIdentifierExposed: false
+  hopLocalFields:
+    - connection_id
+    - connection_generation
+    - RequestFrame.id
+    - EventFrame.seq
+    - authentication context
+    - Ping/Pong
+    - flow-control buffer
+  bridgeableBusinessFields:
+    - idempotency_key
+    - run_id
+    - message_id
+    - run_seq
+    - trace context propagated as a child span
+  description: |
+    mate-service 必须解析公共 Frame、执行用户与 Chat 授权、运行安全护栏和会话
+    编排。该 WebSocket 固定为 Agent Channel：通过前置检查并被接受的 chat.send
+    必须构造内部 RequestFrame；非 Agent 分支在接受前返回公共错误，不生成 run。
+    内部 Response/Event 也必须先校验、映射错误。内部
+    MANAGER_AUTH_FAILED 和 MANAGER_UNAVAILABLE 对公共调用方统一投影为
+    脱敏的 RUNTIME_UNAVAILABLE，不披露 Manager 类型或上游响应。
+    移除私有字段并重建公共 Frame。禁止把两个 WebSocket 当成一条透明隧道；
+    两跳的连接 ID、请求 ID、seq、generation、认证、心跳和背压互不复用。
+x-delivery-ordering:
+  stateChangingSuccessResponseBeforeCausalEvent: true
+  description: |
+    本顺序约束只适用于已被 agent-service 接受的 Runtime 分支。
+    CHANNEL_NOT_APPLICABLE 在接受前返回，不保存公共 Chat Message、
+    不分配 run_id/user_message_id，也不触发因果事件。
+    mate-service 只有在内部命令被接受并把公共幂等结果持久化后，才写出公共成功
+    ResponseFrame；该 ResponseFrame 必须先于由此命令触发的公共 EventFrame。
+    如果内部事件先到，Bridge 先按有界缓冲暂存；成功 Response 写出后再按序释放。
+    响应写出失败不回滚已接受操作，客户端通过幂等键和历史恢复。
+x-bridge-recovery:
+  publicDisconnectAbortsRun: false
+  internalDisconnectAbortsRun: false
+  authoritativeSources:
+    - mate-service Chat record and idempotency result
+    - agent-service Runtime history and active-run snapshot
+  description: |
+    公共连接关闭只解除该 UI 的订阅，不隐式调用 chat.abort。mate-service 可以
+    关闭对应内部连接，但 agent-service 继续持有已接受的 active run。公共
+    resume 只提交 chat_id；mate-service 读取私有映射，建立新的内部 resume，
+    原子取得 active-run 快照和 Runtime 历史水位，再生成新的公共 connect
+    快照。公共 EventFrame.seq 从 1 重新开始，run_seq 跨两跳重连连续。
+
+    内部连接出现 seq/run_seq 缺口时，mate-service 停止向公共连接应用可疑事件，
+    重连内部 Runtime 并用快照、history_seq 和权威历史对账；对账完成前的新事件
+    先缓冲。若暂时无法恢复，公共请求返回 RUNTIME_UNAVAILABLE 或用 1013 关闭
+    当前订阅并要求 resume，不得伪造累计文本或泄漏内部路由信息。没有分布式
+    run owner 时，不承诺跨 agent-service Pod 无缝继续 active run。
+x-websocket:
+  handshake:
+    clientUri: wss://api.example.com/mate-service/v1/ws/chat
+    conceptualHttpTarget: https://api.example.com/mate-service/v1/ws/chat
+    firstApplicationFrame: connect RequestFrame
+    firstFrameTimeoutSeconds: 5
+    successStatus: 101
+    rejectBusinessQueryParameters: true
+    rejectUrlTokens: true
+    authenticateBefore101: true
+    validateOriginBefore101: true
+    description: |
+      调用方使用 wss URI 请求建立安全 WebSocket。客户端库建立 TCP/TLS 后，在
+      同一连接上发送 HTTP opening handshake；HTTP 101 之后才交换 WebSocket
+      Frame。https 形式只表示握手视角，不是 REST API，也不是第二条连接。
+  dataMessages:
+    acceptedType: text
+    encoding: UTF-8
+    mapping: one complete WebSocket Text Message contains exactly one JSON Frame
+    binaryMessageCloseCode: 1003
+    invalidUtf8OrJsonCloseCode: 1007
+  limits:
+    defaultMaxMessageBytes: 1048576
+    defaultMaxConnectionBufferBytes: 4194304
+    pingIntervalSeconds: 20
+    pongTimeoutSeconds: 10
+    slowConsumerCloseCode: 1013
+  connectionTakeover:
+    activeReadWriteConnectionsPerChat: 1
+    resumeTakesOverExistingConnection: true
+    replacedConnectionCloseCode: 4409
+    replacedConnectionReason: CHAT_REPLACED
+  closeCodes:
+    '1000': 正常关闭；不会隐式 abort
+    '1001': 服务端关闭或心跳超时；退避后 resume
+    '1002': Frame 协议不兼容
+    '1003': 收到 Binary Message
+    '1007': Text Message 不是合法 UTF-8 JSON
+    '1008': connect 超时或连接策略错误
+    '1009': 完整 Text Message 超过协商上限
+    '1011': 暂时性内部错误；退避后 resume
+    '1013': 消费过慢或 Bridge 暂时无法恢复；退避后 resume
+    '4409': CHAT_REPLACED；新的 resume 已接管公共 Chat 连接
+x-attachments:
+  uploadOwner: mate-service Attachment Service
+  websocketTransport: attachment_ids only
+  publicUpload:
+    method: POST
+    path: /mate-service/v1/chats/{chat_id}/attachments
+  publicStatus:
+    method: GET
+    path: /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
+  publicDelete:
+    method: DELETE
+    path: /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
+  description: |
+    客户端只能在 create 成功取得 chat_id 后上传附件。mate-service 用认证用户和
+    chat_id 校验业务 Chat，再在服务端解析其私有 Runtime 绑定；公共附件 API 和
+    WebSocket 均不要求客户端知道 Runtime Session 标识。只有 READY 附件可以
+    放入 chat.send.attachment_ids；WebSocket 不传文件正文、URL、文件名、MIME、
+    大小、摘要或 Base64。
+x-source-status:
+  targetOnly: true
+  piMonoJavaBaseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+  observedSources:
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java
+      symbols: ServerMode WebSocket route and query parsing
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java
+      symbols: v1 command handling, cumulative message_update and disconnect abort
+    - path: modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java
+      symbols: text, thinking and tool-call incremental events
+  intentionalDifferences:
+    productConstraints:
+      - public business identity is chat_id and one user may own at most 50 non-deleted Chats
+    securityHardening:
+      - authentication before HTTP 101 and private Runtime identifiers never enter public Frames
+    architectureChanges:
+      - mate-service terminates and rebuilds Frames across a separate internal Runtime WebSocket

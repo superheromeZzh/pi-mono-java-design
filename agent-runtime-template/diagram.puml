@@ -13,8 +13,9 @@
 ' Observed behavior: current Java project context and Skill loading use .campusclaw.
 ' Java divergence: the target Managed Template Loader reads .campusagent only; Legacy keeps .campusclaw without dual-read or migration behavior.
 ' Target-only architecture: CampusAgent Runtime, AgentRuntimeTemplate, CacheEntry, TemplateLease, RuntimeSessionStore, SessionConnection, AgentRunContext, and stateless AgentRunner are not implemented in either baseline.
+' Target-only architecture: UI uses a public chat_id WebSocket to mate-service, while mate-service opens an independent internal session_id WebSocket to agent-service.
 ' Observed behavior: both baselines keep messages, queues, listeners, and active execution state in or around a stateful Agent.
-' Design reason: share immutable Agent definition data per agent-service Pod while keeping database Session state, connections, and Run state isolated.
+' Design reason: share immutable Agent definition data per agent-service Pod while keeping database Session state, internal connections, and Run state isolated from the upstream Chat identity.
 !theme plain
 left to right direction
 skinparam backgroundColor white
@@ -228,13 +229,18 @@ note bottom of AgentRunner
 end note
 
 note bottom of SessionConnection
+  This is the internal mate-service to agent-service connection.
+  The public UI to mate-service connection is independent.
   A newer resume increments the per-Pod generation.
   The previous connection closes with 4409 SESSION_REPLACED.
   Disconnect does not own or abort an active Run.
+  No chat_id enters this object or AgentSession.
 end note
 
 note bottom of RuntimeSessionStore
   Database-backed logical persistence boundary.
+  session_id is the only Runtime conversation identity.
+  chat_id remains only in the Mate Chat Store.
   No target Session JSONL is generated.
   Only completed content blocks are recoverable.
 end note
@@ -251,7 +257,8 @@ end note
 ' Java divergence: each target agent-service Pod atomically opens current, loads each immutable bundle revision once, and pins each resident Session to an exact revision.
 ' Target-only architecture: .campusagent revisions, activation records, RuntimeSessionStore, per-Pod connection generations, publish events, exact-key single-flight, and Template leases are new.
 ' Target-only architecture: the bundle root is case-sensitive and rejects Agent ID case-fold collisions.
-' Design reason: remove repeated cold initialization while persisting authoritative Session state in a database and keeping active Run ownership inside one IP-affined Pod.
+' Target-only architecture: mate-service resolves chat_id to session_id upstream, then opens a separate internal WebSocket with trusted session-affinity metadata.
+' Design reason: remove repeated cold initialization while persisting authoritative Session state in a database and keeping active Run ownership inside one session-affined Pod.
 !theme plain
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
@@ -266,8 +273,9 @@ skinparam sequenceGroupBackgroundColor #F8FAFC
 title Template Publish, Preload, and Session Pinning
 
 actor "Metadata publisher" as Publisher
-actor "mate-service" as SessionCaller
-participant "Trusted gateway\nuser-IP affinity" as Gateway
+actor "mate-service\nRuntime WebSocket client" as SessionCaller
+participant "Trusted internal gateway\nsession affinity" as Gateway
+participant "agent-service Runtime\nWebSocket adapter" as RuntimeWs
 participant "Bundle compiler" as Compiler
 database "Immutable bundle repository\ncase-sensitive Agent root" as BundleRepo
 queue "Publish event bus" as EventBus
@@ -309,8 +317,14 @@ opt hot-set and weight policy admit prewarm
 end
 
 == New Session ==
-SessionCaller -> Gateway: open /agent-service/v1/ws/chat; create(session, agent, model)
-Gateway -> SessionPool: route by verified end-user IP
+SessionCaller -> Gateway: TLS plus HTTP Upgrade\n/agent-service/internal/v1/ws/chat
+Gateway -> Gateway: validate service identity\nand trusted session affinity
+Gateway -> RuntimeWs: route internal opening handshake
+RuntimeWs --> Gateway: accept Upgrade
+Gateway --> SessionCaller: independent HTTP 101
+SessionCaller -> Gateway: connect create(session, agent, model)
+Gateway -> RuntimeWs: forward internal RequestFrame
+RuntimeWs -> SessionPool: create by session id
 SessionPool -> SessionPool: acquire admission and install intent fingerprint slot
 SessionPool -> SessionStore: strongly consistent lookup(session id)
 SessionStore --> SessionPool: ABSENT or persisted Session record
@@ -349,12 +363,19 @@ else ABSENT
     SessionPool -> SessionPool: process persisted winner without current
   end
 end
-SessionPool --> Gateway: same Session ready or stable conflict
+SessionPool --> RuntimeWs: same Session ready or stable conflict
+RuntimeWs --> Gateway: internal ResponseFrame
 Gateway --> SessionCaller: connect response
 
 == Resume after eviction or restart ==
-SessionCaller -> Gateway: open /agent-service/v1/ws/chat; resume(session id)
-Gateway -> SessionPool: route by verified end-user IP
+SessionCaller -> Gateway: new TLS plus HTTP Upgrade\n/agent-service/internal/v1/ws/chat
+Gateway -> Gateway: validate service identity\nand trusted session affinity
+Gateway -> RuntimeWs: route internal opening handshake
+RuntimeWs --> Gateway: accept Upgrade
+Gateway --> SessionCaller: new independent HTTP 101
+SessionCaller -> Gateway: connect resume(session id)
+Gateway -> RuntimeWs: forward internal RequestFrame
+RuntimeWs -> SessionPool: resume by session id
 SessionPool -> SessionPool: acquire admission and install or join RESTORING slot
 SessionPool -> SessionStore: load READY record, generation, and completed blocks
 SessionStore --> SessionPool: agent id, exact revision, template ABI, model id, generation
@@ -375,7 +396,8 @@ group lifecycle slot owner section excludes delete
   SessionPool -> SessionPool: check delete intent and publish READY_IDLE or clean up
 end
 SessionPool -> SessionPool: increment connection generation
-SessionPool --> Gateway: connect success before causal events
+SessionPool --> RuntimeWs: connect success before causal events
+RuntimeWs --> Gateway: internal ResponseFrame
 Gateway --> SessionCaller: connect response
 SessionPool -> SessionPool: close prior generation with 4409 SESSION_REPLACED
 
@@ -412,10 +434,20 @@ note over SessionStore,ToolManager
   Dynamic authorization never comes from the Template.
 end note
 
+note over SessionCaller,RuntimeWs
+  Upstream, UI uses a separate public WebSocket scoped by chat_id.
+  mate-service resolves the authoritative chat_id to session_id mapping.
+  chat_id never enters this internal Runtime flow.
+  The public and internal hops independently own HTTP 101, connection ID,
+  request ID, event sequence, Ping/Pong, backpressure, and close state.
+  mate-service rebuilds semantic Frames; it is not a byte tunnel.
+end note
+
 note over Gateway,SessionPool
-  v1 relies on trusted gateway user-IP affinity.
-  There is no Redis owner, routing header, cross-Pod forwarding,
-  or distributed active-Run lease. Pod restart cannot continue a Run.
+  The gateway validates trusted session-affinity metadata before HTTP 101.
+  The metadata is server-derived and is not an authorization or owner token.
+  There is no Redis owner, cross-Pod forwarding, or distributed active-Run lease.
+  Pod restart or affinity-target loss cannot continue a Run across Pods.
 end note
 @enduml
 
@@ -424,6 +456,7 @@ end note
 ' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java startExecution serializes one active execution per Agent.
 ' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java getOrCreate currently uses check-then-create.
 ' Target-only architecture: the per-Pod cache, revision artifact, Session, connection-generation, and durable RunRecord state machines are normative target behavior and are not implemented in the baseline.
+' Target-only architecture: this state machine starts after mate-service resolves public chat_id to internal session_id; chat_id is not a Runtime state-machine key.
 ' Design reason: make same-Pod acquire, eviction, Session mutation, and connection takeover linearizable while making Pod loss explicit as interrupted instead of pretending a cross-Pod Run continuation.
 !theme plain
 left to right direction
@@ -489,7 +522,7 @@ state "Session" as SessionLife {
   SS_DELETED --> [*]
 }
 
-state "Per-Pod Session Connection" as ConnectionLife {
+state "Per-Pod Runtime Session Connection" as ConnectionLife {
   [*] --> SC_ACTIVE : connect or resume; generation++
   state "ACTIVE" as SC_ACTIVE
   state "REPLACED" as SC_REPLACED
@@ -536,15 +569,18 @@ note bottom of SessionLife
   Resume and delete share one lifecycle slot.
   Concurrent cleanup callers join one owner Future.
   The lifecycle slot is local to one agent-service Pod.
+  Its key is session_id; chat_id is never stored here.
 end note
 
 note bottom of ConnectionLife
   One active read-write connection exists per Session per Pod.
+  This internal connection is independent from the public Chat connection.
   Connection generation is not a cross-Pod ownership token.
 end note
 
 note bottom of RunRecordLife
   RuntimeSessionStore is database-backed.
+  It stores session_id but never chat_id.
   Only text_end, thinking_end, toolcall_end, or equivalent
   completed block boundaries are recoverable after Pod loss.
 end note
@@ -558,8 +594,9 @@ end note
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
 ' Target-only architecture: CampusMate stores permanent identity tombstones and active processing details in shared openGauss, and immutable bodies in private OBS.
 ' Target-only architecture: each OBS object key is exactly the case-sensitive attachment_id; no object-key mapping column exists.
+' Target-only architecture: public attachment routes use chat_id, which mate-service resolves to internal session_id from the authoritative Mate Chat Store.
 ' Target-only architecture: agent-service uses internal batch resolve and content streaming APIs and stores only message metadata snapshots.
-' Design reason: attachments must work across Pods while deleting short-lived processing data after content deletion and retaining only a minimal ID tombstone.
+' Design reason: keep public Chat identity outside Runtime and attachment tables while attachments remain readable across Pods through shared services.
 !theme plain
 left to right direction
 skinparam backgroundColor white
@@ -574,19 +611,22 @@ skinparam databaseBackgroundColor #EAF5FB
 
 title Agent Runtime and CampusMate Attachment Boundary
 
-actor "Final client" as Client
-component "CampusMate public API" as PublicApi
+actor "Agent UI" as Client
+component "CampusMate public Attachment API\nchat_id scope" as PublicApi
+database "Mate Chat Store\nchat_id to session_id" as ChatStore
 component "CampusMate Attachment Service\nany Pod" as AttachmentService
-database "Shared openGauss attachment\nid, session, status, created, deleted" as AttachmentDb
-database "Shared openGauss active detail\nvalidation, reference, cleanup, worker state" as AttachmentDetail
+database "Shared openGauss t_attachment\nid, session, status, created, deleted" as AttachmentDb
+database "Shared openGauss t_attachment_active_detail\nvalidation, reference, cleanup, worker state" as AttachmentDetail
 cloud "Private OBS\nimmutable body; key = attachment_id" as Obs
 component "agent-service Pod A" as RuntimeA
 component "agent-service Pod B" as RuntimeB
 database "RuntimeSessionStore\nAttachmentContent metadata snapshot" as RuntimeStore
 component "Model input assembler\nbounded stream buffer" as Assembler
 
-Client --> PublicApi : upload and poll status
-PublicApi --> AttachmentService
+Client --> PublicApi : POST, GET, or DELETE\n/mate-service/v1/chats/{chat_id}/attachments
+PublicApi --> ChatStore : authenticate chat_id\nand resolve mapping
+ChatStore --> PublicApi : authorized session_id\ninternal only
+PublicApi --> AttachmentService : operate by session_id\nand attachment_id
 AttachmentService --> AttachmentDb : create identity and update status
 AttachmentService --> AttachmentDetail : create and update active detail
 AttachmentDb -- AttachmentDetail : one detail until DELETED
@@ -613,9 +653,16 @@ note bottom of AttachmentService
   No content_version, reservation, or complex retention claim exists.
 end note
 
+note bottom of PublicApi
+  Public requests and responses use chat_id.
+  session_id is never exposed to the UI.
+  The attachment tables never store chat_id or the mapping.
+end note
+
 note bottom of AttachmentDb
   The permanent row retains exactly attachment_id, session_id,
   status, created_at, and deleted_at after deletion.
+  Table name: t_attachment.
 end note
 
 note bottom of AttachmentDetail
@@ -624,11 +671,13 @@ note bottom of AttachmentDetail
   error, attempt, next-at, lease, and row-version fields recover workers.
   After OBS deletion, one DB transaction removes this detail
   and leaves the permanent row as a DELETED tombstone.
+  Table name: t_attachment_active_detail.
 end note
 
 note bottom of RuntimeA
   Runtime never reads OBS directly and never writes attachment files.
   Local memory is a bounded stream buffer, not durable storage.
+  Runtime uses session_id and never receives chat_id.
 end note
 
 note bottom of RuntimeStore

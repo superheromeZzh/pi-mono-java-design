@@ -2,9 +2,9 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.4.0 |
+| 文档版本 | 1.5.0 |
 | 状态 | 目标设计，尚未实施 |
-| 更新日期 | 2026-08-03 |
+| 更新日期 | 2026-08-04 |
 | pi-mono 源码基线 | `f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 | 关联设计 | [`pi-mono-java-manager-driven-multi-agent-runtime`](../pi-mono-java-manager-driven-multi-agent-runtime/README.md) |
@@ -82,7 +82,10 @@ Registry 的每 Pod 进程内 materialization cache key 为：
 - CampusMate Attachment Service 的共享 OBS/openGauss 数据边界，以及
   Agent Runtime 无本地附件存储、只经内部接口读取的约束；
 - `agent-service` 多副本下每 Pod Template/Session 所有权、单活动
-  连接接管与可信网关用户 IP 粘性路由的限制；
+  Runtime 连接接管、受信 Session 亲和元数据路由与跨 Pod 恢复限制；
+- UI 到 `mate-service` 的公共 Chat 连接与 `mate-service` 到
+  `agent-service` 的内部 Runtime 连接之间的边界，以及
+  `chat_id` 不进入 Runtime 模板或 Session 状态的约束；
 - 与现有每 Session 独立 `Agent` 的迁移路径，以及与无状态
   `AgentRunner` 的长期关系。
 
@@ -162,8 +165,9 @@ generic tool spec` 边界为准。这属于对早期目标方案的架构演进�
 | 关联文件/符号 | 统一后的规范性结论 |
 |---|---|
 | `pi-mono-java-manager-driven-multi-agent-runtime/README.md` 的 revision/cwd 恢复 | 不可变 `revisions/<revision>`、原子 current activation record、`.campusagent` 逻辑路径和 exact revision pinning |
-| `pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml` 的 methods | Template v1 不对 Managed Client 暴露 `prompt_templates.list` 或 `skills.list`；Skill 展示由 `mate-service`/元数据 REST 承载 |
-| `pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2-client-integration.md` 的恢复 | `mate-service` 通过 `agent-service` WebSocket 接管单活动连接；跨 Pod active run 不在 v1 承诺内 |
+| `pi-mono-java-manager-driven-multi-agent-runtime/mate-chat-ws-v2.asyncapi.yaml` 和公共接入指南 | UI 只使用 `chat_id`；`session_id` 不进入公共 Frame，Chat 恢复和附件公共路由都属于 `mate-service` |
+| `pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml` 和内部接入指南 | `mate-service` 只以服务身份和 `session_id` 调用 Runtime；`chat_id` 不进入内部 Frame、SessionPool 或 Store |
+| WebSocket 恢复边界 | `mate-service` 先从权威 Chat 记录解析 `chat_id -> session_id`，再建立独立内部 WebSocket；跨 Pod active run 不在 v1 承诺内 |
 
 ## 4. 生命周期边界
 
@@ -201,17 +205,41 @@ AgentRunner.run(template, sessionSnapshot, runContext)
 
 CampusAgent Runtime 以 `agent-service` 多副本部署，但 Template
 Registry、SessionPool、active run 和 `connection_generation` 都是每 Pod 进程内
-状态。`mate-service` 等获授权服务端调用方通过规范地址
-`wss://api.example.com/agent-service/v1/ws/chat` 连接；浏览器到
-`mate-service` 的协议不在本文定义。v1 依赖可信网关使用已验证的
-最终用户 IP 做粘性路由，使
-`mate-service` 对同一 Session 的连接尽量回到同一 Pod。不使用
-Redis owner、Session 路由 Header、Pod 间转发或分布式 active-run lease。
+状态。本文只固定与 Template 有关的两跳边界，不重复定义完整
+WebSocket Frame 协议：
 
-这是有意识的 v1 产品约束，不是强一致路由协议：如果网关只看到
-`mate-service`/NAT IP、最终用户 IP 变化或 Pod 重启，同一 active run
-不能无缝跨 Pod 继续。数据库的唯一约束和 CAS 保护持久化记录，但不
-构成分布式 Session owner。
+```text
+UI
+  -> wss://api.example.com/mate-service/v1/ws/chat
+     public Chat connection scoped by chat_id
+  -> mate-service semantic gateway
+  -> wss://agent-service.internal/agent-service/internal/v1/ws/chat
+     internal Runtime connection scoped by session_id
+  -> agent-service Runtime
+```
+
+`mate-service` 是语义网关：它校验公共请求，从权威 Mate Chat Store
+解析 `chat_id -> session_id`，再以服务身份重建内部 Frame。它不做
+WebSocket 字节透传。公共协议永不披露 `session_id`；内部 Runtime
+协议不需要且不得接收 `chat_id`。
+
+两跳分别建立物理 WebSocket，因而分别完成 TLS/HTTP opening handshake
+并获得自己的 `101 Switching Protocols`；各自独立管理
+`connection_id`、RequestFrame `id`、EventFrame `seq`、Ping/Pong、发送背压和
+close 语义。公共和内部的任一连接字段、序号或缓冲都不得直接
+复用。
+
+`mate-service` 根据权威映射解析出的 `session_id` 生成受信 Session 亲和
+元数据，内部网关在返回 `101` 前同时验证服务身份和该元数据，
+再将同一 Session 尽量路由到其当前 Pod。该元数据不由 UI 提供，不是
+业务授权，也不是分布式 owner token。v1 不使用 Redis owner、Pod 间
+转发或分布式 active-run lease；亲和目标不可用或 Pod 重启时，旧
+active run 不能跨 Pod 继续。数据库唯一约束和 CAS 保护持久化记录，
+但不构成分布式 Session owner。
+
+Runtime 边界内唯一会话标识是 `session_id`。`chat_id` 绝不得进入
+`RuntimeSessionStore`、`SessionPool`、Template ref/cache key 或
+`SessionLifecycleSlot`；`chat_id -> session_id` 映射仅由 Mate Chat Store 保存。
 
 `RuntimeSessionStore` 是 Session 持久化的唯一逻辑边界，使用数据库
 保存 Session、Message、RunRecord、history sequence、幂等结果、
@@ -234,7 +262,7 @@ active RunRecord，必须把 RunRecord 及相关 Message 稳定标记为
 
 ![Agent Runtime 与 CampusMate Attachment Service 边界](runtime_attachment_service_boundary.svg)
 
-[PlantUML 源码](diagram.puml#L553)
+[PlantUML 源码](diagram.puml#L589)
 
 附件不属于 `AgentRuntimeTemplate`、bundle revision 或 Agent cwd。最终客户端把
 文件上传给 CampusMate `mate-service` 承载的 Attachment Service；该服务只把正文
@@ -244,16 +272,28 @@ Object Key。Object Key 不加文件名、Session 目录或其他前缀，openGa
 Bucket 仍为私有，且只有 Attachment Service 持有访问凭据。CampusMate 任一 Pod
 都从共享 openGauss 与 OBS 恢复，不依赖本地文件、临时目录或 Pod 粘性。
 
+公共附件路由只接受 `chat_id`：
+
+```text
+POST   /mate-service/v1/chats/{chat_id}/attachments
+GET    /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
+DELETE /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
+```
+
+`mate-service` 先用公共身份验证 Chat，再从 Mate Chat Store 解析内部
+`session_id`。公共请求和响应不披露 `session_id`；附件表不保存
+`chat_id` 或 Chat 映射，仍以已解析的 `session_id` 绑定 Runtime Session。
+
 openGauss 把永久身份与活动期细节分成两表：
 
 | 表 | 存活期 | 字段边界 |
 |---|---|---|
-| `attachment` | 永久保留，包括删除后 tombstone | `attachment_id`、`session_id`、`status`、`created_at`、`deleted_at` |
-| `attachment_active_detail` | 仅在附件尚未进入 `DELETED` 时存在 | 文件展示与内容校验、引用/过期、错误以及 Worker lease/retry 字段 |
+| `t_attachment` | 永久保留，包括删除后 tombstone | `attachment_id`、`session_id`、`status`、`created_at`、`deleted_at` |
+| `t_attachment_active_detail` | 仅在附件尚未进入 `DELETED` 时存在 | 文件展示与内容校验、引用/过期、错误以及 Worker lease/retry 字段 |
 
 创建附件时，主表行和活动明细行在同一 openGauss 事务中写入。OBS 正文
 删除成功后，清理 Worker 在一个数据库事务中删除
-`attachment_active_detail`，并把主表更新为 `status=DELETED` 和非空
+`t_attachment_active_detail`，并把主表更新为 `status=DELETED` 和非空
 `deleted_at`。因此 Attachment Service 的附件记录在删除后不再保留文件名、
 MIME、大小、hash 或 Worker 信息，
 但仍能用五个主表字段证明 ID 已使用、它属于哪个 Session，以及何时创建和删除。
@@ -442,7 +482,7 @@ cache 统计，不能回写不可变 Template。
 
 | 排除项 | 所属生命周期 | 原因 |
 |---|---|---|
-| `session_id`、业务 user/tenant、service principal | Session/调用 | 模板会被多个 Session 共享 |
+| `chat_id`、`session_id`、业务 user/tenant、service principal | Mate Chat/Session/调用 | `chat_id` 只属于 `mate-service`；其他字段也会破坏模板跨 Session 共享 |
 | messages、branch、compaction、`RuntimeSessionStore` record/transaction/cursor | Session | 对话状态必须隔离且单写 |
 | 当前 `model_id`、thinking level、ModelDescriptor | Session/调用 | 模型状态由 Model Manager 在建 Session、恢复和调用时校验 |
 | Agent、AgentState、listeners、steering/follow-up queue | Session | 当前实现均为可变且与对话绑定 |
@@ -800,7 +840,7 @@ BundleLease。
 
 ![Template 发布、预热与 Session 固定](agent_runtime_template_publish_and_pin.svg)
 
-[PlantUML 源码](diagram.puml#L243)
+[PlantUML 源码](diagram.puml#L249)
 
 关键顺序：
 
@@ -852,7 +892,7 @@ ConcurrentHashMap<LoadedTemplateKey,
 
 ![Template CacheEntry、revision artifact 与 Session 生命周期](template_cache_and_session_lifecycle.svg)
 
-[PlantUML 源码](diagram.puml#L422)
+[PlantUML 源码](diagram.puml#L454)
 
 协议：
 
@@ -897,6 +937,10 @@ agent_id
 requested_model_id for create
 other immutable creation options
 ```
+
+该 intent 是 `mate-service` 已完成 Chat 映射解析后的内部 Runtime 请求。
+`chat_id` 不是 `SessionOpenIntent`、slot key 或 fingerprint 的一部分，也不得被
+SessionPool 保存为旁路索引。
 
 只有 fingerprint 相同的重试可以 join 同一个 Future；同一 `session_id` 但
 Agent、Model、mode 或其他不可变选项不同的请求立即返回绑定冲突，不能看到或
@@ -1035,6 +1079,10 @@ Session record 至少包含：
 }
 ```
 
+这是 `agent-service` 的内部 Runtime Session record。它不保存 `chat_id`；
+Mate Chat Store 独立保存 `chat_id -> session_id`，并在每次公共 create/resume
+进入 Runtime 之前完成解析。
+
 绝对 cwd 不是恢复权威。恢复时用 `agent_id + bundle_revision` 重新解析 canonical
 revision root；如为兼容保留 cwd，只能作为诊断字段。
 
@@ -1055,6 +1103,9 @@ Pod 失联时尚未到 `text_end`、`thinking_end`、`toolcall_end` 等
 后也不能提交 READY。`create_fingerprint` 在 Session 整个生命周期内不可修改。
 
 ### 10.2 新建 Session
+
+以下是 `mate-service` 已生成 `chat_id` 和 `session_id`、并保存两者映射之后的内部 Runtime
+创建流程，不是 UI 直接按 `session_id` 调用的公共协议。
 
 ```text
 acquire global and per-agent creating-session permit
@@ -1106,6 +1157,9 @@ revision，Session 就使用哪个 revision；后续 current 切换不改变结�
 
 ### 10.3 恢复 Session
 
+公共恢复只提交 `chat_id`；`mate-service` 从 Mate Chat Store 取得已保存的
+`session_id` 后，内部 Runtime 才执行以下恢复流程。
+
 ```text
 acquire bounded resume/open admission
 -> atomically install or join session_id SessionLifecycleSlot in RESTORING
@@ -1144,7 +1198,7 @@ create/resume/run/evict/delete 必须经过该 Pod 内同一个
 持有 slot owner 权，delete 只能在同一 slot 上设置/竞争 delete intent，不能在
 “校验成功、尚未发布”的间隙直接写 Store。因此候选要么在线性化点前观察到 delete
 并转清理，要么先完整发布后再由 delete 清理，不会在 tombstone 之后复活。
-v1 不把该 slot 扩展为跨 Pod owner；如果粘性路由失效且旧 Pod
+v1 不把该 slot 扩展为跨 Pod owner；如果受信 Session 亲和路由失效且旧 Pod
 仍在执行，新 Pod 无法协调或停止旧内存 run。这是 v1 不支持的边界，
 不得宣称已完成透明跨 Pod 接管。
 
@@ -1279,9 +1333,10 @@ session_create_duration_seconds{cache_result}
 | `ManagedAgentSessionFactory` | acquire/pin Template；创建 per-session Tool binding 和独立 Agent/Session | 架构改造 |
 | `SessionPool.getOrCreate()` | 改为每 Pod `session_id -> SessionLifecycleSlot`，统一 create/resume/run/evict/delete；完成持久化且持有 owner generation 后才发布 ready | 并发修复 |
 | `RuntimeSessionStore` | 使用数据库持久化 Session/Message/RunRecord/history sequence/幂等结果/revision 和 AttachmentContent 元数据快照；不保存附件正文、OBS 定位或 Session JSONL | 架构改造 |
-| CampusMate Attachment Service | 共享 openGauss 以 `attachment` 永久主表和 `attachment_active_detail` 活动明细表分离 ID tombstone 与运行字段；私有 OBS 以 `attachment_id` 为 Key 保存不可覆盖正文；向 Runtime 提供内部批量 resolve 和 content 流 | 架构改造、安全加固 |
-| WebSocket Session adapter | 同 Pod 只允许一个活动读写连接；resume 递增 `connection_generation` 并以 `4409 SESSION_REPLACED` 关闭旧连接 | 并发修复 |
-| `agent-service` 部署 | 每 Pod 独立 Template Registry/SessionPool/RunHub；可信网关按最终用户 IP 粘性路由，不承诺跨 Pod active run 接管 | 产品约束 |
+| CampusMate 公共 Chat Gateway | UI 连接 `/mate-service/v1/ws/chat`，只持有 `chat_id`；网关解析权威 Chat 映射并以新 Frame 调用 Runtime，不做字节透传 | 架构改造、安全加固 |
+| CampusMate Attachment Service | 公共路由按 `chat_id` 鉴权并解析 `session_id`；共享 openGauss 以 `t_attachment` 永久主表和 `t_attachment_active_detail` 活动明细表分离 ID tombstone 与运行字段；私有 OBS 以 `attachment_id` 为 Key 保存不可覆盖正文；向 Runtime 提供按 `session_id` 的内部批量 resolve 和 content 流 | 架构改造、安全加固 |
+| 内部 WebSocket Session adapter | `mate-service` 连接 `/agent-service/internal/v1/ws/chat`；同 Pod 对同一 `session_id` 只允许一个活动读写连接，resume 递增 `connection_generation` 并以 `4409 SESSION_REPLACED` 关闭旧连接 | 并发修复 |
+| `agent-service` 部署 | 每 Pod 独立 Template Registry/SessionPool/RunHub；内部网关验证由权威 Chat 映射派生的受信 Session 亲和元数据，不承诺跨 Pod active run 接管 | 产品约束 |
 | `Agent` | 第一阶段继续每 Session 创建；静态字段由 Template 注入 | 兼容迁移 |
 | `AgentLoop` | 第一阶段保持每 run 创建；长期由无状态 Runner 创建或执行 | 兼容迁移 |
 | `AgentTool` | Managed 路径由 spec 创建 per-session wrapper，或扩展 execute 显式接收 `AgentRunContext` | 安全加固 |
@@ -1295,7 +1350,7 @@ session_create_duration_seconds{cache_result}
 
 - Template 及其嵌套集合和 Schema 深度不可变；
 - Managed Loader 只接受 `.campusagent`，`.campusclaw` 仅作为 Legacy/源码现状；
-- Template 中不存在 session/message/model selection/credential/permission/run 字段；
+- Template 中不存在 chat/session/message/model selection/credential/permission/run 字段；
 - 三个 RuntimeToolSpec 名称、Schema 和 protocol version 确定；
 - manifest 同一输入产生相同 canonical hash；
 - 任一文件、依赖锁、Prompt profile 或 ABI 变化产生新 revision；
@@ -1354,6 +1409,17 @@ session_create_duration_seconds{cache_result}
 
 ### 13.4 连接、Pod 与持久化
 
+- UI 只连接 `wss://api.example.com/mate-service/v1/ws/chat`；create 时不提交
+  `chat_id`，成功后保存服务端生成的 `chat_id`，resume 时只提交该
+  `chat_id`；`session_id` 不出现在公共 Frame；
+- `mate-service` 从权威 Chat Store 解析 `chat_id -> session_id`，再以服务
+  身份连接 `wss://agent-service.internal/agent-service/internal/v1/ws/chat`；
+  Runtime 不接收 `chat_id`；
+- 两跳分别完成 opening handshake 和 `101`，且独立分配
+  `connection_id`、RequestFrame `id`、EventFrame `seq`，独立处理 Ping/Pong、
+  背压和 close；测试必须拒绝跨跳复用这些状态；
+- `chat_id` 不存在于 `RuntimeSessionStore`、SessionPool、Template
+  ref/cache key 或 `SessionLifecycleSlot`；
 - 同 Pod 新 resume 在原子接管时递增 `connection_generation`、注册
   订阅并捕获恢复点；connect Response 成功写出后，以
   `4409 SESSION_REPLACED` 关闭旧连接；
@@ -1367,9 +1433,12 @@ session_create_duration_seconds{cache_result}
   上限约束；
 - OBS `put/open/stat/delete` 始终以大小写敏感的 `attachment_id` 作为唯一 Key，
   openGauss 不存在 `object_key` 列，文件名和 Session 也不参与 Key 拼接；
-- `attachment` 永久主表始终只有
+- 公共附件上传、查询和删除只使用
+  `/mate-service/v1/chats/{chat_id}/attachments`；`mate-service` 解析后的
+  内部 resolve/content 仍以 `session_id` 鉴权；
+- `t_attachment` 永久主表始终只有
   `attachment_id/session_id/status/created_at/deleted_at`；非 `DELETED` 行具有一条
-  `attachment_active_detail`，OBS 删除成功后在同一数据库事务中删除明细并留下
+  `t_attachment_active_detail`，OBS 删除成功后在同一数据库事务中删除明细并留下
   `DELETED` tombstone；
 - 上传和扫描校验 `detected_media_type`、`expected_size_bytes`、`size_bytes`
   与 `sha256`；`referenced_at/expires_at` 决定引用禁删和 24 小时未引用清理；
@@ -1385,9 +1454,9 @@ session_create_duration_seconds{cache_result}
   `interrupted`，并使用 `RUN_INTERRUPTED`；
 - 只有到达 `text_end`、`thinking_end`、`toolcall_end` 等边界的完整块
   可恢复，未完整尾部不出现在权威历史中；
-- 验证可信网关用户 IP 粘性能让 `mate-service` 连回同 Pod，并显式
-  测试网关仅可见 `mate-service`/NAT IP、用户 IP 变化和 Pod 重启时
-  不能继续旧 active run 的限制；
+- 验证 `mate-service` 只能根据权威 `chat_id -> session_id` 映射产生受信
+  Session 亲和元数据，内部网关拒绝 UI 自报、篡改、缺失或过期元数据；
+- 显式测试亲和目标不可用和 Pod 重启时不能继续旧 active run 的限制；
 - 没有 Redis owner、Session 路由 Header、Pod 间转发或分布式 run lease
   时，测试不得宣称支持透明跨 Pod 恢复。
 
@@ -1420,7 +1489,9 @@ session_create_duration_seconds{cache_result}
   其他 Agent 的 current、manifest 或 Template cache；
 - Session 持久化只经由数据库 `RuntimeSessionStore`，不生成 JSONL；
 - 单连接接管、完整块持久化和 Pod 重启 `interrupted` 语义均可验证；
-- 每 Pod 缓存/运行所有权与用户 IP 粘性路由限制被明确记录，
+- 公共 Chat 连接与内部 Runtime Session 连接的两跳边界明确，
+  `chat_id` 不进入 Runtime，两跳传输状态不复用；
+- 每 Pod 缓存/运行所有权与受信 Session 亲和路由限制被明确记录，
   不伪装跨 Pod active run 继续；
 - 所有渐进读取都从固定 revision root 读取；
 - Template load 和 Session create 都有 exact-key single-flight；
@@ -1435,7 +1506,8 @@ session_create_duration_seconds{cache_result}
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| 1.4.0 | 2026-08-03 | 附件存储收敛为“永久 `attachment` 身份/状态主表 + 非 DELETED `attachment_active_detail` 工作明细表”；OBS Object Key 精确等于 `attachment_id`，不再保存 object-key 映射；说明 MIME/大小、SHA-256、首次引用、24 小时清理与 Worker lease/retry 字段责任；冻结 create-only 冲突 quarantine 门禁；OBS 删除后清除明细，只留五字段 `DELETED` tombstone |
+| 1.5.0 | 2026-08-04 | 补充 UI→`mate-service` 公共 `chat_id` WebSocket 与 `mate-service`→`agent-service` 内部 `session_id` WebSocket 的目标边界；明确语义网关不做字节透传、两跳分别持有 `101`/连接/请求/序列/心跳/背压/关闭状态；`chat_id` 不进入 Runtime Store/Pool/Template/slot；用受信 Session 亲和元数据取代用户 IP 粘性，仍不承诺跨 Pod active run 继续；同步公共 `chat_id` 附件路由和 `t_` 表名 |
+| 1.4.0 | 2026-08-03 | 附件存储收敛为“永久 `t_attachment` 身份/状态主表 + 非 DELETED `t_attachment_active_detail` 工作明细表”；OBS Object Key 精确等于 `attachment_id`，不再保存 object-key 映射；说明 MIME/大小、SHA-256、首次引用、24 小时清理与 Worker lease/retry 字段责任；冻结 create-only 冲突 quarantine 门禁；OBS 删除后清除明细，只留五字段 `DELETED` tombstone |
 | 1.3.0 | 2026-08-03 | 同步 CampusMate Attachment Service 的简化存储边界：共享私有 OBS 保存正文、共享 openGauss 保存元数据和对象映射；Agent Runtime 只调用内部批量 resolve/content 并使用有界流式缓冲，不直连 OBS 或写本地文件；RuntimeSessionStore 只保存 AttachmentContent 快照，不引入 content_version、reservation 或复杂 retention claim |
 | 1.2.0 | 2026-08-03 | 统一 Agent 与 Model 资源标识：分别使用 `agent_` / `model_` 加 24 位大小写敏感字母数字，明确其为 Manager 签发的 opaque ID，规定 Template、Session 与 Model Manager 的比较和映射边界，并增加大小写敏感 Repository、case-fold 冲突与 manifest 精确匹配门禁 |
 | 1.1.0 | 2026-08-03 | 对外统一为 CampusAgent Runtime / `agent-service`；Managed 资源改为 `.campusagent` 且不双读 Legacy `.campusclaw`；Session 持久化改为数据库 `RuntimeSessionStore`；补充每 Pod Template/revision pinning、用户 IP 粘性限制、单连接 generation 接管和 Pod 重启 `interrupted`/完整块恢复语义 |

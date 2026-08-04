@@ -1,8 +1,8 @@
 # CampusMate Attachment Service：OBS + openGauss 设计
 
 > 文档编号：`SR-ATTACHMENT-001`<br>
-> 版本：`v1.1.0`<br>
-> 日期：`2026-08-03`<br>
+> 版本：`v2.0.0`<br>
+> 日期：`2026-08-04`<br>
 > 状态：目标设计（target-only）<br>
 > 设计仓库基线：`ecf31bc55ca1923dd1c7f90d50ee6763963b7da9`<br>
 > pi-mono 基线：`fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc`<br>
@@ -25,8 +25,8 @@ attachment_id = 对外唯一附件标识，同时精确作为私有 Bucket 内�
 - 原始文件只保存到共享私有 OBS Bucket，不进入 openGauss；
 - openGauss 不保存 Object Key：OBS Object Key 精确等于服务端生成的
   `attachment_id`；
-- openGauss 的 `attachment` 主表永久保存身份、Session 归属和状态；
-  每个非 `DELETED` 主表行都具有一条 `attachment_active_detail`，包括上传中、
+- openGauss 的 `t_attachment` 主表永久保存身份、Runtime Session 归属和状态；
+  每个非 `DELETED` 主表行都具有一条 `t_attachment_active_detail`，包括上传中、
   失败、待删除或正文暂缺的对账状态；只有 `DELETED` tombstone 没有明细；
 - `agent-service` 只通过 Attachment Service 内部接口解析和读取附件，不直接访问
   openGauss、OBS 或存储凭据；
@@ -36,6 +36,11 @@ attachment_id = 对外唯一附件标识，同时精确作为私有 Bucket 内�
 - 单文件上限固定为 20 MiB，即 `20 * 1024 * 1024 = 20971520` 字节；
 - 一个附件只绑定一个 `session_id`，OBS 内容创建后不可覆盖；重新上传必须生成新的
   `attachment_id`，删除完成后原 ID 仍由主表 tombstone 永久占用；
+- 公共 HTTP 接口只使用 Mate Chat 的 `chat_id`。`mate-service` 先鉴权 Chat，再从
+  Mate Chat Store 解析内部 `session_id`；公共请求和响应均不披露 `session_id`；
+- `t_attachment` 与 `t_attachment_active_detail` 不保存 `chat_id`，也不复制
+  `chat_id -> session_id` 映射。该映射及 Chat 生命周期只由 Mate Chat Store 管理，
+  附件数据库继续以 `session_id` 绑定 Runtime Session；
 - PDF、JavaScript 和其他文件均视为不可信用户内容。Attachment Service、
   `mate-service` 和 `agent-service` 都不得执行脚本。
 
@@ -70,13 +75,14 @@ OpenClaw 基线仅用于同仓库其他 WebSocket 对比文档。本专题没有
 
 ![OBS 与 openGauss 存储职责](./attachment_obs_opengauss_storage_split.svg)
 
-[PlantUML 源码：`attachment_obs_opengauss_storage_split`](./diagram.puml#L108)
+[PlantUML 源码：`attachment_obs_opengauss_storage_split`](./diagram.puml#L114)
 
 跨 Pod 读取不依赖上传 Pod：
 
 ```text
 CampusMate client
   -> mate-service Pod A
+  -> Mate Chat Store: authorize chat_id and resolve session_id
   -> shared private OBS + shared openGauss
 
 agent-service Pod C
@@ -84,6 +90,10 @@ agent-service Pod C
   -> same shared openGauss
   -> same shared private OBS
 ```
+
+Mate Chat Store 与附件账本是两个权威边界：前者持有用户/Chat 授权和
+`chat_id -> session_id` 映射，后者只按已解析的 `session_id` 绑定附件。附件 Pod
+不得缓存该映射作为权威状态，也不得在 openGauss 附件表中复制 `chat_id`。
 
 `AttachmentContentStore` 是 `mate-service` 内的存储端口，不是存储位置。端口的
 OBS 适配器运行在每个 Attachment Service Pod 内，所有 Pod 使用相同的 OBS
@@ -130,9 +140,24 @@ attachment_011CZm8VpK4rNs6WtY2hDqfB
 - `DELETED` 行永久作为 tombstone 保留，删除 OBS 正文也不能释放 ID；
 - ID 不是 Bearer capability。知道格式或值不等于有权读取附件。
 
-### 4.2 Session 单绑定
+### 4.2 公共 Chat 与内部 Session 单绑定
 
-每个附件在创建时绑定一个全局唯一的 `session_id`，之后不能改绑：
+`chat_id` 是 `mate-service` 的业务 Chat 标识，`session_id` 是 `agent-service` 的
+Runtime Session 标识。公共客户端只持有 `chat_id`；Attachment Service 在处理公共
+上传、状态查询或删除前，必须从已认证的 Mate Chat Store 解析映射：
+
+```text
+authenticated user + chat_id
+  -> Mate Chat Store authorization and lookup
+  -> internal session_id
+  -> Attachment metadata and Runtime binding
+```
+
+`mate-service` 不接受公共调用方自报 `session_id`。Chat 不存在、无权访问或映射
+不可用时，在接触附件账本或 OBS 前返回统一的 `CHAT_NOT_FOUND`。公共附件响应回显
+`chat_id`，不得返回解析得到的 `session_id`。
+
+每个附件在创建时绑定一个全局唯一的内部 `session_id`，之后不能改绑：
 
 ```text
 attachment_id -> exactly one session_id -> exactly one immutable OBS object
@@ -142,9 +167,12 @@ attachment_id -> exactly one session_id -> exactly one immutable OBS object
 `1..128`，匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`。Attachment Service
 不扩展该字符集，因此不会接受 Runtime 无法创建或恢复的 Session ID。
 
-本设计不保存 `tenant_id` 或 `user_id`。`mate-service` 是 Session 和最终用户授权的
-权威服务；Attachment 表只记录 Runtime 所需的 `session_id`。跨 Session 使用同一
-文件时必须重新上传并获得新 ID。
+本设计不在 `t_attachment` 或 `t_attachment_active_detail` 保存 `chat_id`、
+`tenant_id` 或 `user_id`。`mate-service` 及其 Mate Chat Store 是 Chat、映射和
+最终用户授权的权威；`t_attachment` 只记录
+Runtime 所需的 `session_id`。跨 Session 使用同一文件时必须重新上传并获得新 ID。
+删除 Chat 时，`mate-service` 先用映射取得内部 `session_id`，再执行 Runtime 停止和
+附件清理；Attachment Service 不反向查询或重建 `chat_id`。
 
 本版没有 `content_version`。原因是一个 `attachment_id` 只对应一次不可覆盖的
 OBS 内容创建：
@@ -160,7 +188,7 @@ OBS 内容创建：
 上传接口由 `mate-service` 提供：
 
 ```http
-POST /mate-service/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/attachments HTTP/1.1
+POST /mate-service/v1/chats/chat_011CZm8VpK4rNs6WtY2hDqfB/attachments HTTP/1.1
 Host: api.example.com
 Authorization: Bearer <campusmate-access-token>
 Content-Type: multipart/form-data; boundary=...
@@ -177,7 +205,7 @@ Content-Type: application/pdf
 
 `X-Attachment-Size` 表示单个 `file` part 的字节数，不是整个 multipart HTTP Body
 的 `Content-Length`。客户端可从浏览器 `File.size` 或服务端文件元数据取得该值。
-v1 不接受无法预先确定正文长度的上传流。
+本版不接受无法预先确定正文长度的上传流。
 
 `file` part 的 `Content-Disposition` 必须包含非空 `filename`。服务端先按
 Unicode NFC 规范化，再移除控制字符和 `/`、`\` 路径分隔符；规范化结果必须为
@@ -212,10 +240,11 @@ HTTP `Content-Length` 包含 multipart boundary、文件名和表单头，不能
 处理顺序固定为：
 
 ```text
-authorize user and session
+authorize user and chat_id in Mate Chat Store
+  -> resolve chat_id to internal session_id
   -> validate multipart and X-Attachment-Size
   -> generate attachment_id; use it as the exact OBS Object Key
-  -> INSERT attachment(status=UPLOADING) and attachment_active_detail
+  -> INSERT t_attachment(status=UPLOADING, session_id) and t_attachment_active_detail
   -> stream exactly one file part to OBS
        while counting bytes and calculating SHA-256
   -> require actual bytes == X-Attachment-Size
@@ -245,7 +274,7 @@ multipart 声明 MIME 是不可信请求数据，本版不持久化。扫描器�
 ### 5.3 同步等待与异步返回
 
 `Prefer` 采用 [RFC 7240](https://www.rfc-editor.org/rfc/rfc7240.html) 定义的
-`respond-async` 和 `wait` 语义。v1 每次请求只接受一个偏好值：
+`respond-async` 和 `wait` 语义。本版每次请求只接受一个偏好值：
 
 | 请求 | 行为 |
 |---|---|
@@ -271,8 +300,12 @@ multipart 声明 MIME 是不可信请求数据，本版不持久化。扫描器�
 客户端轮询：
 
 ```http
-GET /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+GET /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
 ```
+
+公共上传、状态查询和删除响应只包含 `chat_id`，不包含内部 `session_id`。服务端每次
+都以当前认证上下文重新校验 Chat，而不是把 `chat_id` 或 `attachment_id` 当作访问
+凭据。内部 Runtime resolve/content 接口仍使用 `session_id`。
 
 上传请求不提供同 ID 幂等保证。调用方没有收到确定响应时重新上传，会得到新的
 `attachment_id`；旧的未引用附件由 24 小时清理任务回收。
@@ -307,7 +340,7 @@ READY(referenced)   -> DELETING only through Session deletion
 | `DELETING` | 否 | 已阻止新读取，等待删除 OBS 正文 |
 | `DELETED` | 否 | 正文已删除，只保留不可复用 tombstone |
 
-所有状态变更都在事务中先锁定 `attachment` 主表，再使用活动明细表的
+所有状态变更都在事务中先锁定 `t_attachment` 主表，再使用活动明细表的
 `row_version` 做条件更新。服务不得仅在内存中改变状态，也不得在 OBS I/O 或
 安全扫描期间持有数据库事务。
 
@@ -342,7 +375,7 @@ OBS 负责大对象吞吐，openGauss 负责关系约束、状态查询、条件
 Base64、独立 `object_key` 映射列、ETag、上传方声明 MIME 或文件正文；
 主键 `attachment_id` 的值本身就是 Object Key。
 
-`attachment` 是永久身份与状态主表：
+`t_attachment` 是永久身份与状态主表：
 
 | 字段 | 类型 | 作用 |
 |---|---|---|
@@ -362,8 +395,12 @@ created_at
 deleted_at
 ```
 
-`attachment_active_detail` 是与主表一对一的活动期明细表。除用于关联的
-`attachment_id VARCHAR(35) PRIMARY KEY REFERENCES attachment` 外，只保存以下
+这是内部账本的最小 tombstone，不是公共 HTTP 响应形状。公共查询通过已授权的
+`chat_id` 投影同一状态，并隐藏其中的 `session_id`；Chat 映射仍由 Mate Chat Store
+持有。
+
+`t_attachment_active_detail` 是与主表一对一的活动期明细表。除用于关联的
+`attachment_id VARCHAR(35) PRIMARY KEY REFERENCES t_attachment` 外，只保存以下
 运行字段：
 
 | 字段 | 类型 | 具体作用 |
@@ -404,7 +441,7 @@ deleted_at
 - `referenced_at` 与 `expires_at` 互斥：未引用时前者为空、后者非空，引用后相反；
 - `lease_owner` 和 `lease_until` 同时为空或同时非空；
 - `DELETED` 必须具有 `deleted_at`，并且明细行已经删除；
-- 不保存 `updated_at` 或 `ready_at`。v1 只保留业务所需的创建、首次引用、到期和
+- 不保存 `updated_at` 或 `ready_at`。本版只保留业务所需的创建、首次引用、到期和
   删除时间，后续若需要完整状态审计应增加事件表，而不是扩张永久 tombstone。
 
 索引按两张表职责拆分：主表提供 `(session_id, status)`、`status` 和
@@ -418,7 +455,7 @@ Worker 只在短事务中认领任务，并按固定顺序先锁主表、再锁�
 
 ```text
 BEGIN
-  select attachment and attachment_active_detail; lock in stable ID order
+  select t_attachment and t_attachment_active_detail; lock in stable ID order
   require eligible status and expired/empty lease
   set lease_owner, lease_until, row_version = row_version + 1
 COMMIT
@@ -486,7 +523,7 @@ HTTP multipart stream
 - 禁止 `Files.createTempFile`、`FilePart.transferTo(Path)`、
   `MultipartFile.getBytes()`、`DataBufferUtils.join()`、`collectList()` 和完整
   `ByteArrayOutputStream`；
-- 如果 OBS SDK、扫描器或 Model Provider 只能接受本地文件或完整字节数组，v1
+- 如果 OBS SDK、扫描器或 Model Provider 只能接受本地文件或完整字节数组，本版
   不得启用该实现或宣称支持对应格式。
 
 允许网络栈和 SDK 短暂持有少量分块缓冲，但不能形成第二份完整、持久化的文件。
@@ -495,7 +532,7 @@ HTTP multipart stream
 
 ![跨 Pod 解析与流式读取](./attachment_cross_pod_resolution_flow.svg)
 
-[PlantUML 源码：`attachment_cross_pod_resolution_flow`](./diagram.puml#L198)
+[PlantUML 源码：`attachment_cross_pod_resolution_flow`](./diagram.puml#L217)
 
 ### 9.1 批量 resolve
 
@@ -567,8 +604,11 @@ Provider 支持的内容块，不能获得 OBS Bucket、Endpoint、读取 Header
 公共接口：
 
 ```http
-DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+DELETE /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
 ```
+
+上面的公共请求不接受 `session_id`。`mate-service` 先鉴权 `chat_id` 并从 Mate Chat
+Store 解析内部 `session_id`，再按 `session_id + attachment_id` 执行以下条件更新：
 
 - `referenced_at IS NULL` 且不是 `FAILED + OBJECT_KEY_CONFLICT`：条件更新为
   `DELETING`，返回 `202`；Worker 异步删除 OBS 正文，再原子删除活动明细并把
@@ -585,31 +625,36 @@ DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
 `referenced_at IS NULL AND expires_at <= now()`，并显式排除
 `status=FAILED AND error_code=OBJECT_KEY_CONFLICT` 后，才认领并进入 `DELETING`。
 
-### 10.2 Session 删除
+### 10.2 Chat 删除与内部 Session 清理
 
-Session 是附件保留的唯一业务边界。上层删除 Session 时：
+Mate Chat 是公共删除边界，Runtime Session 是附件数据库中的归属和清理边界。
+上层删除 Chat 时：
 
-1. `mate-service` 先请求 agent-service 停止或中止该 Runtime Session；
+1. `mate-service` 鉴权 `chat_id`，从 Mate Chat Store 取得内部 `session_id`，并先请求
+   agent-service 停止或中止该 Runtime Session；
 2. Attachment Service 将该 `session_id` 下所有非 `DELETED` 且不是
    `FAILED + OBJECT_KEY_CONFLICT` 的记录条件更新为 `DELETING`；
 3. Worker 以 `attachment_id` 为 Key 幂等删除对应 OBS 对象；
-4. 在一个 openGauss 事务中删除 `attachment_active_detail`，再把主表更新为
+4. 在一个 openGauss 事务中删除 `t_attachment_active_detail`，再把主表更新为
    `DELETED` 并写入 `deleted_at`；
-5. 若存在 `OBJECT_KEY_CONFLICT`，Session 立即停止 Runtime 使用并对用户不可见，
-   但存储删除状态保持 pending/quarantined、触发高优先级告警，不能宣称所有
+5. 若存在 `OBJECT_KEY_CONFLICT`，Chat 立即对用户不可见，Session 停止 Runtime
+   使用，但存储删除状态保持 pending/quarantined、触发高优先级告警，不能宣称所有
    字节已删除；只有受审计 reconciliation 证明对象归属并安全删除或确认
    `NotFound`，再删除明细、写入 tombstone 后，才报告存储清理完成；
-6. 没有冲突隔离记录时，Session 删除状态在所有附件删除任务被可靠登记后完成。
+6. 没有冲突隔离记录时，Chat 删除状态在所有附件删除任务被可靠登记后完成；
+   `chat_id -> session_id` 映射的保留或 tombstone 由 Mate Chat Store 自行定义，
+   `t_attachment` 与 `t_attachment_active_detail` 不复制该映射。
 
 本版不提供附件恢复、跨 Session claim、引用计数或合规保留模型。因为每个附件只
-属于一个 Session，Session 删除是常规强制清理入口；来源不明的存储冲突必须先
-经过受审计 quarantine/reconciliation，不能为追求完成状态而删除未知对象。
+属于一个 Session，Chat 删除触发的 Session 清理是常规强制清理入口；来源不明的
+存储冲突必须先经过受审计 quarantine/reconciliation，不能为追求完成状态而删除
+未知对象。
 
 ## 11. 一致性、补偿和多 Pod 恢复
 
 ![删除与对账流程](./attachment_deletion_and_reconciliation.svg)
 
-[PlantUML 源码：`attachment_deletion_and_reconciliation`](./diagram.puml#L281)
+[PlantUML 源码：`attachment_deletion_and_reconciliation`](./diagram.puml#L300)
 
 OBS 和 openGauss 不参加同一个 XA 事务。服务通过状态机、唯一约束、条件更新、
 短租约和周期对账恢复：
@@ -632,12 +677,14 @@ OBS 和 openGauss 不参加同一个 XA 事务。服务通过状态机、唯一�
 
 - 公共接口复用 CampusMate 现有用户认证，内部接口只接受 agent-service 的短期
   service-to-service access token；
-- Attachment Service 根据当前认证上下文判断 Session 权限，不接受请求体自报
+- Attachment Service 根据当前认证上下文判断 Mate Chat 权限，从 Mate Chat Store
+  解析内部 `session_id`，不接受公共路径、请求体或 Header 自报 `session_id`、
   tenant/user；
 - 不存在、越权、跨 Session、过期或删除统一投影为 `INVALID_ATTACHMENT`；
 - 上述统一投影适用于 Runtime `resolve/content` 和无权的公共请求。已通过
-  Session 授权的公共状态 GET 可以返回活动期 `DELETING` 状态或仅含五个字段的
-  `DELETED` tombstone，便于客户端确认异步删除；
+  Chat 授权的公共状态 GET 可以返回活动期 `DELETING` 状态或 `DELETED` 投影，
+  便于客户端确认异步删除；公共投影返回 `chat_id`，不返回 tombstone 中保存的
+  `session_id`；
 - 文件名在保存前去除控制字符和路径分隔符，UI 显示时仍需转义；
 - multipart 声明 MIME 不持久化，Runtime 只使用 `detected_media_type`；
 - 日志只记录 `attachment_id`、Session 的受控摘要、状态、大小、耗时和稳定错误码；
@@ -656,7 +703,7 @@ OBS 和 openGauss 不参加同一个 XA 事务。服务通过状态机、唯一�
 | `INVALID_REQUEST` | 400 | 否 | multipart、Header 或参数无效 |
 | `ATTACHMENT_TOO_LARGE` | 413 | 否 | 声明或实际字节数超过 20 MiB |
 | `ATTACHMENT_SIZE_MISMATCH` | 400 | 否 | 实际长度与 `X-Attachment-Size` 不同 |
-| `SESSION_NOT_FOUND` | 404 | 否 | 公共上传时 Session 不存在或无权访问 |
+| `CHAT_NOT_FOUND` | 404 | 否 | 公共上传、查询或删除时 Chat 不存在、无权访问或没有有效 Session 映射 |
 | `INVALID_ATTACHMENT` | 404 | 否 | ID 不存在、跨 Session、删除、过期或无权访问的统一投影 |
 | `ATTACHMENT_NOT_READY` | 409 | 是 | 已授权附件仍为 `UPLOADING/PROCESSING` |
 | `ATTACHMENT_BLOCKED` | 422 | 否 | 安全扫描拒绝内容 |
@@ -716,6 +763,10 @@ Repository 和状态机是独立端口，负责 openGauss 事务、租约、条�
 
 ### 15.2 状态与客户端
 
+- 公共上传、查询和删除只接受 `chat_id`；有效 Chat 经 Mate Chat Store 解析后绑定
+  `t_attachment.session_id`，无效或越权 Chat 返回 `CHAT_NOT_FOUND`；
+- 所有公共 AttachmentResource 和 `Location` 只使用 `chat_id`，均不出现
+  `session_id`；
 - 默认和 `respond-async` 返回 `202 + Location + Retry-After`；
 - `wait=N` 在 10 秒上限内返回 `201`、`202`、`422` 或 `503`；返回
   `422/503` 且资源已创建时包含 `Location`；
@@ -735,6 +786,8 @@ Repository 和状态机是独立端口，负责 openGauss 事务、租约、条�
 
 ### 15.4 授权、完整性和删除
 
+- `t_attachment` 与 `t_attachment_active_detail` 不含 `chat_id`；删除 Chat 时只由
+  Mate Chat Store 提供已授权映射，Attachment Service 不反向推导 Chat；
 - 跨 Session、错误服务身份、非 READY、过期和删除记录均被拒绝；
 - 批量 resolve 要么全部设置首次 `referenced_at` 并清空 `expires_at`，要么全部不变；
 - 内容流必须与 `size_bytes + sha256` 一致；
@@ -765,5 +818,6 @@ plantuml -tsvg diagram.puml
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v2.0.0` | 2026-08-04 | 公共附件边界从 Runtime `session_id` 收敛为 Mate `chat_id`：公共上传、查询和删除统一使用 `/mate-service/v1/chats/{chat_id}/attachments`，`mate-service` 通过 Mate Chat Store 鉴权并解析内部 `session_id`；公共响应不再披露 `session_id`，内部 Runtime resolve/content 继续使用它；明确 `t_attachment` 与 `t_attachment_active_detail` 不保存 `chat_id` 或映射，并统一数据库表命名 |
 | `v1.1.0` | 2026-08-03 | Object Key 收敛为 `attachment_id`；openGauss 拆分永久身份/状态主表与非 DELETED 明细表；删除完成后清理明细，只保留五字段 `DELETED` tombstone；移除独立 Object Key、ETag、声明 MIME 和重复引用布尔列；冻结 filename 规范化，并闭合 create-only 冲突的安全对账流程 |
 | `v1.0.0` | 2026-08-03 | 首版目标设计；确定 OBS 正文、openGauss 元数据、20 MiB 流式上传、异步扫描、内部批量解析、跨 Pod 读取、租约和补偿边界 |

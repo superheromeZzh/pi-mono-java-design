@@ -6,18 +6,20 @@ title WebSocket Connection Scope Comparison
 ' Source: packages/gateway-protocol/src/schema/logs-chat.ts (ChatSendParamsSchema, ChatEventSchema)
 ' Source: src/gateway/server-broadcast.ts (createGatewayBroadcaster)
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
-' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (wireServerRoutes)
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (handle)
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java (getOrCreate)
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (WebSocket v2 target)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/mate-chat-ws-v2.asyncapi.yaml
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw uses one Gateway connection for requests and events across sessions.
 ' Current Java behavior: one connection captures one AgentSession selected by a query parameter.
-' Target design: one CampusAgent connection is bound to one caller-owned session and agent after connect.
-' Target design: globally unique session_id is the only Runtime session key; tenant and user stay upstream.
-' Target design: one Pod permits one active read/write connection per session; resume replaces the old generation.
-' Target design: RuntimeSessionStore persists authority in a database; active runs remain Pod-local.
-' Design reason: Session scope fixes authorization, model, disclosure, and audit boundaries.
+' Target-only design: Agent UI connects to a public mate-service WebSocket scoped by chat_id.
+' Target-only design: mate-service opens a separate internal Runtime WebSocket scoped by session_id.
+' Target-only design: public and internal connection identities, request ids, event seq, flow control, and close are independent.
+' Architecture change: mate-service is a semantic gateway, not a WebSocket byte tunnel.
+' Target design: RuntimeSessionStore never stores chat_id; active runs remain Pod-local.
+' Design reason: separate user-facing Chat ownership from Runtime Session execution.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -54,23 +56,25 @@ package "pi-mono-java v1 - current" as java_v1 {
   java_pool --> java_session
 }
 
-package "CampusAgent v2 - target only" as campus_v2 {
-  actor "mate-service or server SDK" as cc_client
-  component "Trusted gateway\nuser-IP affinity" as cc_edge
-  component "Current connection\ngeneration N" as cc_conn
-  component "Replaced connection\ngeneration N-1" as cc_old_conn
+package "Campus two-hop target only" as campus_v2 {
+  actor "Agent UI" as cc_ui
+  component "Public WebSocket\nchat_id scope" as cc_public_conn
+  component "mate-service\nChat semantic gateway" as cc_mate
+  database "Mate Chat Store\nchat_id to session_id" as cc_chat_store
+  component "Internal WebSocket\nsession_id scope" as cc_internal_conn
+  component "Trusted internal gateway\nSession affinity metadata" as cc_edge
   component "ManagedSessionPool" as cc_pool
   component "ManagedRunHub" as cc_hub
-  database "Session 1 / immutable Agent A" as cc_session
-  database "RuntimeSessionStore\ndatabase authority" as cc_store
+  database "RuntimeSessionStore\nno chat_id" as cc_store
 
-  cc_client --> cc_edge : wss service call
-  cc_edge --> cc_conn : full path, same Pod
-  cc_conn --> cc_pool : globally unique session_id
-  cc_pool --> cc_old_conn : close 4409 SESSION_REPLACED
-  cc_pool --> cc_session
-  cc_session --> cc_hub : zero or one active run
-  cc_pool --> cc_store : persist session and history
+  cc_ui --> cc_public_conn : public Frames
+  cc_public_conn --> cc_mate : one Chat
+  cc_mate --> cc_chat_store : authorize and map chat_id
+  cc_mate --> cc_internal_conn : rebuild Runtime Frames
+  cc_internal_conn --> cc_edge : trusted session affinity
+  cc_edge --> cc_pool : globally unique session_id
+  cc_pool --> cc_hub : zero or one active run
+  cc_pool --> cc_store : persist Runtime state
 }
 
 note bottom of openclaw
@@ -84,12 +88,11 @@ note bottom of java_v1
 end note
 
 note bottom of campus_v2
-  session_id is supplied and managed upstream.
-  Tenant and user identities stay upstream.
-  Agent binding is immutable after create.
-  One Pod has one active read/write connection.
-  There is no observer connection or Redis owner.
-  IP changes and Pod restart break active-run continuity.
+  UI receives chat_id and never receives session_id.
+  Agent Runtime receives session_id and never receives chat_id.
+  The two WebSocket hops have independent transport state.
+  Session affinity is trusted routing metadata, not an owner.
+  Pod loss still interrupts an active run.
 end note
 @enduml
 
@@ -101,20 +104,19 @@ title WebSocket Handshake and Authentication Comparison
 ' Source: docs/gateway/clients.md (scopes, pairing, capabilities)
 ' Source: packages/gateway-protocol/src/schema/frames.ts (ConnectParamsSchema, HelloOkSchema)
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
-' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
+' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (wireServerRoutes)
 ' Source: docs/asyncapi/chat-ws.yaml (query parameters and v1 messages)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/mate-chat-ws-v2.asyncapi.yaml
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw emits a challenge before the first client connect Request Frame.
 ' Current Java behavior: the route reads conversation_id and creates or resumes a session immediately.
-' Target design: CampusAgent authenticates the Upgrade and then requires connect within five seconds.
-' Target design: the trusted internal gateway validates existing private-key/JWT service authentication.
-' Target design: private keys never travel; inbound credentials are not forwarded to Managers.
-' Target design: /agent-service/v1/ws/chat is the full gateway and service path.
-' Target design: URL v1 is the service API version; connect protocol 2 is the Frame version.
-' Target design: a wss URI starts establishment; the WebSocket exists only after HTTP 101.
-' Target design: HTTP 101 and the connect RequestFrame are different handshake layers.
-' Target design: typed structured delta is intrinsic to protocol v2; only full_thinking is optional.
-' Design reason: service credentials stay in transport authentication and never enter chat payloads.
+' Target-only design: the UI authenticates and upgrades a public mate-service WebSocket before public connect.
+' Target-only design: mate-service independently authenticates and upgrades an internal agent-service WebSocket.
+' Target-only design: public create generates chat_id and session_id; public resume accepts only chat_id.
+' Target-only design: internal connect carries session_id and never carries chat_id.
+' Target-only design: trusted session-affinity metadata is derived from the authoritative mapping and validated by the internal gateway.
+' Architecture change: mate-service rebuilds semantic Frames and is not a WebSocket byte tunnel.
+' Design reason: Chat ownership and Runtime execution require separate authentication, routing, and failure boundaries.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -127,9 +129,11 @@ participant "OpenClaw Gateway" as OG
 actor "Java v1 client" as JV1C
 participant "ServerMode" as SM
 participant "ChatWebSocketHandler" as CWH
-actor "mate-service or server SDK" as CC
+actor "Agent UI" as UI
+participant "mate-service\nPublic Chat endpoint" as MATE
+database "Mate Chat Store" as MCS
 participant "Trusted internal gateway" as EDGE
-participant "agent-service Chat endpoint" as V2
+participant "agent-service\nInternal Runtime endpoint" as V2
 participant "Agent and Model Managers" as MGR
 
 == OpenClaw implemented ==
@@ -153,33 +157,37 @@ The baseline route shown here extracts only conversation_id.
 There is no connect protocol negotiation.
 end note
 
-== CampusAgent v2 target: HTTP opening handshake ==
-CC -> CC : call WebSocket library\nconnect(wss URI)
-CC -> EDGE : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/v1/ws/chat\nexisting signed-JWT integration
-EDGE -> EDGE : validate service JWT and Upgrade\nprivate key never travels
-EDGE -> V2 : preserve full path, principal, and Upgrade
-V2 --> EDGE : accept WebSocket Upgrade
-EDGE --> CC : HTTP/1.1 101 Switching Protocols
+== Campus target: public Chat connection ==
+UI -> MATE : open TLS and HTTP Upgrade\nGET /mate-service/v1/ws/chat\nuser authentication context
+MATE -> MATE : authenticate user and validate Upgrade
+MATE --> UI : public HTTP 101 Switching Protocols
+UI -> MATE : public req connect mode=create\n{agent_id, model_id, idempotency_key}
+MATE -> MCS : check idempotency and Chat quota\nvalidate user access
+MATE -> MATE : guardrails, intent, and state machine
+MATE -> MCS : allocate chat_id and session_id\npersist CREATING mapping
 
-== CampusAgent v2 target: application handshake ==
-CC -> V2 : WebSocket Text Frame within 5 seconds\nreq connect {mode, session_id, agent_id,\nmodel_id?, traceparent?}
+== Campus target: independent internal Runtime connection ==
+MATE -> EDGE : open separate TLS and HTTP Upgrade\nGET /agent-service/internal/v1/ws/chat\nservice authentication and trusted affinity
+EDGE -> EDGE : validate service identity, Upgrade,\nand session-affinity metadata
+EDGE -> V2 : preserve internal principal and full path
+V2 --> EDGE : accept internal Upgrade
+EDGE --> MATE : internal HTTP 101 Switching Protocols
+MATE -> V2 : new internal req id\nconnect mode=create\n{session_id, agent_id, model_id}
 V2 -> MGR : target-audience access token\nauthorize agent and resolve model
 MGR --> V2 : effective identity and model
-V2 --> CC : res payload {protocol=2, connection_id,\ngeneration, session, limits, features, active_run?}
-note over CC,V2
-No business query parameter and no URL token.
-Browsers cannot call this endpoint directly.
-End-user identity stays in mate-service.
-The wss URI requests establishment; it is not an open WebSocket.
-The HTTPS form is a handshake target, not a REST API.
-HTTP 101 creates transport; connect binds the session.
-The connection cannot switch agent or session.
+V2 --> MATE : internal res payload\n{internal connection_id, session_id, features}
+MATE -> MCS : mark mapping ACTIVE\nstore public idempotency result
+MATE --> UI : public res payload\n{public connection_id, chat_id, features}
+note over UI,V2
+The public and internal opening handshakes return two independent 101 responses.
+Each hop has its own connection_id, RequestFrame.id, EventFrame.seq,
+Ping/Pong, backpressure budget, and close lifecycle.
+The public Frame never exposes session_id or the internal connection identity.
+The internal Frame never carries chat_id or final-user identity.
+mate-service terminates both protocols and performs semantic projection.
+Private keys and inbound credentials never enter Frames, Prompt, or Manager calls.
 URL v1 and Frame protocol 2 are independent versions.
-Inbound JWT is never forwarded to a Manager.
-Unknown capabilities are ignored and not echoed.
-Typed structured delta is not a capability.
-full_thinking is optional and policy-gated.
-Effective features do not replace request authorization.
+Public success is emitted only after internal create or resume succeeds.
 end note
 @enduml
 
@@ -194,13 +202,16 @@ title Stream and Recovery Comparison
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (mapEventToJson, close handling)
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (ManagedRunHub)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/mate-chat-ws-v2.asyncapi.yaml
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw clients recover from sequence gaps by reconnecting and reloading authoritative state.
 ' Current Java behavior: message_update sends the accumulated message and disconnect aborts streaming.
-' Target design: Pool and Hub retain active-run state only inside one Pod; RuntimeSessionStore is database authority.
-' Target design: same-Pod resume replaces the connection generation and captures an atomic snapshot.
-' Target design: Pod restart rebuilds the session and records interrupted history; it does not continue the active run.
-' Design reason: network disconnect must not abort a local run, but v1 does not claim cross-Pod continuation.
+' Target-only design: a public reconnect resumes by chat_id and mate-service resolves the authoritative session_id mapping.
+' Target-only design: the internal Runtime connection resumes by session_id with trusted session-affinity metadata.
+' Target-only design: public and internal connection sequences and recovery state are independent.
+' Target-only design: Pool and Hub retain active-run state only inside one Pod; RuntimeSessionStore is database authority.
+' Target-only design: Pod restart rebuilds the session and records interrupted history; it does not continue the active run.
+' Design reason: each hop must recover independently without making a network connection the owner of a local run.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -214,8 +225,10 @@ participant "Chat history" as OCH
 actor "Java v1 client" as JVC
 participant "ChatWebSocketHandler" as JWH
 participant "AgentSession" as JAS
-actor "mate-service" as CCC
-participant "Trusted gateway" as CCG
+actor "Agent UI" as UI
+participant "mate-service" as MATE
+database "Mate Chat Store" as MCS
+participant "Trusted internal gateway" as CCG
 participant "agent-service Pod A" as CCW
 participant "ManagedRunHub" as MRH
 database "RuntimeSessionStore" as CCH
@@ -246,38 +259,56 @@ end note
 
 == CampusAgent v2 target only ==
 MRH --> CCW : message.updated {run_seq, typed delta}
-CCW --> CCC : current delta only
-CCC -x CCW : connection closes
+CCW --> MATE : internal EventFrame seq=I\ncurrent delta only
+MATE --> UI : public EventFrame seq=P\nprojected delta only
+UI -x MATE : public connection closes
 note over MRH
-The run continues inside Pod A without a subscriber.
+The internal connection and run may continue after the public connection closes.
 end note
 
-alt Same-Pod resume by user-IP affinity
-  CCC -> CCG : reconnect and req connect mode=resume
-  CCG -> CCW : route full path to Pod A
+UI -> MATE : new public Upgrade and connect mode=resume {chat_id}
+MATE -> MCS : authorize chat_id and resolve session_id
+MCS --> MATE : session_id and trusted affinity input
+
+alt Existing internal connection is healthy
+  MATE -> CCW : keep the bound session_id connection\nsession.get and chat.history
+  CCW -> CCH : read authoritative history watermark
+  CCH --> CCW : messages and RunRecord state
+  CCW --> MATE : Runtime snapshot and history
+  MATE --> UI : public connect response and projected snapshot
+else Internal connection must resume on the same Pod
+  MATE -> CCG : separate internal Upgrade and resume {session_id}\nwith trusted session-affinity metadata
+  CCG -> CCG : validate protected routing metadata
+  CCG -> CCW : route internal path to Pod A
   CCW -> MRH : increment generation, replace old subscription,\nand atomically capture cursor
   MRH --> CCW : active_run snapshot at run_seq=N\nand history_seq=H
-  CCW --> CCC : connect response with generation, frozen config,\npartial message or null, open contents, and tools
-  CCC -> CCW : chat.history(runId, through H)
+  CCW --> MATE : internal connect response with generation,\nfrozen config, snapshot, and cursor
+  MATE -> CCW : internal chat.history(runId, through H)
   CCW -> CCH : read database history through H
   CCH --> CCW : prior messages and tool results
-  CCW --> CCC : authoritative history
+  CCW --> MATE : authoritative Runtime history
+  MATE --> UI : new public seq and projected snapshot/history
   MRH --> CCW : deltas after N
-  CCW --> CCC : ordered message.updated events
+  CCW --> MATE : ordered internal message.updated events
+  MATE --> UI : independently sequenced public events
 else Pod restart or routing to another Pod
-  CCC -> CCG : reconnect after Pod A is unavailable
+  MATE -> CCG : internal resume after Pod A is unavailable
   CCG -> CCB : route to available Pod B
   CCB -> CCH : rebuild Session and Agent
   CCH --> CCB : persisted complete content blocks\nand active RunRecord
   CCB -> CCH : persist Message.status=interrupted\nand RunRecord.outcome=interrupted
-  CCB --> CCC : connect response with active_run=null
-  CCC -> CCB : chat.history
+  CCB --> MATE : internal connect response with active_run=null
+  MATE -> CCB : internal chat.history
   CCB -> CCH : read authoritative history
   CCH --> CCB : interrupted Message and RunRecord
-  CCB --> CCC : interrupted history
+  CCB --> MATE : interrupted Runtime history
+  MATE --> UI : public interrupted projection
 end
-note over CCG,CCB
-No Redis, Session Header, cross-Pod forwarding,\nor distributed run owner exists in v1.
+note over UI,CCB
+Public and internal connection_id, RequestFrame.id, EventFrame.seq,
+Ping/Pong, backpressure, and close state are never reused across hops.
+Trusted affinity is a routing hint, not a distributed run owner.
+No cross-Pod active-run continuation is promised.
 Unclosed tail content is not guaranteed after restart.
 end note
 @enduml
@@ -295,11 +326,14 @@ title WebSocket Transport Dependency Inversion Comparison
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java (handle)
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md (SessionTransport)
+' Target source: pi-mono-java-manager-driven-multi-agent-runtime/mate-chat-ws-v2.asyncapi.yaml
 ' Observed behavior: OpenClaw SDK clients depend on OpenClawTransport, while server broadcast still operates on WebSocket clients.
 ' Current Java behavior: ChatWebSocketHandler directly owns session subscription and aborts the run on disconnect.
-' Target design: ChatWebSocketAdapter depends on SessionTransport and ManagedSessionTransport owns generation and session semantics.
-' Target design: RuntimeSessionStore is the database authority; Pool and Hub remain Pod-local.
-' Design reason: protocol adapters must not own session or active-run lifetime.
+' Target-only design: mate-service terminates the public protocol, performs Chat semantics, and opens an independent Runtime client connection.
+' Target-only design: agent-service ChatWebSocketAdapter depends on SessionTransport and ManagedSessionTransport owns Runtime semantics.
+' Target-only design: RuntimeSessionStore is the database authority; Pool and Hub remain Pod-local and never store chat_id.
+' Architecture change: the gateway performs semantic Frame mapping instead of forwarding WebSocket bytes.
+' Design reason: protocol adapters and physical connections must not own Chat, Session, or active-run lifetime.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -336,15 +370,23 @@ package "pi-mono-java v1 - current" as java_v1_pkg {
   java_handler --> java_agent : subscribe / prompt / abort
 }
 
-package "CampusAgent v2 server - target only" as cc_target_pkg {
-  component "ChatWebSocketAdapter" as cc_adapter
+package "Campus two-hop target only" as cc_target_pkg {
+  component "MatePublicWebSocketAdapter\nchat_id scope" as cc_public_adapter
+  component "ChatOrchestrator\nauthorize, map, project" as cc_orchestrator
+  database "Mate Chat Store\nchat_id to session_id" as cc_chat_store
+  component "RuntimeWebSocketClient\nsession_id scope" as cc_runtime_client
+  component "Agent ChatWebSocketAdapter" as cc_adapter
   interface "SessionTransport\nconnect / request / events / close" as cc_transport
   component "ManagedSessionTransport" as cc_managed
   component "ManagedSessionPool" as cc_pool
   component "ManagedRunHub" as cc_hub
-  database "RuntimeSessionStore" as cc_store
+  database "RuntimeSessionStore\nno chat_id" as cc_store
   component "Future HTTP and SSE adapter" as cc_sse
 
+  cc_public_adapter --> cc_orchestrator : public Frames and flow control
+  cc_orchestrator --> cc_chat_store : authorize and resolve mapping
+  cc_orchestrator --> cc_runtime_client : rebuild internal Frames
+  cc_runtime_client --> cc_adapter : independent WebSocket
   cc_adapter --> cc_transport
   cc_sse --> cc_transport
   cc_managed ..|> cc_transport
@@ -363,10 +405,13 @@ note bottom of oc_server_pkg
 end note
 
 note bottom of cc_target_pkg
-  Adapter maps closed Frames and network backpressure.
+  Public Adapter and Runtime Client terminate separate protocols.
+  They do not share 101, connection_id, request id, seq,
+  Ping/Pong, backpressure, or close state.
+  ChatOrchestrator maps chat_id to session_id and projects events.
+  Runtime components never receive or store chat_id.
   Managed transport owns generation, snapshot, and subscription.
-  One Pod has one active read/write connection per session.
-  Database history survives restart; active runs do not.
+  Database history survives restart; active runs do not cross Pods.
 end note
 @enduml
 
@@ -383,10 +428,11 @@ title Attachment Data Plane Comparison
 ' Current Java behavior: the v1 WebSocket prompt accepts text only; general attachment transport is not implemented.
 ' Target source: campusmate-attachment-service/README.md
 ' Target source: pi-mono-java-manager-driven-multi-agent-runtime/README.md attachment section
-' Target design: CampusMate keeps a permanent attachment identity/state row and active lifecycle detail in shared openGauss.
+' Target design: CampusMate public attachment APIs authorize chat_id and resolve session_id in Mate Chat Store.
+' Target design: CampusMate keeps permanent identity/state and active lifecycle detail in shared openGauss under t_ tables.
 ' Target design: private OBS stores immutable bodies under Object Key equal to attachment_id; no locator mapping is persisted.
 ' Target design: agent-service uses internal batch resolve and content streaming, without local files or direct OBS access.
-' Design reason: keep the file data plane outside Chat Frames while allowing any service Pod to read authoritative content.
+' Design reason: keep public Chat ownership and the file data plane outside Runtime Frames while allowing any service Pod to read authoritative content.
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -418,11 +464,12 @@ package "pi-mono-java v1 - current" as JavaAttachment {
 
 package "CampusAgent v2 - target only" as CampusAttachment {
   actor "Final client" as CampusClient
-  component "CampusMate public upload\nand status API" as PublicUpload
+  component "CampusMate public upload\n/mate-service/v1/chats/{chat_id}/attachments" as PublicUpload
+  database "Mate Chat Store\nchat_id to session_id" as MateChatStore
   component "CampusMate Attachment Service\nany Pod" as AttachmentService
   package "Shared openGauss" as AttachmentDatabase {
-    database "attachment\npermanent identity and state" as AttachmentDb
-    database "attachment_active_detail\nactive lifecycle metadata" as AttachmentDetail
+    database "t_attachment\npermanent identity and state" as AttachmentDb
+    database "t_attachment_active_detail\nactive lifecycle metadata" as AttachmentDetail
   }
   cloud "Private OBS\nkey = attachment_id\nimmutable object body" as AttachmentObs
   component "CampusMate scan and delete worker" as AttachmentWorker
@@ -430,8 +477,9 @@ package "CampusAgent v2 - target only" as CampusAttachment {
   component "agent-service Pod B" as AgentPodB
   database "RuntimeSessionStore\nprojected metadata snapshot" as RuntimeStore
 
-  CampusClient --> PublicUpload : multipart upload and poll READY
-  PublicUpload --> AttachmentService
+  CampusClient --> PublicUpload : chat_id, multipart upload, and poll READY
+  PublicUpload --> MateChatStore : authorize chat_id and resolve session_id
+  MateChatStore --> AttachmentService : internal session_id
   AttachmentService --> AttachmentDb : create identity and status row
   AttachmentService --> AttachmentDetail : create active detail
   AttachmentService --> AttachmentObs : put attachment_id and body stream
@@ -439,8 +487,8 @@ package "CampusAgent v2 - target only" as CampusAttachment {
   AttachmentWorker --> AttachmentObs : scan or delete by attachment_id
   AttachmentWorker --> AttachmentDb : transition lifecycle status
   AttachmentWorker --> AttachmentDetail : remove after OBS delete
-  AgentPodA --> AttachmentService : internal batch resolve
-  AgentPodB --> AttachmentService : same ID after Pod change
+  AgentPodA --> AttachmentService : session_id plus ordered IDs\ninternal batch resolve
+  AgentPodB --> AttachmentService : same session_id and IDs\nafter Pod change
   AgentPodA --> AttachmentService : internal content stream
   AgentPodB --> AttachmentService : internal content stream
   AttachmentService --> AttachmentDb : authorize session and validate status
@@ -472,6 +520,8 @@ note bottom of JavaAttachment
 end note
 
 note bottom of CampusAttachment
+  Public clients use chat_id and never receive session_id.
+  Attachment metadata and Runtime use session_id and never store chat_id.
   WebSocket carries attachment IDs only.
   The OBS Object Key is exactly attachment_id.
   Resolve returns no OBS URL or credential.

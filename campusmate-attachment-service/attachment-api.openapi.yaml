@@ -2,7 +2,7 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: CampusMate Attachment Service API
-  version: 1.1.0
+  version: 2.0.0
   description: |
     CampusMate 中由 mate-service 承载的附件服务目标契约。
 
@@ -10,6 +10,12 @@ info:
     attachment_id。openGauss 使用永久身份/状态主表和仅活动期明细表，
     不保存第二套 Object Key 映射。所有上传和读取均为流式处理，不使用 Pod 本地文件
     或完整内存副本。
+
+    公共接口只接受 Mate Chat 的 chat_id。mate-service 先鉴权 Chat，并从权威
+    Mate Chat Store 解析内部 session_id；公共请求和响应不披露 session_id。
+    t_attachment 与 t_attachment_active_detail 只保存 Runtime 绑定所需数据，
+    不保存 chat_id 或映射。内部 agent-service resolve/content 接口继续使用
+    session_id。
 
     本文件是 target-only 设计，不表示现有 Java 服务已经实现这些端点。
   contact:
@@ -25,14 +31,15 @@ tags:
   - name: Internal runtime
     description: agent-service 使用的服务间解析和内容流接口
 paths:
-  /v1/sessions/{session_id}/attachments:
+  /v1/chats/{chat_id}/attachments:
     post:
       tags:
         - Public attachments
       operationId: uploadAttachment
       summary: 流式上传单个附件
       description: |
-        验证调用用户和 Session 后，服务端生成 attachment_id，并将它原样作为
+        验证调用用户和 Mate Chat，并从 Mate Chat Store 解析内部 session_id 后，
+        服务端生成 attachment_id，并将它原样作为
         完整 OBS Object Key；openGauss 在一个事务中创建 UPLOADING 主表记录和
         活动明细，再把唯一的 file part 直接流式写入 OBS。实际字节数必须与
         X-Attachment-Size 完全一致；
@@ -46,11 +53,11 @@ paths:
 
         省略 Prefer 或使用 respond-async 时，在 OBS 写入成功且状态提交为
         PROCESSING 后返回 202。使用 wait=N 时最多等待 min(N, 10) 秒。
-        v1 每个请求只接受一个 Prefer 值。
+        本契约每个请求只接受一个 Prefer 值。
       security:
         - CampusMateAccessToken: []
       parameters:
-        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/ChatId'
         - $ref: '#/components/parameters/AttachmentSize'
         - $ref: '#/components/parameters/Prefer'
       requestBody:
@@ -112,14 +119,14 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/SessionNotFound'
+          $ref: '#/components/responses/ChatNotFound'
         '413':
           $ref: '#/components/responses/AttachmentTooLarge'
         '422':
           $ref: '#/components/responses/AttachmentBlocked'
         '503':
           $ref: '#/components/responses/AttachmentDependencyUnavailable'
-  /v1/sessions/{session_id}/attachments/{attachment_id}:
+  /v1/chats/{chat_id}/attachments/{attachment_id}:
     get:
       tags:
         - Public attachments
@@ -127,14 +134,14 @@ paths:
       summary: 查询附件状态
       description: |
         返回当前 PROCESSING、READY、BLOCKED、FAILED、DELETING 或 DELETED
-        状态。当前 Session 的授权调用方可以读取 DELETED tombstone，
-        用于确认异步删除已完成。DELETED 只返回 attachment_id、session_id、
-        status、created_at 和 deleted_at；活动明细已被清除。响应不包含 OBS
+        状态。当前 Chat 的授权调用方可以读取 DELETED tombstone 的公共投影，
+        用于确认异步删除已完成。公共响应返回 chat_id，不返回账本保存的
+        session_id；活动明细已被清除。响应不包含 OBS
         Bucket、Endpoint、URL 或存储凭据。
       security:
         - CampusMateAccessToken: []
       parameters:
-        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/ChatId'
         - $ref: '#/components/parameters/AttachmentId'
       responses:
         '200':
@@ -155,7 +162,7 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/InvalidAttachment'
+          $ref: '#/components/responses/PublicAttachmentNotFound'
         '503':
           $ref: '#/components/responses/AttachmentDependencyUnavailable'
     delete:
@@ -174,7 +181,7 @@ paths:
       security:
         - CampusMateAccessToken: []
       parameters:
-        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/ChatId'
         - $ref: '#/components/parameters/AttachmentId'
       responses:
         '202':
@@ -193,7 +200,7 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
-          $ref: '#/components/responses/InvalidAttachment'
+          $ref: '#/components/responses/PublicAttachmentNotFound'
         '409':
           $ref: '#/components/responses/AttachmentReferenced'
         '503':
@@ -325,12 +332,23 @@ components:
         agent-service 面向 mate-service 的短期 service-to-service access token。
         不能复用入站用户令牌或 OBS 长期凭据。
   parameters:
+    ChatId:
+      name: chat_id
+      in: path
+      required: true
+      description: |
+        mate-service 签发的业务 Chat ID。Attachment Service 将它视为不透明值，
+        使用当前认证上下文在 Mate Chat Store 中鉴权并解析内部 session_id；
+        该值不写入附件表。
+      schema:
+        $ref: '#/components/schemas/ChatId'
     SessionId:
       name: session_id
       in: path
       required: true
       description: |
-        上层服务生成、在 Runtime 部署范围内全局唯一且删除后不复用的 Session ID。
+        仅供内部 agent-service 接口使用、在 Runtime 部署范围内全局唯一且删除后
+        不复用的 Session ID。公共附件接口不得接受或披露该值。
       schema:
         $ref: '#/components/schemas/SessionId'
     AttachmentId:
@@ -358,7 +376,7 @@ components:
       in: header
       required: false
       description: |
-        RFC 7240 客户端响应偏好。v1 每次请求只接受 respond-async 或 wait=N
+        RFC 7240 客户端响应偏好。本契约每次请求只接受 respond-async 或 wait=N
         其中一个值；N 为最多 10 位的非负十进制秒数，实际等待上限为 10 秒。
         省略时默认异步。
       schema:
@@ -384,7 +402,7 @@ components:
       schema:
         type: string
         format: uri-reference
-      example: /mate-service/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/attachments/attachment_011CZm8VpK4rNs6WtY2hDqfB
+      example: /mate-service/v1/chats/chat_011CZm8VpK4rNs6WtY2hDqfB/attachments/attachment_011CZm8VpK4rNs6WtY2hDqfB
     AttachmentLocationIfCreated:
       description: |
         只在上传已创建持久附件资源时返回的状态 URL。如果失败发生在
@@ -452,16 +470,36 @@ components:
             code: FORBIDDEN
             message: The caller is not allowed to perform this operation.
             retryable: false
-    SessionNotFound:
-      description: Session 不存在或当前用户无权访问
+    ChatNotFound:
+      description: Chat 不存在、当前用户无权访问或没有有效 Runtime Session 映射
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Error'
           example:
-            code: SESSION_NOT_FOUND
-            message: The session was not found.
+            code: CHAT_NOT_FOUND
+            message: The chat was not found.
             retryable: false
+    PublicAttachmentNotFound:
+      description: |
+        Chat 不存在、无权访问或没有有效 Runtime Session 映射时返回
+        CHAT_NOT_FOUND；Chat 已授权但附件不存在、不属于其内部 Session 或不可见时
+        返回 INVALID_ATTACHMENT。两种响应均不披露 session_id。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            chatNotFound:
+              value:
+                code: CHAT_NOT_FOUND
+                message: The chat was not found.
+                retryable: false
+            invalidAttachment:
+              value:
+                code: INVALID_ATTACHMENT
+                message: The attachment is not available for this chat.
+                retryable: false
     InvalidAttachment:
       description: |
         附件不存在、跨 Session、过期或对当前调用方不可见的统一非泄露响应。
@@ -500,14 +538,14 @@ components:
             message: The attachment was rejected by the content security policy.
             retryable: false
     AttachmentReferenced:
-      description: 附件已经进入 Session 消息历史，不能单独删除
+      description: 附件已经进入对应 Runtime Session 消息历史，不能单独删除
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Error'
           example:
             code: ATTACHMENT_REFERENCED
-            message: Delete the session to remove a referenced attachment.
+            message: Delete the chat to remove a referenced attachment.
             retryable: false
     AttachmentNotReady:
       description: 已授权附件仍在上传或处理
@@ -564,6 +602,16 @@ components:
                 message: Attachment storage requires integrity reconciliation.
                 retryable: false
   schemas:
+    ChatId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+      description: |
+        mate-service 管理的不透明业务 Chat ID。其签发规则由 Mate Chat 契约负责；
+        Attachment Service 只校验安全的路径段语法并通过 Mate Chat Store 鉴权解析。
+      examples:
+        - chat_011CZm8VpK4rNs6WtY2hDqfB
     SessionId:
       type: string
       minLength: 1
@@ -618,7 +666,8 @@ components:
         服务端清除控制字符和路径分隔符后的显示名。调用方渲染时仍须转义。
     AttachmentResource:
       description: |
-        活动附件返回运行元数据；DELETED tombstone 只返回永久主表中的五个字段。
+        面向公共 Chat API 的附件投影。活动附件返回运行元数据；DELETED 返回
+        tombstone 的安全投影。两者都包含 chat_id 且不包含内部 session_id。
       oneOf:
         - $ref: '#/components/schemas/ActiveAttachmentResource'
         - $ref: '#/components/schemas/DeletedAttachmentResource'
@@ -636,7 +685,7 @@ components:
       additionalProperties: false
       required:
         - attachment_id
-        - session_id
+        - chat_id
         - status
         - filename
         - expected_size_bytes
@@ -644,8 +693,8 @@ components:
       properties:
         attachment_id:
           $ref: '#/components/schemas/AttachmentId'
-        session_id:
-          $ref: '#/components/schemas/SessionId'
+        chat_id:
+          $ref: '#/components/schemas/ChatId'
         status:
           $ref: '#/components/schemas/ActiveAttachmentStatus'
         filename:
@@ -709,15 +758,15 @@ components:
       additionalProperties: false
       required:
         - attachment_id
-        - session_id
+        - chat_id
         - status
         - created_at
         - deleted_at
       properties:
         attachment_id:
           $ref: '#/components/schemas/AttachmentId'
-        session_id:
-          $ref: '#/components/schemas/SessionId'
+        chat_id:
+          $ref: '#/components/schemas/ChatId'
         status:
           type: string
           const: DELETED
@@ -803,7 +852,7 @@ components:
             - INVALID_REQUEST
             - UNAUTHENTICATED
             - FORBIDDEN
-            - SESSION_NOT_FOUND
+            - CHAT_NOT_FOUND
             - INVALID_ATTACHMENT
             - ATTACHMENT_TOO_LARGE
             - ATTACHMENT_SIZE_MISMATCH
@@ -832,7 +881,7 @@ components:
     ProcessingAttachment:
       value:
         attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
-        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        chat_id: chat_011CZm8VpK4rNs6WtY2hDqfB
         status: PROCESSING
         filename: orders.pdf
         expected_size_bytes: 182734
@@ -843,7 +892,7 @@ components:
     ReadyAttachment:
       value:
         attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
-        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        chat_id: chat_011CZm8VpK4rNs6WtY2hDqfB
         status: READY
         filename: orders.pdf
         media_type: application/pdf
@@ -855,7 +904,7 @@ components:
     DeletedAttachment:
       value:
         attachment_id: attachment_011CZm8VpK4rNs6WtY2hDqfB
-        session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        chat_id: chat_011CZm8VpK4rNs6WtY2hDqfB
         status: DELETED
         created_at: '2026-08-03T10:00:00.000Z'
         deleted_at: '2026-08-04T11:30:00.000Z'

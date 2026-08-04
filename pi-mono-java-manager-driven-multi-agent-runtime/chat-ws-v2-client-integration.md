@@ -1,38 +1,38 @@
-# CampusAgent Chat WebSocket v2 客户端接入指南
+# agent-service 内部 Runtime WebSocket v2 客户端接入指南
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.5.1 |
+| 文档版本 | 1.7.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
-| 更新日期 | 2026-08-03 |
+| 更新日期 | 2026-08-04 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.9.1 |
-| Manager 设计 | [`README.md`](README.md)，1.11.1 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.11.0 |
+| Manager 设计 | [`README.md`](README.md)，1.13.0 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
 
 CampusAgent 是 Agent Runtime。直接连接
-`wss://api.example.com/agent-service/v1/ws/chat` 的客户端只能是
-`mate-service`、其他已授权服务端调用方或服务端 SDK，不是最终
-用户浏览器。
+`wss://agent-service.internal/agent-service/internal/v1/ws/chat` 的客户端是
+`mate-service` 的 Runtime bridge 或明确获授权的内部服务端 SDK，不是最终
+用户浏览器，也不是普通业务前端。
 
 ```text
-browser UI
-  -> mate-service
-     -> CampusAgent Runtime WebSocket
+Agent UI
+  -> mate-service public Chat WebSocket (chat_id)
+     -> agent-service internal Runtime WebSocket (session_id)
 ```
 
 opening handshake 在返回 `101` 前使用公司既有内部网关私钥/JWT
 认证能力。本文只规定可观察行为，不复制私有 Header 或 claim；调用方
 必须使用公司现有网关客户端生成认证上下文，不得传输私钥原文。
-浏览器与 `mate-service` 之间的认证、URL 和协议另行定义，不属于
-本规范。
+浏览器与 `mate-service` 之间使用独立公共协议，见
+[`mate-chat-ws-v2.asyncapi.yaml`](mate-chat-ws-v2.asyncapi.yaml) 和
+[`mate-chat-ws-v2-client-integration.md`](mate-chat-ws-v2-client-integration.md)。
 
-因此，若交付对象是浏览器前端团队，`mate-service` 还必须另外发布“浏览器 URL、
-Cookie/Token、Origin、附件上传和 Frame 是否原样透传”的接口文档。缺少该制品
-时，Runtime 文档只能指导服务端接入和 UI reducer，不能声称浏览器已经可以
-直接联调。
+mate-service 必须解析、授权、编排并重建 Frame，不能原样透传。公共协议只出现
+`chat_id`；本内部协议只出现 `session_id`。两条连接的 `connection_id`、Request
+`id`、Event `seq`、Ping/Pong、背压和 close code 都相互独立。
 
 本文后续把直接连接 Runtime 的上层服务或 SDK 统一称为“客户端”。
 
@@ -87,7 +87,7 @@ DISCONNECTED
 
 ![客户端接入与恢复流程](frontend_websocket_client_integration.svg)
 
-[PlantUML 源码：`frontend_websocket_client_integration`](diagram.puml#L602)
+[PlantUML 源码：`frontend_websocket_client_integration`](diagram.puml#L663)
 
 ## 3. 最短可运行流程
 
@@ -96,7 +96,7 @@ DISCONNECTED
 客户端把以下 URI 交给公司现有内部网关 WebSocket 客户端：
 
 ```text
-wss://api.example.com/agent-service/v1/ws/chat
+wss://agent-service.internal/agent-service/internal/v1/ws/chat
 ```
 
 其中 `/agent-service` 是 Gateway 路由前缀，`/v1` 是服务 API 版本，
@@ -108,7 +108,7 @@ wss://api.example.com/agent-service/v1/ws/chat
 
 ```ts
 const socket = await internalGateway.openWebSocket({
-  url: "wss://api.example.com/agent-service/v1/ws/chat",
+  url: "wss://agent-service.internal/agent-service/internal/v1/ws/chat",
   audience: "agent-service",
 });
 ```
@@ -134,7 +134,7 @@ JSON RequestFrame：
 ```json
 {
   "type": "req",
-  "id": "connect-1",
+  "id": "req-1",
   "method": "connect",
   "params": {
     "mode": "create",
@@ -155,6 +155,8 @@ JSON RequestFrame：
 `session_id` 由上层会话服务提前生成，推荐 UUIDv7 或 ULID。`mode=create` 必须
 提供 `session_id + agent_id + model_id`。结构化 typed delta 是协议 2 的固定
 消息语义，客户端无需为 typed delta 声明 capability。
+内部 connect 不携带 `idempotency_key`；它依靠 `session_id` 定位资源，
+并以 `agent_id + 初始 model_id` 作为不可变绑定实现资源幂等。
 
 `agent_id` 必须匹配 `^agent_[0-9A-Za-z]{24}$`，`model_id` 必须匹配
 `^model_[0-9A-Za-z]{24}$`；两者均为大小写敏感、总长 30 的不透明
@@ -168,7 +170,7 @@ Provider 模型名；两者的映射由 Model Manager 保存。
 ```json
 {
   "type": "res",
-  "id": "connect-1",
+  "id": "req-1",
   "ok": true,
   "payload": {
     "protocol": 2,
@@ -234,7 +236,7 @@ Provider 模型名；两者的映射由 Model Manager 保存。
 
 客户端必须检查：
 
-1. ResponseFrame `id` 等于 `connect-1`；
+1. ResponseFrame `id` 等于 `req-1`；
 2. `ok=true`；
 3. `protocol=2`；
 4. 返回的 `agent_id/session_id` 与请求按原始大小写完全一致；`mode=create` 或
@@ -258,7 +260,7 @@ connect 成功前不得发送其他 RequestFrame。connect 失败后，这条未
 ```json
 {
   "type": "req",
-  "id": "send-1",
+  "id": "req-2",
   "method": "chat.send",
   "params": {
     "message": "查询订单 20260730001",
@@ -304,7 +306,7 @@ connect 成功前不得发送其他 RequestFrame。connect 失败后，这条未
 ```json
 {
   "type": "res",
-  "id": "send-1",
+  "id": "req-2",
   "ok": true,
   "payload": {
     "run_id": "run-01",
@@ -348,6 +350,11 @@ RequestFrame  = {type:"req", id, method, params?, traceparent?}
 ResponseFrame = {type:"res", id, ok, payload? | error?}
 EventFrame    = {type:"event", event, seq, payload}
 ```
+
+RequestFrame 可选携带最长 128 字符的 W3C `traceparent`。内部客户端必须使用
+标准 Trace Context 实现生成或传播它，不能把认证凭据、baggage 或业务数据塞入
+该字段。agent-service 对格式和语义重新校验；非法值返回 `INVALID_REQUEST`。
+它不参与请求关联或业务幂等比较，也不写入 Prompt、RuntimeSessionStore 或事件。
 
 ResponseFrame 没有 `method`。客户端发送请求时，必须把 method 和预期 payload
 decoder 保存到 pending map，再根据响应 `id` 找回：
@@ -420,7 +427,7 @@ Run 级 `run_seq`：
 - 跨重连继续，不重新开始；
 - 序列属于 canonical run 事件，不因当前连接的 thinking 投影而变化；
 - 某条 canonical thinking 更新被当前连接抑制时，服务端在同一
-  `run_seq` 位置发送 `thinking_redacted`，不让 hidden/summary 投影出现假缺口。
+  `run_seq` 位置发送 `thinking_redacted`，不让 hidden 投影出现假缺口。
 
 同一实时连接出现重复、倒退或缺口时，客户端必须停止应用事件并进入
 `RECOVERING`，不能猜测缺失文本。恢复快照已经包含 `run_seq=N` 时，初始排流
@@ -450,7 +457,6 @@ function verifyOrder(event: EventFrame) {
 | `text_end` | 把该文本块标记为 closed |
 | `thinking_start` | 按 `disclosure` 创建 Thinking 块并记录活动状态；hidden 只创建无 `text` 占位，不创建正文 |
 | `thinking_delta` | 只在有效 `full_thinking` 下追加原始 thinking |
-| `thinking_summary` | 每块最多一次；用 Manager 提供的完整安全摘要替换当前值，不追加、不自行推导 |
 | `thinking_redacted` | 只推进序列，不创建或更改可见正文 |
 | `thinking_end` | 结束 thinking 活动状态 |
 | `toolcall_start` | 创建 ToolCall 块和空的参数文本缓冲 |
@@ -496,10 +502,11 @@ Tool 事件返回脱敏后的业务 `parameters/progress/result`，不包含凭�
 读取 `result_ref` 的命令，因此 UI 只能将它作为审计/支持标识展示，
 不得拼接为下载 URL。
 
-## 6. Thinking 配置
+## 6. 推理内容可见性
 
 结构化 delta 是 v2 基线，不是 capability。当前唯一已知的可选 capability 是
-`full_thinking`。
+`full_thinking`。这里的 thinking 只控制 reasoning content 是否对客户端可见，
+不控制模型是否推理或推理强度。第一版只支持 `hidden` 和 `full`。
 
 普通客户端省略 `capabilities` 或发送空数组：
 
@@ -540,16 +547,13 @@ Tool 事件返回脱敏后的业务 `parameters/progress/result`，不包含凭�
 
 ```text
 hidden:  thinking_start(hidden)  -> thinking_redacted* -> thinking_end
-summary: thinking_start(summary) -> thinking_redacted(delta)*
-                                  -> thinking_summary? -> thinking_end
-full:    thinking_start(full)    -> thinking_delta*
-                                  -> thinking_redacted(summary)? -> thinking_end
+full:    thinking_start(full)    -> thinking_delta*    -> thinking_end
 ```
 
-`thinking_summary?` 只在 Model Manager 提供安全摘要时出现，最多一次。
 `thinking_redacted` 仅保留 canonical 事件的 `run_seq` 位置，不携带
-原始 thinking 或摘要文本。summary 级别没有安全摘要时，UI 保留无正文
-redacted 占位，不显示“正在总结”之类伪内容。
+原始 thinking。协议不定义 `summary` 级别或 `thinking_summary` 事件；需要
+向用户说明依据时，客户端展示 Assistant 正常 `text` 回答，不从 reasoning
+content 自行生成摘要。
 请求级别在 run 开始时冻结，当前唯一连接只能按有效 capability 继续降低；
 恢复快照的 `thinking` 是当前连接应当使用的权威投影。
 
@@ -566,6 +570,19 @@ redacted 占位，不显示“正在总结”之类伪内容。
 | `model.set` | model_id | model | active run 期间拒绝；目标模型不兼容当前有效 transcript 的附件 plan 时返回 ATTACHMENT_NOT_SUPPORTED 并保持原模型 |
 | `thinking.set` | level | thinking | active run 期间拒绝；full 还需 capability |
 
+`chat.send`、`chat.steer` 和 `chat.abort` 的同一 `idempotency_key` 只能绑定一个
+规范化业务负载；同 key 同负载返回原结果，同 key 不同负载返回
+`IDEMPOTENCY_CONFLICT`。RequestFrame `id` 与 `traceparent` 不参与等价比较。
+
+| 命令 | 规范化业务负载 | 接受前失败 |
+|---|---|---|
+| `chat.send` | `message`、有序 `attachment_ids`、`thinking` 省略状态/值 | 不占用幂等键 |
+| `chat.steer` | `run_id + message` | 不占用幂等键 |
+| `chat.abort` | `run_id` | 不占用幂等键 |
+
+`message` 省略与空字符串等价，`attachment_ids` 省略与空数组等价，
+但非空数组顺序参与比较；`thinking` 省略与显式值不等价。
+
 Chat Frame 不提供 `prompt_templates.list` 或 `skills.list`。Skill 展示信息由
 `mate-service`/元数据 REST 提供；`chat.send.message` 中的 `/skill:<name>`
 仍由 AgentSession 展开。
@@ -573,15 +590,15 @@ Chat Frame 不提供 `prompt_templates.list` 或 `skills.list`。Skill 展示信
 Steer 示例：
 
 ```jsonl
-{"type":"req","id":"steer-1","method":"chat.steer","params":{"run_id":"run-01","message":"优先给出物流状态","idempotency_key":"steer-6f46bc26"}}
-{"type":"res","id":"steer-1","ok":true,"payload":{"run_id":"run-01","user_message_id":"message-user-02","accepted":true,"idempotent":false}}
+{"type":"req","id":"req-3","method":"chat.steer","params":{"run_id":"run-01","message":"优先给出物流状态","idempotency_key":"steer-6f46bc26"}}
+{"type":"res","id":"req-3","ok":true,"payload":{"run_id":"run-01","user_message_id":"message-user-02","accepted":true,"idempotent":false}}
 ```
 
 Abort 示例：
 
 ```jsonl
-{"type":"req","id":"abort-1","method":"chat.abort","params":{"run_id":"run-01","idempotency_key":"abort-6f46bc26"}}
-{"type":"res","id":"abort-1","ok":true,"payload":{"run_id":"run-01","accepted":true,"idempotent":false}}
+{"type":"req","id":"req-4","method":"chat.abort","params":{"run_id":"run-01","idempotency_key":"abort-6f46bc26"}}
+{"type":"res","id":"req-4","ok":true,"payload":{"run_id":"run-01","accepted":true,"idempotent":false}}
 ```
 
 成功 Response 只表示命令已经接受。run 的最终结果仍以
@@ -593,7 +610,7 @@ Pod 重启等进程故障已使原 run 无法继续，不是可在同一 run 上
 不带 cursor 的 `chat.history` 返回查询时刻最新一页：
 
 ```json
-{"type":"req","id":"history-1","method":"chat.history","params":{"limit":50}}
+{"type":"req","id":"req-5","method":"chat.history","params":{"limit":50}}
 ```
 
 响应中的 `items` 是 `RuntimeSessionStore` 数据库权威投影，同时包含
@@ -602,7 +619,7 @@ Message 和 run 终态，并按 `history_seq` 从旧到新排列：
 ```json
 {
   "type": "res",
-  "id": "history-1",
+  "id": "req-5",
   "ok": true,
   "payload": {
     "items": [
@@ -742,9 +759,10 @@ run 一定成功，因为它也可能 aborted、error 或 `interrupted`。
 结构化终态原因，不是 RequestFrame 的 `Error.code`，客户端不应重试
 原 `run_id`。
 
-多副本 v1 依赖可信网关按最终用户 IP 粘性路由，不使用 Redis、
-Session Header 或跨 Pod 转发。如果网关只看到 `mate-service`/NAT IP、
-用户 IP 变化或 Pod 重启，active run 不能跨 Pod 继续。Pod 重启后 Runtime
+多副本 v1 不使用 Redis、跨 Pod run 转发或分布式 owner。内部网关使用由
+mate-service 在认证后生成的受信 Session 亲和路由元数据，尽量把相同
+`session_id` 路由回原 Pod；该提示不构成所有权。路由到其他 Pod 或 Pod 重启后，
+active run 不能跨 Pod 继续。Runtime
 从数据库重建 Session/Agent，旧 active RunRecord 和已持久完整内容块以
 `interrupted` 对外可见；未到 `text_end` 等 end 边界的尾部不承诺保存。
 
@@ -756,6 +774,9 @@ Session 是否已经提交。客户端必须建立新连接，用新 RequestFram
 服务端对相同绑定返回同一 Session；不同绑定拒绝。不要直接改用
 `mode=resume`，因为原 create 若尚未提交，resume 会正常返回
 `SESSION_NOT_FOUND`。
+这是 Session binding 的资源幂等，不是 `idempotency_key` 幂等；同一
+`session_id` 使用不同 immutable binding 时返回 `INVALID_REQUEST`，不返回
+`IDEMPOTENCY_CONFLICT`。
 
 ### 9.3 `chat.send` 响应丢失
 
@@ -777,7 +798,7 @@ Session 是否已经提交。客户端必须建立新连接，用新 RequestFram
 ```json
 {
   "type": "res",
-  "id": "send-2",
+  "id": "req-2",
   "ok": false,
   "error": {
     "code": "RUN_ACTIVE",
@@ -801,6 +822,7 @@ Session 是否已经提交。客户端必须建立新连接，用新 RequestFram
 | code | 客户端动作 |
 |---|---|
 | `INVALID_REQUEST` | 修复字段或状态，不原样重试 |
+| `IDEMPOTENCY_CONFLICT` | 同一幂等键已绑定其他负载；停止重试并修复键管理 |
 | `FORBIDDEN` | 隐藏无权限功能并修复授权 |
 | `RUN_ACTIVE` | 等待终态，或对返回/已知 run 执行 steer/abort |
 | `RUN_NOT_FOUND` | 调用 `session.get` 或 `chat.history` 对账 |
@@ -864,7 +886,7 @@ browser or CampusMate client
 
 ![附件上传、引用与模型输入流程](managed_attachment_reference_lifecycle.svg)
 
-[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L720)
+[PlantUML 源码：`managed_attachment_reference_lifecycle`](diagram.puml#L781)
 
 `agent-service` 不提供上传端点，不直连 OBS 或 openGauss。v1 也不给
 浏览器发放 OBS Bucket、地址、凭据或预签名 URL。OBS Object Key 精确等于
@@ -879,7 +901,7 @@ Bearer capability；文件名、MIME、大小、摘要和 Base64 都不进入
 上层客户端通过一次 multipart 请求上传一个文件：
 
 ```http
-POST /mate-service/v1/sessions/01ARZ3NDEKTSV4RRFFQ69G5FAV/attachments HTTP/1.1
+POST /mate-service/v1/chats/chat_011CZkYqphY8vELVzwCUpqiQ/attachments HTTP/1.1
 Host: api.example.com
 Authorization: Bearer <campusmate-access-token>
 Content-Type: multipart/form-data; boundary=...
@@ -906,7 +928,7 @@ OBS SDK 读取声明长度后还会确认 `file` part 已到 EOF，不允许小�
 缺失、清理后为空或过长返回 `400`。客户端只把返回的 filename 当作需要转义的
 显示文本，不能假设它参与 MIME 判断或 OBS 定位。
 
-服务端在授权 Session 后生成
+服务端先授权公共 `chat_id` 并解析其内部 `session_id`，再生成
 `^attachment_[0-9A-Za-z]{24}$` 格式的大小写敏感、不透明 ID，将原始
 字节流式写入 OBS，再进入安全扫描。上传请求不保证“重试返回同一 ID”；
 没有收到确定响应时重新上传会获得新 ID，遗留且未引用的附件最多保留
@@ -932,7 +954,7 @@ OpenAPI 中的 `422` 或 `503` 错误，不伪装成仍在处理的 `202`。
 `202` 不表示文件已经可供模型使用。客户端根据 `Location` 调用：
 
 ```http
-GET /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+GET /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
 ```
 
 只有上传响应或状态查询返回 `status=READY` 后才能提交
@@ -949,9 +971,9 @@ Attachment Service 使用“文件仓库 + 元数据账本”：
 
 - 共享私有 OBS Bucket 保存 PDF、JS 等原始文件字节，Object Key 精确等于
   大小写敏感的 `attachment_id`，不使用文件名、Session 路径或第二个随机定位值；
-- 共享 openGauss 的永久 `attachment` 主表只保存
+- 共享 openGauss 的永久 `t_attachment` 主表只保存
   `attachment_id/session_id/status/created_at/deleted_at`；每个非 `DELETED`
-  主表行都有 `attachment_active_detail` 保存校验、引用、清理和 Worker 执行数据，
+  主表行都有 `t_attachment_active_detail` 保存校验、引用、清理和 Worker 执行数据，
   不保存 BLOB/BYTEA 正文或 Object Key 映射；
 - Pod 内存只保留单上传不超过 1 MiB 的在途流式缓冲，不使用 Pod 本地目录、
   `/tmp`、临时文件或完整 `byte[]`；
@@ -1117,11 +1139,11 @@ RuntimeSessionStore 不保存文件正文、OBS Bucket、ETag、OBS URL 或凭�
 未被 Message 引用且不处于 `OBJECT_KEY_CONFLICT` 存储隔离的附件可调用：
 
 ```http
-DELETE /mate-service/v1/sessions/{session_id}/attachments/{attachment_id}
+DELETE /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
 ```
 
 Attachment Service 将其标记为 `DELETING`，异步删除 OBS 对象后进入
-`DELETED`，同时删除 `attachment_active_detail`。已引用附件的单独删除返回
+`DELETED`，同时删除 `t_attachment_active_detail`。已引用附件的单独删除返回
 `409 ATTACHMENT_REFERENCED`；它们只在上层删除整个 Session 时一并清理。
 create-only 冲突行的公共 DELETE 返回有界 503，不删除来源不明对象；即使上层
 删除 Session，Runtime 使用会停止且 Session 对用户不可见，但存储清理保持
@@ -1168,7 +1190,7 @@ ID tombstone 保留；墓碑只含 ID、Session、状态、创建和删除时间
 - Pod 重启后能展示 `interrupted` Message/RunRecord，不假设未完整内容块尾部
   可恢复；客户端不假设 IP 粘性等于跨 Pod run owner；
 - Request 超时使用新 request ID 和原 idempotency key；
-- 使用 `POST /mate-service/v1/sessions/{session_id}/attachments` 上传唯一
+- 使用 `POST /mate-service/v1/chats/{chat_id}/attachments` 上传唯一
   `file` part，`X-Attachment-Size` 为 `1..20971520` 且精确等于文件字节数；
   SDK 读满声明长度后仍校验 file-part EOF，小报长度不能被截断接受；
 - filename 必填，NFC 规范化和安全清理后为 `1..512` 个 code point；
@@ -1234,6 +1256,8 @@ Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecor
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.7.0 | 2026-08-04 | 将本文明确为 mate-service 到 agent-service 的内部 Runtime 客户端指南；内部 URL 改为 `/agent-service/internal/v1/ws/chat`，保留 session_id 契约；链接独立的公共 Chat AsyncAPI/指南，明确两跳连接、请求、序列、心跳、背压和关闭互不复用；用受信 Session 亲和元数据替代最终用户 IP 假设，并将公共附件路径改为 chat_id；同步内部 AsyncAPI 2.11.0 和 Manager 1.13.0 |
+| 1.6.0 | 2026-08-03 | 将 thinking 配置明确为 reasoning content 可见性；第一版仅保留 hidden/full，删除 summary 级别、thinking_summary 事件和客户端摘要归并分支；同步 AsyncAPI 2.10.0 和 Manager 1.12.0 |
 | 1.5.1 | 2026-08-03 | 同步 Attachment Service 1.1.0：OBS Object Key 固定为 `attachment_id`，openGauss 拆分永久五字段主表与活动明细；解释 filename、检测 MIME、声明/实际大小、SHA-256、引用/过期、失败码和 Worker lease/retry 字段；冻结 filename 与 create-only 冲突 quarantine 门禁，并明确删除正文后只保留最小 tombstone；同步 AsyncAPI 2.9.1 和 Manager 1.11.1 |
 | 1.5.0 | 2026-08-03 | 固定 CampusMate Attachment Service 单 multipart 上传、`X-Attachment-Size`、`Prefer` 异步/限时等待和 GET 轮询契约；明确 OBS 正文、openGauss 元数据、无本地文件的跨 Pod 边界；将 Runtime 收敛为内部批量 resolve/content 流式读取和五字段历史快照，不向 Runtime 披露 Object Key 或 OBS 凭据；同步 AsyncAPI 2.9.0 和 Manager 1.11.0 |
 | 1.4.0 | 2026-08-03 | 将 `attachment_id` 收敛为 `^attachment_[0-9A-Za-z]{24}$`（总长 35），明确 ID 只能由 Attachment Service 签发、大小写敏感且不透明，客户端必须原样保存、不得自行生成或解析，删除后不复用，且格式合法不代表获得 Session 授权；同步 AsyncAPI 2.8.0 和 Manager 1.10.0 |

@@ -86,8 +86,69 @@ Verify directory and manifest identity.
 end note
 @enduml
 
+@startuml mate_agent_service_responsibility_boundary
+title Public Chat and Runtime Service Responsibilities
+
+' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java:260-285 run(), 377-391 wireServerRoutes()
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java:115-135 handle(), 168-188 buildCloseHook()
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java:186-202 getOrCreate(), 324-378 persistence
+' Observed behavior: Java v1 routes /api/ws/chat directly to a handler and resolves one conversation-backed AgentSession.
+' Target-only design: the mate-service public WebSocket, chat_id/session_id split, and internal WebSocket bridge do not exist in the baseline.
+' Architecture change: mate-service owns public Chat orchestration; agent-service owns Runtime Session execution.
+' Product constraint: the UI receives chat_id only; session_id remains an internal Runtime identifier.
+' Design reason: separate user-facing Chat lifecycle from durable Agent Runtime identity and execution.
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 18
+skinparam defaultFontName Arial
+skinparam defaultFontColor #0F172A
+skinparam ArrowColor #64748B
+skinparam ArrowThickness 1.5
+skinparam rectangle {
+  BorderColor #94A3B8
+  FontColor #0F172A
+}
+skinparam database {
+  BorderColor #94A3B8
+  BackgroundColor #F8FAFC
+  FontColor #334155
+}
+
+left to right direction
+
+rectangle "Agent UI\n\nOpen public WebSocket\nSend agent_id, model_id, idempotency_key\nKeep chat_id\nRender public Chat Frames\nNever receive session_id" as UI #EFF6FF
+
+rectangle "mate-service\n\nOwn public WebSocket and user authentication\nValidate protocol and connect idempotency\nEnforce fewer than 50 active Chats\nValidate product Agent and Model availability\nGenerate chat_id and session_id\nPersist Chat mapping and status\nRun guardrail, intent, and chain state\nOwn the internal Runtime WebSocket client\nRebuild public and internal Frames" as Mate #FFF7ED
+
+rectangle "agent-service\n\nOwn internal Runtime WebSocket\nAuthenticate the calling service\nAuthoritatively validate Agent and Model\nCreate or restore Runtime Session\nBind Agent, Model, and bundle revision\nBuild Context and execute Model and Tools\nOwn Run, Message, and Runtime history" as Agent #ECFDF5
+
+database "Mate Chat Store\n\nchat_id -> session_id\nChat state\nAgent and Model selection\nconnect idempotency result" as MateStore
+
+database "RuntimeSessionStore\n\nSession state\nMessage and Run history\nAgent, Model, and bundle revision" as RuntimeStore
+
+UI <--> Mate : Public WebSocket\nchat_id scope\npublic connection, request id, and seq
+Mate <--> Agent : Internal WebSocket\nsession_id scope\nindependent connection, request id, and seq
+Mate --> MateStore : Own and update
+Agent --> RuntimeStore : Own and update
+
+note bottom of Mate
+The bridge is semantic, not byte-transparent.
+HTTP 101, connection_id, generation, request id,
+event seq, Ping/Pong, flow control, and close are hop-local.
+This URL is an Agent Channel: only Runtime-routed sends
+are accepted; other product channels use other contracts.
+end note
+
+note bottom of Agent
+Runtime never reads chat_id, tenant_id, or user_id.
+It uses session_id as the only Session key.
+end note
+@enduml
+
 @startuml managed_session_context_assembly
-title Managed Multi-Agent Session and Context Assembly
+title agent-service Internal Session and Context Assembly
 
 ' Source evidence:
 ' pi-mono packages/ai/src/types.ts: Context
@@ -103,7 +164,7 @@ title Managed Multi-Agent Session and Context Assembly
 ' Target design: globally unique session_id is the only SessionPool key; tenant and user stay upstream.
 ' Target design: a wss URI starts establishment; HTTP 101 establishes WebSocket transport.
 ' Target design: HTTP Upgrade and the first connect RequestFrame are separate protocol phases.
-' Target design: trusted Gateway authentication and user-IP affinity precede agent-service.
+' Target design: mate-service is the internal Runtime client and supplies trusted session-affinity metadata.
 ' Target design: one Pod owns one active connection generation per Session.
 ' Target design: database history is authoritative; no target Session JSONL is generated.
 ' Design reason: isolate prompt, model, tool, persistence, and run recovery across Agents.
@@ -125,7 +186,7 @@ skinparam sequence {
   GroupBackgroundColor #F8FAFC
 }
 
-actor "mate-service or\nauthorized server SDK" as Client
+actor "mate-service\nRuntime bridge" as Client
 participant "Trusted internal Gateway" as Auth
 participant "ChatWebSocketAdapter" as WS
 participant "SessionTransportFactory" as TransportFactory
@@ -140,14 +201,14 @@ participant "ManagedRunHub" as Hub
 database "RuntimeSessionStore\nshared database" as Store
 
 Client -> Client : call WebSocket library\nconnect(wss URI)
-Client -> Auth : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/v1/ws/chat\nwith Upgrade and existing auth context
-Auth -> Auth : validate existing private-key or JWT auth\napply user-IP Pod affinity\nand validate Upgrade
+Client -> Auth : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/internal/v1/ws/chat\nwith Upgrade and service auth context
+Auth -> Auth : validate existing private-key or JWT auth\napply trusted Session affinity\nand validate Upgrade
 Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth --> WS : immutable connection auth context
 WS -> TransportFactory : open(auth context)
 TransportFactory --> WS : per-connection transport
 Client -> WS : WebSocket Text Frame\nRequestFrame connect\nmode, session_id, agent_id, model_id?
-WS -> WS : validate closed Frame\nand optional traceparent
+WS -> WS : validate closed Frame
 WS -> Transport : connect(command, invocation metadata)
 Transport -> Resolver : resolve(agent_id)
 Resolver -> Resolver : normalize and verify controlled root
@@ -279,7 +340,7 @@ end note
 @enduml
 
 @startuml managed_websocket_session_protocol
-title Managed WebSocket Session Protocol
+title agent-service Internal Runtime WebSocket Protocol
 
 ' Source evidence:
 ' pi-mono-java modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java: websocket route
@@ -303,7 +364,7 @@ title Managed WebSocket Session Protocol
 ' Target design: chat.send acceptance returns the persisted user message id before origin run events.
 ' Target design: every state-changing success response precedes its causal event.
 ' Target design: one Pod permits one active connection generation and replaces the old connection on resume.
-' Target design: user-IP affinity is best effort; there is no Redis owner or cross-Pod run forwarding.
+' Target design: trusted Session affinity is best effort; there is no Redis owner or cross-Pod run forwarding.
 ' Target design: database history survives Pod restart; the old active run becomes interrupted.
 ' Design reason: provide auditable ToB isolation and race-free recovery without moving run ownership to transport.
 
@@ -324,7 +385,7 @@ skinparam sequence {
   GroupBackgroundColor #F8FAFC
 }
 
-actor "mate-service or\nauthorized server SDK" as Client
+actor "mate-service\nRuntime bridge" as Client
 participant "Trusted internal Gateway" as Auth
 participant "ChatWebSocketAdapter" as WS
 participant "ManagedSessionTransport" as Transport
@@ -335,13 +396,13 @@ participant "Thinking projection" as Projection
 database "RuntimeSessionStore\nshared database" as Store
 
 Client -> Client : call WebSocket library\nconnect(wss URI)
-Client -> Auth : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/v1/ws/chat\nwith Upgrade and existing auth context
-Auth -> Auth : validate existing private-key or JWT auth\napply user-IP Pod affinity\nreject business query and validate Upgrade
+Client -> Auth : open one TCP connection\nthen TLS\nthen HTTP/1.1 GET\n/agent-service/internal/v1/ws/chat\nwith Upgrade and service auth context
+Auth -> Auth : validate existing private-key or JWT auth\napply trusted Session affinity\nreject business query and validate Upgrade
 Auth --> Client : HTTP/1.1 101 Switching Protocols
 Auth -> WS : immutable auth context
 WS -> Transport : create per-connection transport
 Client -> WS : WebSocket Text Frame within 5 seconds\nRequestFrame connect\nmode, session_id, agent_id, model_id?
-WS -> WS : validate traceparent and closed Frame
+WS -> WS : validate closed Frame
 WS -> Transport : connect(command, invocation metadata)
 Transport -> Pool : resolve session_id or create binding\nand validate effective model
 Transport -> Pool : increment connection generation\nand replace an old same-Pod connection
@@ -353,7 +414,7 @@ WS -> Transport : subscribe to events()
 Hub --> Transport : events after cursor
 
 alt idle session
-  Client -> WS : RequestFrame chat.send\ntext, attachments, or both\nwith idempotency_key and traceparent?
+  Client -> WS : RequestFrame chat.send\ntext, attachments, or both\nwith idempotency_key?
   WS -> Transport : request(ChatSend, metadata)
   Transport -> Pool : atomically create primary run
   Pool -> Store : persist user Message, run,\nidempotency result and revisions
@@ -600,7 +661,7 @@ end note
 @enduml
 
 @startuml frontend_websocket_client_integration
-title CampusAgent WebSocket Client Integration
+title agent-service Internal Runtime WebSocket Client Integration
 
 ' pi-mono-java baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
 ' Source: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java (configureRoutes)
@@ -632,19 +693,19 @@ skinparam sequence {
   GroupBackgroundColor #F8FAFC
 }
 
-actor "Browser UI" as Browser
-participant "mate-service or\nauthorized server SDK" as Client
+actor "Agent UI" as Browser
+participant "mate-service\nRuntime bridge" as Client
 participant "ChatWebSocketAdapter" as WS
 participant "ManagedSessionPool" as Pool
 participant "ManagedRunHub" as Hub
 participant "Client reducer" as Reducer
 database "RuntimeSessionStore\ndatabase history" as History
 
-opt browser product
-  Browser -> Client : upstream browser protocol\nout of Runtime scope
+opt public Chat protocol
+  Browser -> Client : public WebSocket scoped by chat_id\nseparate connection, id, seq, and flow control
 end
 
-Client -> WS : establish wss through trusted Gateway\n/agent-service/v1/ws/chat
+Client -> WS : establish internal wss through Gateway\n/agent-service/internal/v1/ws/chat
 WS --> Client : HTTP 101
 Client -> WS : req connect create or resume
 WS -> Pool : bind session and agent
@@ -703,9 +764,9 @@ opt Pod restarted
 end
 
 note over Browser,Client
-Browser authentication and transport are upstream concerns.
-The browser does not hold Runtime service credentials.
-Attachment upload also belongs to mate-service.
+Browser authentication and public Chat transport belong to mate-service.
+The browser receives chat_id, never session_id or Runtime credentials.
+The bridge maps chat_id to session_id and rebuilds Frames.
 end note
 
 note over Client,Reducer
@@ -736,7 +797,7 @@ title Managed attachment OBS-backed reference lifecycle
 ' Target design: the private OBS Object Key is exactly attachment_id; it is not
 ' an authorization token and never includes a prefix, path, or filename.
 ' Target design: deletion removes active detail and retains a five-field
-' permanent DELETED tombstone in the attachment main table.
+' permanent DELETED tombstone in the t_attachment main table.
 ' Design reason: keep large-object transfer off the Chat control plane, support
 ' cross-Pod reads without local files, prevent metadata forgery, and retain
 ' reproducible public metadata snapshots in Runtime history.
@@ -758,7 +819,7 @@ actor "End user" as User
 participant "CampusMate client" as Client
 participant "mate-service\nAttachment Service" as Attach
 participant "background worker" as Worker
-database "openGauss\nattachment main table\nplus active detail" as DB
+database "openGauss\nt_attachment\nt_attachment_active_detail" as DB
 database "private OBS\nObject Key = attachment_id" as OBS
 participant "mate-service\nRuntime client" as Upstream
 participant "ChatWebSocketAdapter" as WS
@@ -768,10 +829,10 @@ participant "AttachmentInputAssembler" as Assembler
 participant "Model Manager Provider" as Model
 
 User -> Client : select one file
-Client -> Attach : POST /v1/sessions/{session_id}/attachments\nmultipart file + X-Attachment-Size\nPrefer respond-async or wait=N
+Client -> Attach : POST /mate-service/v1/chats/{chat_id}/attachments\nmultipart file + X-Attachment-Size\nPrefer respond-async or wait=N
 Attach -> Attach : authorize user and session;\nrequire size 1..20 MiB and safe filename
 Attach -> Attach : generate opaque attachment_id
-Attach -> DB : INSERT attachment main row\nand attachment_active_detail\nin one transaction
+Attach -> DB : INSERT t_attachment row\nand t_attachment_active_detail\nin one transaction
 DB --> Attach : committed
 Attach -> OBS : put(attachment_id, bounded stream,\nexpected_size_bytes) with create-only semantics
 Attach -> Attach : count bytes, verify file-part EOF,\nand compute SHA-256 with backpressure
@@ -789,7 +850,7 @@ else OBS write succeeded
   OBS --> Worker : bounded byte stream
   Worker -> Worker : verify size and digest;\nsniff MIME and scan security;\nnever execute JavaScript
   Worker -> DB : mark main READY, BLOCKED, or FAILED;\nset detected MIME or bounded error_code;\nclear phase lease fields
-  Client -> Attach : GET /v1/sessions/{session_id}/attachments/{attachment_id}
+  Client -> Attach : GET /mate-service/v1/chats/{chat_id}/attachments/{attachment_id}
   Attach -> DB : read authorized main and active detail
   DB --> Attach : status and public metadata
   Attach --> Client : 200 attachment resource
@@ -807,7 +868,7 @@ alt accepted result exists with the same payload
   WS --> Upstream : ResponseFrame before causal events
 else first attempt
   Transport -> Transport : acquire Session single-writer guard;\nreject a different active run
-  Transport -> Attach : POST /internal/v1/attachments:resolve\nservice token + session_id + ordered IDs
+  Transport -> Attach : POST /mate-service/internal/v1/attachments:resolve\nservice token + session_id + ordered IDs
   Attach -> DB : short transaction: lock main and detail;\nrequire same session, READY,\nactive detail present, and not expired
   alt any attachment is invalid
     DB --> Attach : rollback all changes
@@ -824,7 +885,7 @@ else first attempt
 
     Transport -> Assembler : ordered public snapshots
     loop each attachment
-      Assembler -> Attach : GET /internal/v1/sessions/{session_id}/\nattachments/{attachment_id}/content\nwith expected SHA-256
+      Assembler -> Attach : GET /mate-service/internal/v1/sessions/{session_id}/\nattachments/{attachment_id}/content\nwith expected SHA-256
       Attach -> DB : require main READY, same session,\nreferenced_at not null, and matching digest
       DB --> Attach : authorized active metadata
       Attach -> OBS : open(attachment_id)
