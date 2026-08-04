@@ -346,15 +346,24 @@ EventFrame。同 Pod 中一个 Session 只有一个活动读写连接，没有�
 三类 Frame 的职责固定：
 
 ```text
-RequestFrame  = {type:"req", id, method, params?, traceparent?}
+RequestFrame  = {type:"req", id, method, params?}
 ResponseFrame = {type:"res", id, ok, payload? | error?}
 EventFrame    = {type:"event", event, seq, payload}
 ```
 
-RequestFrame 可选携带最长 128 字符的 W3C `traceparent`。内部客户端必须使用
-标准 Trace Context 实现生成或传播它，不能把认证凭据、baggage 或业务数据塞入
-该字段。agent-service 对格式和语义重新校验；非法值返回 `INVALID_REQUEST`。
-它不参与请求关联或业务幂等比较，也不写入 Prompt、RuntimeSessionStore 或事件。
+`params` 的结构由 `method` 决定，客户端应按 AsyncAPI 中的对应 Schema 编码和
+校验。所有参数对象都是封闭对象，未知字段返回 `INVALID_REQUEST`。
+
+| method | params | 关键字段 |
+|---|---|---|
+| `connect` | `ConnectParams` | `mode`、协议范围、Session/Agent/Model 标识、`client` |
+| `chat.send` | `ChatSendParams` | `message`、`attachment_ids`、`thinking`、`idempotency_key` |
+| `chat.steer` | `ChatSteerParams` | `run_id`、`message`、`idempotency_key` |
+| `chat.abort` | `ChatAbortParams` | `run_id`、`idempotency_key` |
+| `chat.history` | `ChatHistoryParams` | `run_id`、历史水位、`limit`、`cursor` |
+| `session.get` / `models.list` | 空对象 `{}` | 无额外参数 |
+| `model.set` | `ModelSetParams` | `model_id` |
+| `thinking.set` | `ThinkingSetParams` | `thinking` |
 
 ResponseFrame 没有 `method`。客户端发送请求时，必须把 method 和预期 payload
 decoder 保存到 pending map，再根据响应 `id` 找回：

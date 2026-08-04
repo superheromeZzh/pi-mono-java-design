@@ -1343,7 +1343,7 @@ ResponseFrame，并通过 EventFrame 主动推送 run、消息和工具事件。
 JSON，四类共用结构为：
 
 ```text
-RequestFrame  = {type:"req", id, method, params?, traceparent?}
+RequestFrame  = {type:"req", id, method, params?}
 ResponseFrame = {type:"res", id, ok, payload? | error?}
 EventFrame    = {type:"event", event, seq, payload}
 Error         = {code, message, details?, retryable?, retry_after_ms?}
@@ -1356,6 +1356,19 @@ Error         = {code, message, details?, retryable?, retry_after_ms?}
 Response 可以乱序并与 Event 交错。AsyncAPI 的 `x-method-contracts` 是 method
 到成功 payload Schema 的规范映射。命令接受成功仅代表服务端已原子接受操作，
 不代表 run 已完成。
+
+`params` 的结构由 `method` 决定，完整约束以 `chat-ws-v2.asyncapi.yaml` 为准：
+
+| method | params 结构 | 关键字段 |
+|---|---|---|
+| `connect` | `ConnectParams` | `mode`、协议范围、Session/Agent/Model 标识、`client` |
+| `chat.send` | `ChatSendParams` | `message`、`attachment_ids`、`thinking`、`idempotency_key` |
+| `chat.steer` | `ChatSteerParams` | `run_id`、`message`、`idempotency_key` |
+| `chat.abort` | `ChatAbortParams` | `run_id`、`idempotency_key` |
+| `chat.history` | `ChatHistoryParams` | `run_id`、历史水位、`limit`、`cursor` |
+| `session.get` / `models.list` | 空对象 `{}` | 无额外参数 |
+| `model.set` | `ModelSetParams` | `model_id` |
+| `thinking.set` | `ThinkingSetParams` | `thinking` |
 
 一个完整 WebSocket UTF-8 Text Message 恰好承载一个 JSON Frame。允许底层
 WebSocket fragmentation，但大小在解压和重组后按完整 JSON 的 UTF-8 字节数
