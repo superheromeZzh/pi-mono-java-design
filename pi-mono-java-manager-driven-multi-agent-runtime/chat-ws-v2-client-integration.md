@@ -379,6 +379,24 @@ EventFrame    = {type:"event", event, seq, payload}
 {"type":"req","id":"req-9","method":"thinking.set","params":{"thinking":"full"}}
 ```
 
+参数结构速查：
+
+```json
+{
+  "connect": {"mode":"create|resume", "min_protocol":2, "max_protocol":2, "session_id":"...", "agent_id":"agent_...", "model_id":"model_...", "client":{"id":"...","version":"...","platform":"..."}},
+  "chat.send": {"message":"...?", "attachment_ids":["attachment_..."], "thinking":"hidden|full", "idempotency_key":"...?"},
+  "chat.steer": {"run_id":"...", "message":"...", "idempotency_key":"...?"},
+  "chat.abort": {"run_id":"...", "idempotency_key":"...?"},
+  "chat.history": {"run_id":"...?", "through_history_seq":0, "limit":50, "cursor":"...?"},
+  "session.get": {}, "models.list": {},
+  "model.set": {"model_id":"model_..."},
+  "thinking.set": {"thinking":"hidden|full"}
+}
+```
+
+这是结构速查，不是一个可发送的联合请求；字段的完整约束以
+[`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml) 的 `*Params` Schema 为准。
+
 ResponseFrame 没有 `method`。客户端发送请求时，必须把 method 和预期 payload
 decoder 保存到 pending map，再根据响应 `id` 找回：
 

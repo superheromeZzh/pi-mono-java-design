@@ -1384,6 +1384,26 @@ Response 可以乱序并与 Event 交错。AsyncAPI 的 `x-method-contracts` 是
 {"type":"req","id":"req-9","method":"thinking.set","params":{"thinking":"full"}}
 ```
 
+参数对象的直接结构如下（`?` 表示可选字段）：
+
+```json
+{
+  "connect": {"mode":"create|resume", "min_protocol":2, "max_protocol":2, "session_id":"...", "agent_id":"agent_...", "model_id":"model_...", "client":{"id":"...","version":"...","platform":"..."}},
+  "chat.send": {"message":"...?", "attachment_ids":["attachment_..."], "thinking":"hidden|full", "idempotency_key":"...?"},
+  "chat.steer": {"run_id":"...", "message":"...", "idempotency_key":"...?"},
+  "chat.abort": {"run_id":"...", "idempotency_key":"...?"},
+  "chat.history": {"run_id":"...?", "through_history_seq":0, "limit":50, "cursor":"...?"},
+  "session.get": {},
+  "models.list": {},
+  "model.set": {"model_id":"model_..."},
+  "thinking.set": {"thinking":"hidden|full"}
+}
+```
+
+上面是便于阅读的结构索引，不是可直接发送的单个 JSON。可执行的完整约束包括
+字段类型、正则、长度、枚举、必填条件和 `additionalProperties: false`，统一维护在
+[`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml) 的 `*Params` Schema 中。
+
 一个完整 WebSocket UTF-8 Text Message 恰好承载一个 JSON Frame。允许底层
 WebSocket fragmentation，但大小在解压和重组后按完整 JSON 的 UTF-8 字节数
 计算；Binary Message 使用 1003 关闭，非法 UTF-8 或 JSON 使用 1007 关闭。
