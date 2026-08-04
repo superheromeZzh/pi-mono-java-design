@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.5.0 on 2026-08-04.
+' Generated for SR-AGENT-DB-001 v0.6.0 on 2026-08-04.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: 52e49fa; input JSON is identified by its working-tree hash.
+' Repository baseline: 0245e15; input JSON is identified by its working-tree hash.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
