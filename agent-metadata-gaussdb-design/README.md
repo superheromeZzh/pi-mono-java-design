@@ -1,10 +1,10 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.6.0`<br>
+> 版本：`v0.7.0`<br>
 > 日期：`2026-08-04`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`0245e15`（输入 JSON 使用下述工作区 SHA-256）<br>
+> 仓库基线：`8c8f10c`（输入 JSON 使用下述工作区 SHA-256）<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
@@ -62,7 +62,7 @@ PlantUML：[查看源码](./diagram.puml#L6)
 ```sql
 CREATE TABLE t_agent_definition (
     id              VARCHAR(64)  NOT NULL,
-    resource_type   VARCHAR(16)  NOT NULL DEFAULT 'agent',
+    type            VARCHAR(16)  NOT NULL DEFAULT 'agent',
     version         BIGINT       NOT NULL DEFAULT 1,
     enabled         BOOLEAN      NOT NULL DEFAULT TRUE,
     name            VARCHAR(128) NOT NULL,
@@ -81,7 +81,7 @@ CREATE TABLE t_agent_definition (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT pk_t_agent_definition PRIMARY KEY (id),
     CONSTRAINT uk_t_agent_definition_name UNIQUE (name),
-    CONSTRAINT ck_t_agent_definition_type CHECK (resource_type = 'agent'),
+    CONSTRAINT ck_t_agent_definition_type CHECK (type = 'agent'),
     CONSTRAINT ck_t_agent_definition_version CHECK (version >= 1),
     CONSTRAINT ck_t_agent_definition_name CHECK (name <> ''),
     CONSTRAINT ck_t_agent_definition_display_name CHECK (display_name <> ''),
@@ -121,6 +121,42 @@ CREATE TABLE t_agent_binding_skills (
     CONSTRAINT ck_t_agent_binding_skills_version
         CHECK (skill_version IS NULL OR skill_version >= 1)
 );
+
+COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, system prompt fields, and use cases';
+COMMENT ON COLUMN t_agent_definition.id IS 'Stable Agent identifier mapped directly from JSON id';
+COMMENT ON COLUMN t_agent_definition.type IS 'Resource type mapped from JSON type; fixed to agent';
+COMMENT ON COLUMN t_agent_definition.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
+COMMENT ON COLUMN t_agent_definition.enabled IS 'Whether the Agent accepts new runtime invocations; disabled Agents remain manageable';
+COMMENT ON COLUMN t_agent_definition.name IS 'Stable internal Agent name; unique and not editable in the management UI';
+COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; editable in the management UI';
+COMMENT ON COLUMN t_agent_definition.description IS 'Agent description';
+COMMENT ON COLUMN t_agent_definition.role IS 'Agent identity, expertise, and responsibility scope';
+COMMENT ON COLUMN t_agent_definition.objective IS 'Long-term objective and success criteria';
+COMMENT ON COLUMN t_agent_definition.instructions IS 'General work principles, priorities, and behavior requirements';
+COMMENT ON COLUMN t_agent_definition.tool_policy IS 'Rules for tool selection, result verification, and direct answers';
+COMMENT ON COLUMN t_agent_definition.safety IS 'Untrusted-content handling, permission boundaries, and confirmation rules';
+COMMENT ON COLUMN t_agent_definition.completion IS 'Completion conditions, self-checks, and failure reporting';
+COMMENT ON COLUMN t_agent_definition.response_style IS 'Default language, length, format, and reporting style';
+COMMENT ON COLUMN t_agent_definition.example IS 'Optional example; NULL omits the example section from the assembled prompt';
+COMMENT ON COLUMN t_agent_definition.use_cases IS 'JSON array of intent-recognition use case strings';
+COMMENT ON COLUMN t_agent_definition.created_at IS 'Database creation time';
+COMMENT ON COLUMN t_agent_definition.updated_at IS 'Time of the latest successful Agent metadata update';
+
+COMMENT ON TABLE t_agent_models IS 'Ordered model gateway model IDs from Agent models';
+COMMENT ON COLUMN t_agent_models.agent_id IS 'Logical reference to t_agent_definition.id';
+COMMENT ON COLUMN t_agent_models.model_id IS 'Model ID defined by the model gateway';
+COMMENT ON COLUMN t_agent_models.sort_order IS 'Zero-based position used to reproduce the JSON array';
+
+COMMENT ON TABLE t_agent_binding_tools IS 'Tool binding and optional Agent-level permission override';
+COMMENT ON COLUMN t_agent_binding_tools.agent_id IS 'Logical reference to t_agent_definition.id';
+COMMENT ON COLUMN t_agent_binding_tools.tool_id IS 'Referenced Tool identifier';
+COMMENT ON COLUMN t_agent_binding_tools.tool_version IS 'Pinned Tool version; NULL means resolve the latest version';
+COMMENT ON COLUMN t_agent_binding_tools.permission IS 'Agent-level deny, ask, or allow; NULL means inherit the Tool permission';
+
+COMMENT ON TABLE t_agent_binding_skills IS 'Skill references bound to an Agent';
+COMMENT ON COLUMN t_agent_binding_skills.agent_id IS 'Logical reference to t_agent_definition.id';
+COMMENT ON COLUMN t_agent_binding_skills.skill_id IS 'Referenced Skill identifier';
+COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version; NULL means resolve the latest version';
 ```
 
 基础 DDL 不声明物理外键，以兼容 GaussDB Distributed；`agent_id` 引用完整性由服务在同一事务内维护。
@@ -132,7 +168,7 @@ CREATE TABLE t_agent_binding_skills (
 | JSON 字段 | 数据库字段 | 类型 | 可空 | 说明 |
 |---|---|---|---:|---|
 | `id` | `id` | `VARCHAR(64)` | 否 | 主键；与元数据对齐 |
-| `type` | `resource_type` | `VARCHAR(16)` | 否 | 固定为 `agent` |
+| `type` | `type` | `VARCHAR(16)` | 否 | 固定为 `agent` |
 | `version` | `version` | `BIGINT` | 否 | 从 1 开始的乐观锁版本 |
 | `enabled` | `enabled` | `BOOLEAN` | 否 | 是否允许新的运行时调用；默认启用 |
 | `name` | `name` | `VARCHAR(128)` | 否 | 内部稳定名称；唯一 |
@@ -150,7 +186,26 @@ CREATE TABLE t_agent_binding_skills (
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
 
-### 5.2 `enabled` 语义
+### 5.2 System Prompt 空值与展示规则
+
+System Prompt 不以一个冗余全文字段存储，而是由结构化列在读取时按固定顺序组装。字段约束如下：
+
+| 字段 | 数据库约束 | 展示规则 |
+|---|---|---|
+| `role` | `NOT NULL` | 固定展示，定义 Agent 身份和职责 |
+| `objective` | `NOT NULL` | 固定展示，定义目标和成功条件 |
+| `instructions` | `NOT NULL` | 固定展示，定义工作原则和行为要求 |
+| `tool_policy` | `NOT NULL` | 固定展示，避免 Tool 使用规则因缺失而语义不明 |
+| `safety` | `NOT NULL` | 固定展示，安全边界不得依赖前端默认值 |
+| `completion` | `NOT NULL` | 固定展示，保证完成条件明确 |
+| `response_style` | `NOT NULL` | 固定展示，保证默认输出约束明确 |
+| `example` | 允许 `NULL` | 有值时展示并加入完整 Prompt；`NULL` 时隐藏该节 |
+
+管理前端采用固定结构表单：七个必填字段始终展示，`example` 作为可选区块按需展开。前端同时提供按上述固定顺序生成的“完整系统提示词”只读预览；预览是派生结果，不单独入库。运行时使用与预览相同的组装规则，避免前端预览和实际 Prompt 不一致。
+
+后端必须拒绝七个必填字段的 `NULL`；应用层还应拒绝仅包含空白字符的值。对于历史数据，不能把缺失的安全或工具策略静默转换为空字符串，应在迁移或发布前补齐。
+
+### 5.3 `enabled` 语义
 
 `enabled` 是 Agent 的可用状态，不是权限字段：
 
@@ -165,7 +220,7 @@ CREATE TABLE t_agent_binding_skills (
 
 `enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_t_agent_definition_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
 
-### 5.3 `use_cases` JSONB
+### 5.4 `use_cases` JSONB
 
 保存形式与元数据一致：
 
@@ -328,7 +383,7 @@ COMMIT
 初始化校验：
 
 - `version = 1`。
-- `resource_type = 'agent'`。
+- `type = 'agent'`。
 - `enabled` 必须为布尔值；存量数据迁移时默认设为 `TRUE`。
 - `name` 唯一。
 - 至少一个模型。
@@ -430,6 +485,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type`；在 SQL 章节补充表和字段 COMMENT 语句 |
 | `v0.6.0` | 2026-08-04 | 在表关系后增加 SQL 语句章节，集中展示四张目标表的可执行建表 DDL |
 | `v0.5.0` | 2026-08-04 | 表名统一采用 `t_` 前缀和小写 snake_case；四张表分别更名为 `t_agent_definition`、`t_agent_models`、`t_agent_binding_tools`、`t_agent_binding_skills`，同步调整约束名和索引名 |
 | `v0.4.0` | 2026-07-29 | 增加 `enabled BOOLEAN NOT NULL DEFAULT TRUE`；定义管理面、运行时、乐观锁和存量迁移语义 |
