@@ -1,18 +1,18 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.9.0`<br>
+> 版本：`v0.10.0`<br>
 > 日期：`2026-08-05`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`614b5151ca6996cfca24897a1485d7b874e25f30`（输入 JSON 使用下述工作区 SHA-256）<br>
+> 仓库基线：`8e17fa77f69bc7d31f640b6536170cf10d99da36`（输入 JSON 使用下述工作区 SHA-256）<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
 
 基于当前 [`AGENT元数据设计.json`](../AGENT元数据设计.json)，最终使用 4 张表：
 
-1. `t_agent_definition`：基本字段、单一 `system` Prompt 和 JSONB `use_cases`。
-2. `t_agent_models`：`models[]`，保留数组顺序。
+1. `t_agent_definition`：基本字段、System Prompt 展开字段和 JSONB `use_cases`。
+2. `t_agent_models`：`model[]`，保留数组顺序。
 3. `t_agent_binding_tools`：合并 `binding_tools[]` 与 `permission`。
 4. `t_agent_binding_skills`：`binding_skills[]`，不保存数组顺序。
 
@@ -21,7 +21,7 @@
 - 主表主键使用 `id`，与元数据顶层 `id` 对齐。
 - `enabled` 使用 `BOOLEAN NOT NULL DEFAULT TRUE`。
 - `name`、`display_name` 都使用 `VARCHAR(128)`。
-- System Prompt 使用单一 `system TEXT NOT NULL`，并拒绝空白字符串。
+- System Prompt 展开为 `role`、`objective`、`instructions`、`tool_policy`、`safety`、`completion`、`response_style`、`example`，全部使用 `TEXT NOT NULL`。
 - `model_id`、`tool_id`、`skill_id` 统一使用 `VARCHAR(64)`。
 - `use_cases` 使用主表 `JSONB`。
 - 只有模型表保留 `sort_order`。
@@ -34,14 +34,14 @@
 当前工作区 JSON 的 SHA-256：
 
 ```text
-c2b7c9f5046cf94c3cf7e042642609c181b41b50f6ff8ebf70bce4f457977fff
+db8a715adda3496e9c43a659cb6e41da293195811fcec06e10021c3b28da0318
 ```
 
 字段来源：
 
 - `id`、`type`、`version`、时间字段：[第 2–6 行](../AGENT元数据设计.json#L2)。
 - `enabled`：[第 7 行](../AGENT元数据设计.json#L7)。
-- `name`、`display_name`、`description`、`models`：[第 8–11 行](../AGENT元数据设计.json#L8)。
+- `name`、`display_name`、`description`、`model`：[第 8–11 行](../AGENT元数据设计.json#L8)。
 - `system_prompt`：[第 12–21 行](../AGENT元数据设计.json#L12)。
 - `use_cases`、Tool/Skill 绑定与权限：[第 22–47 行](../AGENT元数据设计.json#L22)。
 
@@ -68,18 +68,25 @@ PlantUML：[查看源码](./diagram.puml#L6)
 | `name` | `name` | `VARCHAR(128)` | 否 | 内部稳定名称；唯一 |
 | `display_name` | `display_name` | `VARCHAR(128)` | 否 | 与 `name` 类型一致 |
 | `description` | `description` | `TEXT` | 否 | Agent 描述 |
-| `system_prompt` | `system` | `TEXT` | 否 | 完整系统提示词；兼容导入时由旧结构按固定模板组装 |
+| `system_prompt.role` | `role` | `TEXT` | 否 | 身份、能力与责任范围 |
+| `system_prompt.objective` | `objective` | `TEXT` | 否 | 长期目标和成功条件 |
+| `system_prompt.instructions` | `instructions` | `TEXT` | 否 | 工作原则和行为要求 |
+| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 否 | Tool 使用与结果验证规则 |
+| `system_prompt.safety` | `safety` | `TEXT` | 否 | 安全边界 |
+| `system_prompt.completion` | `completion` | `TEXT` | 否 | 完成与自检要求 |
+| `system_prompt.response_style` | `response_style` | `TEXT` | 否 | 默认输出风格 |
+| `system_prompt.example` | `example` | `TEXT` | 否 | 输出或行为示例 |
 | `use_cases` | `use_cases` | `JSONB` | 否 | 使用场景字符串数组 |
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
 
-### 4.2 `system` 约束与展示规则
+### 4.2 `system_prompt` 约束与展示规则
 
-`system` 是实际发送给模型的完整系统提示词。数据库使用 `TEXT NOT NULL`，并以 `CHECK (btrim(system) <> '')` 拒绝空字符串和纯空白内容；API 和应用层执行相同校验。
+`system_prompt` 是结构化对象。它的 8 个字段全部属于本产品定义中的必填字段，数据库均使用 `TEXT NOT NULL`；API 和应用层还应拒绝空字符串和纯空白内容。
 
-管理前端固定展示一个必填的全宽 System Prompt 编辑器，不再根据子字段进行动态显隐。角色、目标、指令、Tool 策略、安全规则、完成条件、响应风格和示例仅作为写作模板建议，不是数据库字段，也不要求每个 Agent 都包含全部章节。前端可以提供“插入推荐模板”、Token 估算和预览，但保存值始终是编辑器中的完整 `system` 字符串。
+管理前端固定展示角色、目标、指令、Tool 策略、安全规则、完成条件、响应风格和示例 8 个必填输入项，不根据字段值动态显隐。Runtime 按上述固定顺序组装完整 System Prompt；详情页按同一顺序展示，保证编辑、预览和实际运行语义一致。
 
-当前输入基线仍使用结构化 `system_prompt` 对象。兼容导入时，服务按 `role`、`objective`、`instructions`、`tool_policy`、`safety`、`completion`、`response_style`、`example` 的固定顺序生成一个非空 `system` 字符串；导入完成后的数据库和目标 API 只读写 `system`。这是对输入基线的架构收敛，不把旧结构误认为 Anthropic Managed Agents 的现有字段模型。
+这是本产品为了保证 Agent 定义完整性而采用的产品约束，不是 Anthropic Managed Agents 的字段模型。源 JSON 和目标 API 使用 `system_prompt` 对象，数据库为了字段约束和独立更新将其展开为 8 列。
 
 ### 4.3 `enabled` 语义
 
@@ -139,7 +146,7 @@ PRIMARY KEY (agent_id, model_id)
 UNIQUE (agent_id, sort_order)
 ```
 
-模型是唯一保留顺序的子表。`sort_order` 用于还原 `models[]`，但当前元数据没有定义数组顺序是默认模型或 fallback 顺序，Runtime 不应自行推断。
+模型是唯一保留顺序的子表。`sort_order` 用于还原 `model[]`，但当前元数据没有定义数组顺序是默认模型或 fallback 顺序，Runtime 不应自行推断。
 
 一个 Agent 至少需要一个模型。该跨表约束由应用在同一事务中校验。
 
@@ -292,7 +299,7 @@ WHERE id = :id
 
 禁用接口不执行物理删除。管理查询返回禁用 Agent；运行时读取必须增加 `enabled = TRUE` 条件。受影响行为和版本冲突处理与更新 `display_name` 相同。
 
-### 9.4 更新 `models`
+### 9.4 更新 `model`
 
 ```text
 BEGIN
@@ -302,7 +309,7 @@ BEGIN
   FOR UPDATE
 
   verify version = expected_version
-  verify models is not empty and model IDs are unique
+  verify model list is not empty and model IDs are unique
 
   DELETE FROM t_agent_models WHERE agent_id = :id
   INSERT every model with zero-based sort_order
@@ -321,12 +328,12 @@ COMMIT
 查询步骤：
 
 1. 管理面按 `t_agent_definition.id` 查询主表，不过滤 `enabled`；运行时增加 `enabled = TRUE`。
-2. 查询 `t_agent_models`，按 `sort_order` 还原 `models[]`。
+2. 查询 `t_agent_models`，按 `sort_order` 还原 `model[]`。
 3. 查询 `t_agent_binding_tools`，按 `tool_id` 排序并生成 `binding_tools[]`。
 4. 按非空 `permission` 分组，生成 `deny`、`ask`、`allow`。
 5. 查询 `t_agent_binding_skills`，按 `skill_id` 排序生成 `binding_skills[]`。
 6. `use_cases` 直接读取主表 JSONB。
-7. 直接返回主表 `system`，不做子字段重组。
+7. 把 `role` 等 8 列按固定结构重组为 `system_prompt`。
 
 不建议把三个一对多子表放进同一个 Join，否则会产生行数相乘。
 
@@ -334,7 +341,7 @@ COMMIT
 
 | 对象 | 用途 |
 |---|---|
-| `t_agent_definition` | Agent 当前标量字段、启停状态、完整 System Prompt 和 Use Cases |
+| `t_agent_definition` | Agent 当前标量字段、启停状态、System Prompt 展开字段和 Use Cases |
 | `uk_t_agent_definition_name` | 保证 `name` 唯一 |
 | `idx_t_agent_definition_display_name` | 展示名查询 |
 | `idx_t_agent_definition_updated_at` | 管理列表排序 |
@@ -361,6 +368,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.10.0` | 2026-08-05 | 以输入元数据的 `system_prompt` 对象为准，恢复 8 个数据库展开列并全部设为 `TEXT NOT NULL`；前端固定展示全部字段；同步源 JSON、README、DDL 和图表 |
 | `v0.9.0` | 2026-08-05 | 删除 README 中重复的 SQL 语句章节，`schema.sql` 作为唯一完整 DDL 来源，并顺延章节编号 |
 | `v0.8.0` | 2026-08-04 | 将八个 System Prompt 子列收敛为单一必填 `system TEXT`；增加非空白约束；前端改为固定的完整 Prompt 编辑器；保留旧 `system_prompt` 对象的导入组装规则 |
 | `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type`；在 SQL 章节补充表和字段 COMMENT 语句 |

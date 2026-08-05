@@ -1,6 +1,6 @@
-' Generated for SR-AGENT-DB-001 v0.9.0 on 2026-08-05.
+' Generated for SR-AGENT-DB-001 v0.10.0 on 2026-08-05.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Repository baseline: 614b5151ca6996cfca24897a1485d7b874e25f30; input JSON uses its working-tree hash.
+' Repository baseline: 8e17fa77f69bc7d31f640b6536170cf10d99da36; input JSON uses its working-tree hash.
 ' Target-only design: no corresponding database implementation exists in this repository.
 
 @startuml agent_metadata_gaussdb_model
@@ -21,16 +21,16 @@ skinparam classAttributeIconSize 0
 ' Source evidence:
 ' - Repository-relative path, Git-escaped:
 '   "AGENT\345\205\203\346\225\260\346\215\256\350\256\276\350\256\241.json":2-47.
-' - Fields at lines 2-24 map to t_agent_definition; enabled is Boolean.
-' - models at line 11 maps to the only ordered child table.
+' - Root fields at lines 2-10, system_prompt at 12-21, and use_cases at 22-24
+'   map to t_agent_definition; system_prompt is structured.
+' - model at line 11 maps to the only ordered child table.
 ' - Tool binding and permission fields at lines 25-30 and 37-47 are merged.
 ' - Skill bindings at lines 31-36 have no order column.
 ' Observed behavior: the current JSON is a current-state Agent resource with a
 ' monotonically increasing version and no separate history resource.
-' Design reason: the complete system prompt uses one required TEXT column to match
-' the managed-agent configuration model and avoid a rigid prompt-section schema.
-' Architecture change: the legacy structured system_prompt input is assembled into
-' one system string during import; the target database and API store only system.
+' Design reason: structured system_prompt fields use typed columns so each required
+' product field can be validated and updated independently.
+' Product constraint: all eight system_prompt fields are required in the target design.
 ' Product constraint: only model order is persisted; Tool and Skill order is not.
 ' GaussDB divergence: physical foreign keys are optional because GaussDB
 ' Distributed does not support them; the base DDL uses logical relationships.
@@ -43,13 +43,20 @@ class t_agent_definition <<current Agent>> {
   name: VARCHAR UK
   display_name: VARCHAR
   description: TEXT
-  system: TEXT
+  role: TEXT
+  objective: TEXT
+  instructions: TEXT
+  tool_policy: TEXT
+  safety: TEXT
+  completion: TEXT
+  response_style: TEXT
+  example: TEXT
   use_cases: JSONB
   created_at: TIMESTAMPTZ
   updated_at: TIMESTAMPTZ
 }
 
-class t_agent_models <<models>> {
+class t_agent_models <<model>> {
   agent_id: VARCHAR PK
   model_id: VARCHAR PK
   sort_order: INTEGER UK
@@ -77,11 +84,11 @@ name and display_name are VARCHAR(128).
 use_cases is a JSON array.
 version is the optimistic-lock value.
 enabled gates new runtime invocations.
-system is required and must not be blank.
+All eight system_prompt fields are required.
 end note
 
 note right of t_agent_models
-Only models preserves JSON array order.
+Only model preserves JSON array order.
 model_id is VARCHAR(64).
 end note
 
