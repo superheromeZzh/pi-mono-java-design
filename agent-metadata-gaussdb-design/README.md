@@ -1,10 +1,10 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.8.0`<br>
-> 日期：`2026-08-04`<br>
+> 版本：`v0.9.0`<br>
+> 日期：`2026-08-05`<br>
 > 状态：目标设计（target-only）<br>
-> 仓库基线：`bef5ecd`（输入 JSON 使用下述工作区 SHA-256）<br>
+> 仓库基线：`614b5151ca6996cfca24897a1485d7b874e25f30`（输入 JSON 使用下述工作区 SHA-256）<br>
 > Java / 数据库实现基线：无
 
 ## 1. 结论
@@ -55,102 +55,9 @@ PlantUML：[查看源码](./diagram.puml#L6)
 
 所有子表通过 `agent_id` 逻辑关联 `t_agent_definition.id`。表名统一使用小写 snake_case 和 `t_` 前缀。
 
-## 4. SQL 语句
+## 4. 主表 `t_agent_definition`
 
-以下 DDL 可直接创建目标设计中的四张表。完整的字段注释、索引和集中式 GaussDB 可选外键见 [`schema.sql`](./schema.sql)。
-
-```sql
-CREATE TABLE t_agent_definition (
-    id              VARCHAR(64)  NOT NULL,
-    type            VARCHAR(16)  NOT NULL DEFAULT 'agent',
-    version         BIGINT       NOT NULL DEFAULT 1,
-    enabled         BOOLEAN      NOT NULL DEFAULT TRUE,
-    name            VARCHAR(128) NOT NULL,
-    display_name    VARCHAR(128) NOT NULL,
-    description     TEXT         NOT NULL,
-    system          TEXT         NOT NULL,
-    use_cases       JSONB        NOT NULL DEFAULT '[]'::jsonb,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT pk_t_agent_definition PRIMARY KEY (id),
-    CONSTRAINT uk_t_agent_definition_name UNIQUE (name),
-    CONSTRAINT ck_t_agent_definition_type CHECK (type = 'agent'),
-    CONSTRAINT ck_t_agent_definition_version CHECK (version >= 1),
-    CONSTRAINT ck_t_agent_definition_name CHECK (name <> ''),
-    CONSTRAINT ck_t_agent_definition_display_name CHECK (display_name <> ''),
-    CONSTRAINT ck_t_agent_definition_system CHECK (btrim(system) <> ''),
-    CONSTRAINT ck_t_agent_definition_use_cases
-        CHECK (jsonb_typeof(use_cases) = 'array')
-);
-
-CREATE TABLE t_agent_models (
-    agent_id    VARCHAR(64) NOT NULL,
-    model_id    VARCHAR(64) NOT NULL,
-    sort_order  INTEGER     NOT NULL,
-    CONSTRAINT pk_t_agent_models PRIMARY KEY (agent_id, model_id),
-    CONSTRAINT uk_t_agent_models_order UNIQUE (agent_id, sort_order),
-    CONSTRAINT ck_t_agent_models_order CHECK (sort_order >= 0),
-    CONSTRAINT ck_t_agent_models_id CHECK (model_id <> '')
-);
-
-CREATE TABLE t_agent_binding_tools (
-    agent_id     VARCHAR(64) NOT NULL,
-    tool_id      VARCHAR(64) NOT NULL,
-    tool_version BIGINT,
-    permission   VARCHAR(8),
-    CONSTRAINT pk_t_agent_binding_tools PRIMARY KEY (agent_id, tool_id),
-    CONSTRAINT ck_t_agent_binding_tools_id CHECK (tool_id <> ''),
-    CONSTRAINT ck_t_agent_binding_tools_version
-        CHECK (tool_version IS NULL OR tool_version >= 1),
-    CONSTRAINT ck_t_agent_binding_tools_permission
-        CHECK (permission IS NULL OR permission IN ('deny', 'ask', 'allow'))
-);
-
-CREATE TABLE t_agent_binding_skills (
-    agent_id      VARCHAR(64) NOT NULL,
-    skill_id      VARCHAR(64) NOT NULL,
-    skill_version BIGINT,
-    CONSTRAINT pk_t_agent_binding_skills PRIMARY KEY (agent_id, skill_id),
-    CONSTRAINT ck_t_agent_binding_skills_id CHECK (skill_id <> ''),
-    CONSTRAINT ck_t_agent_binding_skills_version
-        CHECK (skill_version IS NULL OR skill_version >= 1)
-);
-
-COMMENT ON TABLE t_agent_definition IS 'Agent current metadata, availability, complete system prompt, and use cases';
-COMMENT ON COLUMN t_agent_definition.id IS 'Stable Agent identifier mapped directly from JSON id';
-COMMENT ON COLUMN t_agent_definition.type IS 'Resource type mapped from JSON type; fixed to agent';
-COMMENT ON COLUMN t_agent_definition.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
-COMMENT ON COLUMN t_agent_definition.enabled IS 'Whether the Agent accepts new runtime invocations; disabled Agents remain manageable';
-COMMENT ON COLUMN t_agent_definition.name IS 'Stable internal Agent name; unique and not editable in the management UI';
-COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; editable in the management UI';
-COMMENT ON COLUMN t_agent_definition.description IS 'Agent description';
-COMMENT ON COLUMN t_agent_definition.system IS 'Complete non-blank system prompt sent to the model';
-COMMENT ON COLUMN t_agent_definition.use_cases IS 'JSON array of intent-recognition use case strings';
-COMMENT ON COLUMN t_agent_definition.created_at IS 'Database creation time';
-COMMENT ON COLUMN t_agent_definition.updated_at IS 'Time of the latest successful Agent metadata update';
-
-COMMENT ON TABLE t_agent_models IS 'Ordered model gateway model IDs from Agent models';
-COMMENT ON COLUMN t_agent_models.agent_id IS 'Logical reference to t_agent_definition.id';
-COMMENT ON COLUMN t_agent_models.model_id IS 'Model ID defined by the model gateway';
-COMMENT ON COLUMN t_agent_models.sort_order IS 'Zero-based position used to reproduce the JSON array';
-
-COMMENT ON TABLE t_agent_binding_tools IS 'Tool binding and optional Agent-level permission override';
-COMMENT ON COLUMN t_agent_binding_tools.agent_id IS 'Logical reference to t_agent_definition.id';
-COMMENT ON COLUMN t_agent_binding_tools.tool_id IS 'Referenced Tool identifier';
-COMMENT ON COLUMN t_agent_binding_tools.tool_version IS 'Pinned Tool version; NULL means resolve the latest version';
-COMMENT ON COLUMN t_agent_binding_tools.permission IS 'Agent-level deny, ask, or allow; NULL means inherit the Tool permission';
-
-COMMENT ON TABLE t_agent_binding_skills IS 'Skill references bound to an Agent';
-COMMENT ON COLUMN t_agent_binding_skills.agent_id IS 'Logical reference to t_agent_definition.id';
-COMMENT ON COLUMN t_agent_binding_skills.skill_id IS 'Referenced Skill identifier';
-COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version; NULL means resolve the latest version';
-```
-
-基础 DDL 不声明物理外键，以兼容 GaussDB Distributed；`agent_id` 引用完整性由服务在同一事务内维护。
-
-## 5. 主表 `t_agent_definition`
-
-### 5.1 字段映射
+### 4.1 字段映射
 
 | JSON 字段 | 数据库字段 | 类型 | 可空 | 说明 |
 |---|---|---|---:|---|
@@ -166,7 +73,7 @@ COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version;
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
 
-### 5.2 `system` 约束与展示规则
+### 4.2 `system` 约束与展示规则
 
 `system` 是实际发送给模型的完整系统提示词。数据库使用 `TEXT NOT NULL`，并以 `CHECK (btrim(system) <> '')` 拒绝空字符串和纯空白内容；API 和应用层执行相同校验。
 
@@ -174,7 +81,7 @@ COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version;
 
 当前输入基线仍使用结构化 `system_prompt` 对象。兼容导入时，服务按 `role`、`objective`、`instructions`、`tool_policy`、`safety`、`completion`、`response_style`、`example` 的固定顺序生成一个非空 `system` 字符串；导入完成后的数据库和目标 API 只读写 `system`。这是对输入基线的架构收敛，不把旧结构误认为 Anthropic Managed Agents 的现有字段模型。
 
-### 5.3 `enabled` 语义
+### 4.3 `enabled` 语义
 
 `enabled` 是 Agent 的可用状态，不是权限字段：
 
@@ -189,7 +96,7 @@ COMMENT ON COLUMN t_agent_binding_skills.skill_version IS 'Pinned Skill version;
 
 `enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_t_agent_definition_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
 
-### 5.4 `use_cases` JSONB
+### 4.4 `use_cases` JSONB
 
 保存形式与元数据一致：
 
@@ -217,7 +124,7 @@ CONSTRAINT ck_t_agent_definition_use_cases
 
 `use_cases` 通常随 Agent 整体读取，当前也没有按单个场景执行关系查询的需求，因此不再单独建表。
 
-## 6. 模型表 `t_agent_models`
+## 5. 模型表 `t_agent_models`
 
 | 字段 | 类型 | 约束 |
 |---|---|---|
@@ -236,9 +143,9 @@ UNIQUE (agent_id, sort_order)
 
 一个 Agent 至少需要一个模型。该跨表约束由应用在同一事务中校验。
 
-## 7. Tool 绑定与权限表 `t_agent_binding_tools`
+## 6. Tool 绑定与权限表 `t_agent_binding_tools`
 
-### 7.1 合并结构
+### 6.1 合并结构
 
 `binding_tools[]` 和 `permission.deny/ask/allow` 合并为：
 
@@ -257,7 +164,7 @@ PRIMARY KEY (agent_id, tool_id)
 
 不保存 `sort_order`。查询并重建 `binding_tools[]` 时按 `tool_id` 稳定排序。
 
-### 7.2 JSON 到数据库的转换
+### 6.2 JSON 到数据库的转换
 
 元数据示例：
 
@@ -301,14 +208,14 @@ PRIMARY KEY (agent_id, tool_id)
 
 合并后的设计不能保存“未绑定但预先声明权限”的 Tool；这是本版明确约束。
 
-### 7.3 数据库约束
+### 6.3 数据库约束
 
 ```sql
 CHECK (tool_version IS NULL OR tool_version >= 1)
 CHECK (permission IS NULL OR permission IN ('deny', 'ask', 'allow'))
 ```
 
-## 8. Skill 绑定表 `t_agent_binding_skills`
+## 7. Skill 绑定表 `t_agent_binding_skills`
 
 | 字段 | 类型 | 可空 | 说明 |
 |---|---|---:|---|
@@ -318,7 +225,7 @@ CHECK (permission IS NULL OR permission IN ('deny', 'ask', 'allow'))
 
 主键为 `(agent_id, skill_id)`，不保存 `sort_order`。输出 `binding_skills[]` 时按 `skill_id` 稳定排序。
 
-## 9. GaussDB 兼容性
+## 8. GaussDB 兼容性
 
 DDL 使用行存表、`VARCHAR`、`TEXT`、`JSONB`、`BIGINT`、`INTEGER`、`TIMESTAMPTZ`、主键、唯一约束、`CHECK` 和普通索引。
 
@@ -336,9 +243,9 @@ t_agent_binding_skills.agent_id -> t_agent_definition.id
 
 如果最终使用支持外键的集中式 GaussDB，可启用 DDL 末尾的可选外键。
 
-## 10. 初始化和更新
+## 9. 初始化和更新
 
-### 10.1 初始化
+### 9.1 初始化
 
 ```text
 BEGIN
@@ -359,7 +266,7 @@ COMMIT
 - Tool/Skill 版本为空或大于等于 1。
 - Tool 权限只引用已绑定 Tool。
 
-### 10.2 更新 `display_name`
+### 9.2 更新 `display_name`
 
 ```sql
 UPDATE t_agent_definition
@@ -372,7 +279,7 @@ WHERE id = :id
 
 受影响一行表示成功；零行表示 Agent 不存在或版本冲突。
 
-### 10.3 更新 `enabled`
+### 9.3 更新 `enabled`
 
 ```sql
 UPDATE t_agent_definition
@@ -385,7 +292,7 @@ WHERE id = :id
 
 禁用接口不执行物理删除。管理查询返回禁用 Agent；运行时读取必须增加 `enabled = TRUE` 条件。受影响行为和版本冲突处理与更新 `display_name` 相同。
 
-### 10.4 更新 `models`
+### 9.4 更新 `models`
 
 ```text
 BEGIN
@@ -409,7 +316,7 @@ COMMIT
 
 一次请求同时修改启停状态、展示名和模型时，`version` 只增加一次。
 
-## 11. 查询完整 Agent
+## 10. 查询完整 Agent
 
 查询步骤：
 
@@ -423,7 +330,7 @@ COMMIT
 
 不建议把三个一对多子表放进同一个 Join，否则会产生行数相乘。
 
-## 12. 表和索引清单
+## 11. 表和索引清单
 
 | 对象 | 用途 |
 |---|---|
@@ -439,7 +346,7 @@ COMMIT
 | `t_agent_binding_skills` | Skill 绑定 |
 | `idx_t_agent_binding_skills_skill_id` | 按 Skill 反查 Agent |
 
-## 13. 图表生成与验证
+## 12. 图表生成与验证
 
 图源维护在 [`diagram.puml`](./diagram.puml#L6)，内容只使用英文和 ASCII：
 
@@ -450,10 +357,11 @@ plantuml -tsvg diagram.puml
 
 SVG 是生成物，不手工修改。
 
-## 14. 版本历史
+## 13. 版本历史
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.9.0` | 2026-08-05 | 删除 README 中重复的 SQL 语句章节，`schema.sql` 作为唯一完整 DDL 来源，并顺延章节编号 |
 | `v0.8.0` | 2026-08-04 | 将八个 System Prompt 子列收敛为单一必填 `system TEXT`；增加非空白约束；前端改为固定的完整 Prompt 编辑器；保留旧 `system_prompt` 对象的导入组装规则 |
 | `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type`；在 SQL 章节补充表和字段 COMMENT 语句 |
 | `v0.6.0` | 2026-08-04 | 在表关系后增加 SQL 语句章节，集中展示四张目标表的可执行建表 DDL |
