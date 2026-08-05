@@ -40,7 +40,7 @@ COMMENT ON COLUMN t_agent_definition.type IS 'Resource type mapped from JSON typ
 COMMENT ON COLUMN t_agent_definition.version IS 'Current optimistic-lock version; starts at 1 and increments once per successful update';
 COMMENT ON COLUMN t_agent_definition.enabled IS 'Whether the Agent accepts new runtime invocations; disabled Agents remain manageable';
 COMMENT ON COLUMN t_agent_definition.name IS 'Stable internal Agent name; unique and not editable in the management UI';
-COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; editable in the management UI';
+COMMENT ON COLUMN t_agent_definition.display_name IS 'Human-readable Agent name; not editable in the management UI';
 COMMENT ON COLUMN t_agent_definition.description IS 'Agent description';
 COMMENT ON COLUMN t_agent_definition.role IS 'Agent identity, expertise, and responsibility scope';
 COMMENT ON COLUMN t_agent_definition.objective IS 'Long-term objective and success criteria';
@@ -51,7 +51,7 @@ COMMENT ON COLUMN t_agent_definition.completion IS 'Completion conditions, self-
 COMMENT ON COLUMN t_agent_definition.response_style IS 'Default language, length, format, and reporting style';
 COMMENT ON COLUMN t_agent_definition.example IS 'Required example for consistent behavior or output';
 COMMENT ON COLUMN t_agent_definition.use_cases IS 'JSON array of intent-recognition use case strings';
-COMMENT ON COLUMN t_agent_definition.created_at IS 'Database creation time';
+COMMENT ON COLUMN t_agent_definition.created_at IS 'Time when the Agent metadata was created';
 COMMENT ON COLUMN t_agent_definition.updated_at IS 'Time of the latest successful Agent metadata update';
 
 CREATE TABLE t_agent_models (
