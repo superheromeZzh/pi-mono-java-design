@@ -1,0 +1,103 @@
+openapi: 3.1.0
+info:
+  title: CampusAgent Internal Runtime HTTP API
+  version: 1.0.0
+  description: Target-only HTTP representation of internal Runtime WebSocket v2.
+servers:
+  - url: https://agent-service.internal/agent-service/internal/v1
+security: [{ internalGateway: [] }]
+paths:
+  /sessions/{session_id}:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    put:
+      summary: Create or resume a Runtime Session
+      operationId: upsertSession
+      parameters: [{ $ref: '#/components/parameters/IfNoneMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SessionUpsertRequest' } } } }
+      responses:
+        '200': { description: Resumed, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      summary: Get session state
+      operationId: getSession
+      responses:
+        '200': { description: Session, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /sessions/{session_id}/runs:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    post:
+      summary: Start a chat run
+      operationId: createRun
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatSendRequest' } } } }
+      responses:
+        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /sessions/{session_id}/history:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    get:
+      summary: Read authoritative history
+      operationId: getHistory
+      parameters: [{ $ref: '#/components/parameters/Limit' }, { name: cursor, in: query, schema: { type: string } }]
+      responses:
+        '200': { description: History page, content: { application/json: { schema: { $ref: '#/components/schemas/HistoryPage' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /sessions/{session_id}/runs/{run_id}:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    get:
+      summary: Get run status and snapshot
+      operationId: getRun
+      responses: { '200': { description: Run, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }, default: { $ref: '#/components/responses/Problem' } }
+  /sessions/{session_id}/runs/{run_id}/events:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    get:
+      summary: Poll ordered run events
+      operationId: getRunEvents
+      parameters: [{ name: after_seq, in: query, schema: { type: integer, minimum: 0, default: 0 } }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Event page, headers: { ETag: { schema: { type: string } }, Retry-After: { schema: { type: integer } } }, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+  /sessions/{session_id}/runs/{run_id}/steers:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    post:
+      summary: Steer an active run
+      operationId: steerRun
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SteerRequest' } } } }
+      responses: { '202': { description: Accepted }, default: { $ref: '#/components/responses/Problem' } }
+  /sessions/{session_id}/runs/{run_id}/abort:
+    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    post:
+      summary: Abort a run idempotently
+      operationId: abortRun
+      responses: { '202': { description: Accepted }, '204': { description: Already terminal }, default: { $ref: '#/components/responses/Problem' } }
+  /agents/{agent_id}/models:
+    get:
+      summary: List models available to an agent
+      operationId: listModels
+      parameters: [{ name: agent_id, in: path, required: true, schema: { $ref: '#/components/schemas/AgentId' } }]
+      responses: { '200': { description: Models, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Model' } } } } } } }, default: { $ref: '#/components/responses/Problem' } }
+components:
+  securitySchemes: { internalGateway: { type: http, scheme: bearer, description: Existing internal gateway context; exact format is deployment-specific. } }
+  parameters:
+    SessionId: { name: session_id, in: path, required: true, schema: { $ref: '#/components/schemas/SessionId' } }
+    RunId: { name: run_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+    IfNoneMatch: { name: If-None-Match, in: header, schema: { type: string } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 256 } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+  responses: { Problem: { description: Problem response, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } } }
+  schemas:
+    SessionId: { type: string, pattern: '^[0-9A-Za-z-]{16,128}$' }
+    AgentId: { type: string, pattern: '^agent_[0-9A-Za-z]{24}$' }
+    ModelId: { type: string, pattern: '^model_[0-9A-Za-z]{24}$' }
+    AttachmentId: { type: string, pattern: '^attachment_[0-9A-Za-z]{24}$' }
+    SessionUpsertRequest: { type: object, required: [agent_id, model_id], properties: { agent_id: { $ref: '#/components/schemas/AgentId' }, model_id: { $ref: '#/components/schemas/ModelId' }, mode: { type: string, enum: [create, resume], default: resume } } }
+    ChatSendRequest: { type: object, properties: { text: { type: string, minLength: 1, maxLength: 1048576 }, attachment_ids: { type: array, maxItems: 10, items: { $ref: '#/components/schemas/AttachmentId' } } }, anyOf: [{ required: [text] }, { required: [attachment_ids] }] }
+    SteerRequest: { type: object, required: [text], properties: { text: { type: string, minLength: 1, maxLength: 1048576 } } }
+    Session: { type: object, required: [session_id, agent_id, model_id, state], properties: { session_id: { $ref: '#/components/schemas/SessionId' }, agent_id: { $ref: '#/components/schemas/AgentId' }, model_id: { $ref: '#/components/schemas/ModelId' }, state: { type: string, enum: [idle, running, interrupted, deleted] }, active_run_id: { type: string, nullable: true }, version: { type: integer, minimum: 0 } } }
+    Run: { type: object, required: [run_id, session_id, state], properties: { run_id: { type: string }, session_id: { $ref: '#/components/schemas/SessionId' }, state: { type: string, enum: [queued, running, completed, aborted, interrupted, failed] }, next_seq: { type: integer, minimum: 0 }, created_at: { type: string, format: date-time }, completed_at: { type: string, format: date-time, nullable: true } } }
+    Event: { type: object, required: [seq, type], properties: { seq: { type: integer, minimum: 1 }, type: { type: string }, payload: { type: object, additionalProperties: true } } }
+    EventPage: { type: object, required: [items, next_after_seq, terminal], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_after_seq: { type: integer }, terminal: { type: boolean }, retry_after_ms: { type: integer, minimum: 0 } } }
+    HistoryPage: { type: object, required: [items], properties: { items: { type: array, items: { type: object, additionalProperties: true } }, next_cursor: { type: string, nullable: true } } }
+    Model: { type: object, required: [model_id, name], properties: { model_id: { $ref: '#/components/schemas/ModelId' }, name: { type: string }, reasoning: { type: boolean } } }
+    Problem: { type: object, required: [type, title, status, code], properties: { type: { type: string, format: uri-reference }, title: { type: string }, status: { type: integer }, code: { type: string }, detail: { type: string }, request_id: { type: string } } }
