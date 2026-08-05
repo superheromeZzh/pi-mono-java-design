@@ -2,9 +2,9 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.13.0 |
+| 文档版本 | 1.13.1 |
 | 状态 | 目标设计，尚未实施 |
-| 更新日期 | 2026-08-04 |
+| 更新日期 | 2026-08-05 |
 | pi-mono 源码基线 | `fc85bdd88be93b1e9a6b6bcfa41c684282ec79cc` |
 | pi-mono-java 源码基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 | OpenClaw 源码基线 | `b015925bc30f6a8363f290b07d5f8588e21422b8` |
@@ -108,6 +108,11 @@ Attachment Service
   mate-service 的公共 Chat 协议，只出现 `chat_id`；
 - [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)：mate-service 到
   agent-service 的内部 Runtime 协议，只出现 `session_id`。
+
+内部 Runtime 客户端可以先阅读
+[`chat-ws-v2-developer-guide.md`](chat-ws-v2-developer-guide.md)，或直接打开
+[`chat-ws-v2-docs/index.html`](chat-ws-v2-docs/index.html) 按命令查看默认展开的
+JSON 示例和可展开的字段约束；完整规范仍以 AsyncAPI 源文件为准。
 
 附件的 HTTP 契约、openGauss DDL、OBS 存储端口和补偿状态机以
 [`CampusMate Attachment Service：OBS + openGauss 设计`](../campusmate-attachment-service/README.md)
@@ -2285,7 +2290,7 @@ resolve/content 接口重建附件输入；跨 Pod 共享不依赖本地盘、�
 | agent-service 内部 WebSocket Upgrade route | 规范内部路径为 `/agent-service/internal/v1/ws/chat`；不解析业务 query；校验既有内部网关认证和受信 Session 亲和元数据，创建不可变 ConnectionAuthContext | 安全加固 |
 | `ChatWebSocketHandler` | 拆为 `ChatWebSocketAdapter`；处理首帧、Frame、连接 seq、Ping/Pong、完整 Message 大小限制和 close code | 架构改造 |
 | `SessionTransportFactory` / `SessionTransport` | 新增服务端逻辑会话端口；每连接创建 `ManagedSessionTransport`，暴露 connect/request/events/close | 架构改造 |
-| Frame DTO / validator | 分别以公共 AsyncAPI 1.0.0 和内部 AsyncAPI 2.11.0 生成封闭 DTO；成功 Response 使用 payload，作用域字段不得跨边界泄露 | 架构改造 |
+| Frame DTO / validator | 分别以公共 AsyncAPI 1.0.0 和内部 AsyncAPI 2.12.0 生成封闭 DTO；成功 Response 使用 payload，作用域字段不得跨边界泄露 | 架构改造 |
 | `SessionPool` | 增加 Managed 路径；以全局唯一 session_id 为唯一 key、固定 Agent 绑定、每 Pod 维护单活动连接 generation、run 独立于连接、移除单一 cwd 假设 | 架构改造 |
 | `RuntimeSessionStore` | 以数据库持久化 Session、Message、RunRecord、history sequence、幂等结果、revision 和附件元数据快照；Managed Profile 不生成 Session JSONL | 架构改造 |
 | `ManagedRunHub` | 新增；同 Pod 维护 partial Message、active tools、终态、run_seq 和原子恢复订阅；Pod 重启时通过 Store 收束为 interrupted | 架构改造 |
@@ -2706,6 +2711,7 @@ agent-service 只有在内部 Upgrade、`connect`、Agent、Session 和 Model �
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.13.1 | 2026-08-05 | 将内部 Runtime AsyncAPI 升至 2.12.0，按 method 暴露具名 Request/Success Response 和标准 reply，分别展示八类 Event；新增简化开发者指南、默认展开 JSON 示例的生成 HTML 和固定版本生成脚本；修正无附件模型输入策略误要求 `completed_at` 的 Schema 问题，并同步客户端指南 1.8.0；线上 Frame 结构和 Runtime 行为不变 |
 | 1.13.0 | 2026-08-04 | 增加 mate-service 公共 Chat WebSocket 与 agent-service 内部 Runtime WebSocket 的双协议边界；公共 create 自动生成 chat_id/session_id 并以 connect 幂等与 50 Chat 配额保护，公共 resume 只使用 chat_id；定义 Mate Chat Store、服务责任图、Agent Channel 接受边界、语义 Frame 桥接、逐跳连接/序列/背压、两次 HTTP 101 和恢复映射；收紧 Message/Tool/Error 投影与命令幂等负载；移除最终用户 IP 亲和假设，公共附件路径改用 chat_id；新增公共 AsyncAPI 1.0.0/指南 1.0.0，将内部 AsyncAPI/指南升至 2.11.0/1.7.0，并同步 Attachment Service 2.0.0 |
 | 1.12.0 | 2026-08-03 | 将 thinking 明确为 reasoning content 可见性而非推理开关或强度；第一版从 hidden/summary/full 收敛为 hidden/full，删除 thinking_summary 事件及摘要状态机，保留 hidden 占位与 thinking_redacted 序列语义；同步 AsyncAPI 2.10.0 和客户端指南 1.6.0 |
 | 1.11.1 | 2026-08-03 | 将 OBS Object Key 固定为 `attachment_id`，删除 openGauss 的对象定位映射；拆分永久 `t_attachment` 主表和 `t_attachment_active_detail`，明确活动字段分别承担 MIME/大小、SHA-256、引用保护、24 小时清理及 Worker lease/retry 恢复；OBS 删除完成后清除明细，只保留五字段 `DELETED` tombstone；冻结 filename 规则并为 create-only 冲突增加 quarantine 门禁；同步 Attachment Service 1.1.0、AsyncAPI 2.9.1 和客户端指南 1.5.1 |

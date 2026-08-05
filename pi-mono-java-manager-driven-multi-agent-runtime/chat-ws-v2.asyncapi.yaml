@@ -2,9 +2,25 @@ asyncapi: 3.1.0
 id: urn:campusagent:internal-runtime-chat-websocket:v2
 x-locale: zh-CN
 x-visibility: internal
+x-documentation:
+  developerGuide: chat-ws-v2-developer-guide.md
+  detailedIntegrationGuide: chat-ws-v2-client-integration.md
+  generatedHtml: chat-ws-v2-docs/index.html
+  generationScript: generate-chat-ws-v2-docs.sh
+x-source-evidence:
+  status: target-only design; pi-mono-java v2 is not implemented
+  repository: https://github.com/superheromeZzh/pi-mono-java
+  commit: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+  observedPaths:
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java
+      symbols: WebSocket handshake at baseline lines 377-391
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java
+      symbols: connection lifecycle and v1 commands at baseline lines 115-227; cumulative message updates at lines 422-459
+    - path: modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java
+      symbols: structured provider stream events at baseline lines 44-164
 info:
   title: CampusAgent 内部 Runtime 会话 WebSocket API
-  version: 2.11.0
+  version: 2.12.0
   description: |
     mate-service Runtime bridge 使用
     `wss://agent-service.internal/agent-service/internal/v1/ws/chat` 请求建立
@@ -88,30 +104,926 @@ channels:
       使用 HTTP status，101 之后的失败使用 ResponseFrame、EventFrame 或
       WebSocket close code。连接绑定成功后不能更换 Agent 或 Session。
     messages:
-      ClientRequestFrame:
-        $ref: '#/components/messages/ClientRequestFrame'
-      ServerResponseFrame:
-        $ref: '#/components/messages/ServerResponseFrame'
-      ServerEventFrame:
-        $ref: '#/components/messages/ServerEventFrame'
+      ConnectRequest:
+        $ref: '#/components/messages/ConnectRequest'
+      ChatSendRequest:
+        $ref: '#/components/messages/ChatSendRequest'
+      ChatSteerRequest:
+        $ref: '#/components/messages/ChatSteerRequest'
+      ChatAbortRequest:
+        $ref: '#/components/messages/ChatAbortRequest'
+      ChatHistoryRequest:
+        $ref: '#/components/messages/ChatHistoryRequest'
+      SessionGetRequest:
+        $ref: '#/components/messages/SessionGetRequest'
+      ModelsListRequest:
+        $ref: '#/components/messages/ModelsListRequest'
+      ModelSetRequest:
+        $ref: '#/components/messages/ModelSetRequest'
+      ThinkingSetRequest:
+        $ref: '#/components/messages/ThinkingSetRequest'
+      ConnectSuccessResponse:
+        $ref: '#/components/messages/ConnectSuccessResponse'
+      ChatSendSuccessResponse:
+        $ref: '#/components/messages/ChatSendSuccessResponse'
+      ChatSteerSuccessResponse:
+        $ref: '#/components/messages/ChatSteerSuccessResponse'
+      ChatAbortSuccessResponse:
+        $ref: '#/components/messages/ChatAbortSuccessResponse'
+      ChatHistorySuccessResponse:
+        $ref: '#/components/messages/ChatHistorySuccessResponse'
+      SessionGetSuccessResponse:
+        $ref: '#/components/messages/SessionGetSuccessResponse'
+      ModelsListSuccessResponse:
+        $ref: '#/components/messages/ModelsListSuccessResponse'
+      ModelSetSuccessResponse:
+        $ref: '#/components/messages/ModelSetSuccessResponse'
+      ThinkingSetSuccessResponse:
+        $ref: '#/components/messages/ThinkingSetSuccessResponse'
+      ErrorResponse:
+        $ref: '#/components/messages/ErrorResponse'
+      RunStartedEvent:
+        $ref: '#/components/messages/RunStartedEvent'
+      MessageStartedEvent:
+        $ref: '#/components/messages/MessageStartedEvent'
+      MessageUpdatedEvent:
+        $ref: '#/components/messages/MessageUpdatedEvent'
+      ToolStartedEvent:
+        $ref: '#/components/messages/ToolStartedEvent'
+      ToolUpdatedEvent:
+        $ref: '#/components/messages/ToolUpdatedEvent'
+      ToolCompletedEvent:
+        $ref: '#/components/messages/ToolCompletedEvent'
+      MessageCompletedEvent:
+        $ref: '#/components/messages/MessageCompletedEvent'
+      RunCompletedEvent:
+        $ref: '#/components/messages/RunCompletedEvent'
 operations:
-  receiveRequest:
+  connect:
     action: receive
     channel:
       $ref: '#/channels/sessionChat'
-    summary: CampusAgent 服务端先接收 connect RequestFrame；绑定成功后接收当前 Session 的命令请求。
+    title: connect：创建或恢复 Session
+    summary: CampusAgent 服务端在 WebSocket 建立后接收的首个应用消息。
     messages:
-      - $ref: '#/channels/sessionChat/messages/ClientRequestFrame'
-  sendResponseOrEvent:
+      - $ref: '#/channels/sessionChat/messages/ConnectRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ConnectSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  chat.send:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: chat.send：发送用户消息
+    summary: 接受文本、附件引用或两者组合，并创建一个 Run。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ChatSendRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ChatSendSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  chat.steer:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: chat.steer：追加运行指导
+    summary: 向当前 active run 追加一条非空文本指导。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ChatSteerRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ChatSteerSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  chat.abort:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: chat.abort：停止当前 Run
+    summary: 幂等请求停止指定的 active run。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ChatAbortRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ChatAbortSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  chat.history:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: chat.history：读取权威历史
+    summary: 分页读取当前 Session 的持久化 Message 和 RunRecord。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ChatHistoryRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ChatHistorySuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  session.get:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: session.get：读取 Session 状态
+    summary: 返回当前模型、Session 状态和可选 active run 快照。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/SessionGetRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/SessionGetSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  models.list:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: models.list：列出可用模型
+    summary: 返回当前 Agent 允许使用的模型及有效输入策略。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ModelsListRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ModelsListSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  model.set:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: model.set：切换模型
+    summary: 在没有 active run 时切换当前 Session 的有效模型。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ModelSetRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ModelSetSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  thinking.set:
+    action: receive
+    channel:
+      $ref: '#/channels/sessionChat'
+    title: thinking.set：修改披露级别
+    summary: 在没有 active run 时修改 Session 的默认 thinking 披露级别。
+    messages:
+      - $ref: '#/channels/sessionChat/messages/ThinkingSetRequest'
+    reply:
+      channel:
+        $ref: '#/channels/sessionChat'
+      messages:
+        - $ref: '#/channels/sessionChat/messages/ThinkingSetSuccessResponse'
+        - $ref: '#/channels/sessionChat/messages/ErrorResponse'
+  session.events:
     action: send
     channel:
       $ref: '#/channels/sessionChat'
-    summary: CampusAgent 服务端为命令发送同 id 的 ResponseFrame，并按 seq 发送当前 Session 的有序事件。
+    title: 发送有序 Session 事件
+    summary: CampusAgent 服务端按连接级 seq 和 Run 级 run_seq 发送生命周期事件。
     messages:
-      - $ref: '#/channels/sessionChat/messages/ServerResponseFrame'
-      - $ref: '#/channels/sessionChat/messages/ServerEventFrame'
+      - $ref: '#/channels/sessionChat/messages/RunStartedEvent'
+      - $ref: '#/channels/sessionChat/messages/MessageStartedEvent'
+      - $ref: '#/channels/sessionChat/messages/MessageUpdatedEvent'
+      - $ref: '#/channels/sessionChat/messages/ToolStartedEvent'
+      - $ref: '#/channels/sessionChat/messages/ToolUpdatedEvent'
+      - $ref: '#/channels/sessionChat/messages/ToolCompletedEvent'
+      - $ref: '#/channels/sessionChat/messages/MessageCompletedEvent'
+      - $ref: '#/channels/sessionChat/messages/RunCompletedEvent'
 components:
   messages:
+    ConnectRequest:
+      name: ConnectRequest
+      title: connect 请求
+      summary: 创建或恢复一个 Runtime Session；必须是 WebSocket 建立后的首个应用消息。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ConnectRequest'
+      examples:
+        - name: createSession
+          summary: 创建新的 Runtime Session
+          payload:
+            type: req
+            id: connect-1
+            method: connect
+            params:
+              mode: create
+              min_protocol: 2
+              max_protocol: 2
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+              client:
+                id: mate-service
+                version: 1.0.0
+                platform: service
+        - name: resumeSession
+          summary: 恢复已有 Runtime Session
+          payload:
+            type: req
+            id: connect-2
+            method: connect
+            params:
+              mode: resume
+              min_protocol: 2
+              max_protocol: 2
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              client:
+                id: mate-service
+                version: 1.0.0
+                platform: service
+    ChatSendRequest:
+      name: ChatSendRequest
+      title: chat.send 请求
+      summary: 发送文本、附件引用或两者组合，并创建一个 Run。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatSendRequest'
+      examples:
+        - name: sendText
+          summary: 发送纯文本用户消息
+          payload:
+            type: req
+            id: send-1
+            method: chat.send
+            params:
+              message: 查询订单 20260730001
+              idempotency_key: send-key-001
+        - name: sendTextAndAttachment
+          summary: 发送文本和附件引用
+          payload:
+            type: req
+            id: send-2
+            method: chat.send
+            params:
+              message: 分析这个订单文件
+              attachment_ids:
+                - attachment_011CZm8VpK4rNs6WtY2hDqfB
+              idempotency_key: send-key-002
+        - name: sendAttachmentOnly
+          summary: 仅发送附件引用
+          payload:
+            type: req
+            id: send-3
+            method: chat.send
+            params:
+              attachment_ids:
+                - attachment_011CZm8VpK4rNs6WtY2hDqfB
+              idempotency_key: send-key-003
+    ChatSteerRequest:
+      name: ChatSteerRequest
+      title: chat.steer 请求
+      summary: 向当前 active run 追加非空文本指导。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatSteerRequest'
+      examples:
+        - name: steerRun
+          payload:
+            type: req
+            id: steer-1
+            method: chat.steer
+            params:
+              run_id: run-01
+              message: 优先给出物流状态
+              idempotency_key: steer-key-001
+    ChatAbortRequest:
+      name: ChatAbortRequest
+      title: chat.abort 请求
+      summary: 幂等请求停止指定 active run。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatAbortRequest'
+      examples:
+        - name: abortRun
+          payload:
+            type: req
+            id: abort-1
+            method: chat.abort
+            params:
+              run_id: run-01
+              idempotency_key: abort-key-001
+    ChatHistoryRequest:
+      name: ChatHistoryRequest
+      title: chat.history 请求
+      summary: 读取当前 Session 的权威持久历史。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatHistoryRequest'
+      examples:
+        - name: readRunThroughSnapshot
+          summary: 按 active-run 快照水位读取指定 Run
+          payload:
+            type: req
+            id: history-1
+            method: chat.history
+            params:
+              run_id: run-01
+              through_history_seq: 41
+              limit: 200
+    SessionGetRequest:
+      name: SessionGetRequest
+      title: session.get 请求
+      summary: 读取当前 Session、模型和 active run 状态。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/SessionGetRequest'
+      examples:
+        - name: getSession
+          payload:
+            type: req
+            id: session-get-1
+            method: session.get
+    ModelsListRequest:
+      name: ModelsListRequest
+      title: models.list 请求
+      summary: 列出当前 Agent 允许使用的模型。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ModelsListRequest'
+      examples:
+        - name: listModels
+          payload:
+            type: req
+            id: models-list-1
+            method: models.list
+    ModelSetRequest:
+      name: ModelSetRequest
+      title: model.set 请求
+      summary: 在没有 active run 时切换当前模型。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ModelSetRequest'
+      examples:
+        - name: setModel
+          payload:
+            type: req
+            id: model-set-1
+            method: model.set
+            params:
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+    ThinkingSetRequest:
+      name: ThinkingSetRequest
+      title: thinking.set 请求
+      summary: 在没有 active run 时修改默认 thinking 披露级别。
+      tags:
+        - name: Requests
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ThinkingSetRequest'
+      examples:
+        - name: hideThinking
+          payload:
+            type: req
+            id: thinking-set-1
+            method: thinking.set
+            params:
+              level: hidden
+    ConnectSuccessResponse:
+      name: ConnectSuccessResponse
+      title: connect 成功响应
+      summary: 返回协议协商结果、Session 状态、模型能力和可选 active run 快照。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ConnectSuccessResponseFrame'
+      examples:
+        - name: connectedIdle
+          summary: 创建或恢复到 idle Session
+          payload:
+            type: res
+            id: connect-1
+            ok: true
+            payload:
+              protocol: 2
+              connection_id: conn-01
+              connection_generation: 1
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              model:
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+                name: 模型 A
+                reasoning: true
+                input:
+                  modalities:
+                    - text
+                  attachment_media_types: []
+                  max_attachments: 0
+                  max_attachment_bytes: 0
+                  max_total_attachment_bytes: 0
+              session:
+                state: idle
+                thinking: hidden
+              limits:
+                max_message_bytes: 1048576
+                max_connection_buffer_bytes: 4194304
+                heartbeat_seconds: 20
+                pong_timeout_seconds: 10
+                connect_timeout_seconds: 5
+              features:
+                methods:
+                  - chat.send
+                  - chat.steer
+                  - chat.abort
+                  - chat.history
+                  - session.get
+                  - models.list
+                  - model.set
+                  - thinking.set
+                events:
+                  - run.started
+                  - message.started
+                  - message.updated
+                  - tool.started
+                  - tool.updated
+                  - tool.completed
+                  - message.completed
+                  - run.completed
+                capabilities: []
+              active_run: null
+    ChatSendSuccessResponse:
+      name: ChatSendSuccessResponse
+      title: chat.send 成功响应
+      summary: 确认用户消息和 active-run 占位已经提交。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatSendSuccessResponseFrame'
+      examples:
+        - name: messageAccepted
+          payload:
+            type: res
+            id: send-1
+            ok: true
+            payload:
+              run_id: run-01
+              user_message_id: message-user-01
+              accepted: true
+    ChatSteerSuccessResponse:
+      name: ChatSteerSuccessResponse
+      title: chat.steer 成功响应
+      summary: 确认 steering 消息是否被当前 Run 接受。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatSteerSuccessResponseFrame'
+      examples:
+        - name: steeringAccepted
+          payload:
+            type: res
+            id: steer-1
+            ok: true
+            payload:
+              run_id: run-01
+              user_message_id: message-user-02
+              accepted: true
+              idempotent: false
+    ChatAbortSuccessResponse:
+      name: ChatAbortSuccessResponse
+      title: chat.abort 成功响应
+      summary: 确认停止请求是否被接受。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatAbortSuccessResponseFrame'
+      examples:
+        - name: abortAccepted
+          payload:
+            type: res
+            id: abort-1
+            ok: true
+            payload:
+              run_id: run-01
+              accepted: true
+              idempotent: false
+    ChatHistorySuccessResponse:
+      name: ChatHistorySuccessResponse
+      title: chat.history 成功响应
+      summary: 返回按 history_seq 排列的权威持久历史。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ChatHistorySuccessResponseFrame'
+      examples:
+        - name: historyPage
+          payload:
+            type: res
+            id: history-1
+            ok: true
+            payload:
+              items:
+                - type: message
+                  history_seq: 20
+                  run_id: run-01
+                  message:
+                    message_id: message-01
+                    role: assistant
+                    status: completed
+                    content:
+                      - type: text
+                        text: 订单已发货
+                    created_at: '2026-07-30T08:00:00Z'
+                    completed_at: '2026-07-30T08:00:02Z'
+                - type: run
+                  history_seq: 21
+                  run:
+                    run_id: run-01
+                    outcome: done
+                    completed_at: '2026-07-30T08:00:03Z'
+              has_more: false
+    SessionGetSuccessResponse:
+      name: SessionGetSuccessResponse
+      title: session.get 成功响应
+      summary: 返回当前 Session 和模型状态。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/SessionGetSuccessResponseFrame'
+      examples:
+        - name: idleSession
+          payload:
+            type: res
+            id: session-get-1
+            ok: true
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              model:
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+                name: 模型 A
+                input:
+                  modalities:
+                    - text
+                  attachment_media_types: []
+                  max_attachments: 0
+                  max_attachment_bytes: 0
+                  max_total_attachment_bytes: 0
+              session:
+                state: idle
+                thinking: hidden
+              active_run: null
+    ModelsListSuccessResponse:
+      name: ModelsListSuccessResponse
+      title: models.list 成功响应
+      summary: 返回可用模型及当前有效模型 ID。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ModelsListSuccessResponseFrame'
+      examples:
+        - name: availableModels
+          payload:
+            type: res
+            id: models-list-1
+            ok: true
+            payload:
+              models:
+                - model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+                  name: 模型 A
+                  input:
+                    modalities:
+                      - text
+                    attachment_media_types: []
+                    max_attachments: 0
+                    max_attachment_bytes: 0
+                    max_total_attachment_bytes: 0
+              effective_model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+    ModelSetSuccessResponse:
+      name: ModelSetSuccessResponse
+      title: model.set 成功响应
+      summary: 返回切换后的有效模型。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ModelSetSuccessResponseFrame'
+      examples:
+        - name: modelChanged
+          payload:
+            type: res
+            id: model-set-1
+            ok: true
+            payload:
+              model:
+                model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+                name: 模型 A
+                input:
+                  modalities:
+                    - text
+                  attachment_media_types: []
+                  max_attachments: 0
+                  max_attachment_bytes: 0
+                  max_total_attachment_bytes: 0
+    ThinkingSetSuccessResponse:
+      name: ThinkingSetSuccessResponse
+      title: thinking.set 成功响应
+      summary: 返回保存后的默认 thinking 披露级别。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ThinkingSetSuccessResponseFrame'
+      examples:
+        - name: thinkingHidden
+          payload:
+            type: res
+            id: thinking-set-1
+            ok: true
+            payload:
+              thinking: hidden
+    ErrorResponse:
+      name: ErrorResponse
+      title: 命令错误响应
+      summary: 所有请求方法共享的结构化错误响应。
+      tags:
+        - name: Responses
+      correlationId:
+        location: $message.payload#/id
+      payload:
+        $ref: '#/components/schemas/ErrorResponseFrame'
+      examples:
+        - name: activeRunConflict
+          payload:
+            type: res
+            id: send-1
+            ok: false
+            error:
+              code: RUN_ACTIVE
+              message: 当前 Session 已存在 active run。
+              retryable: true
+        - name: attachmentNotReady
+          payload:
+            type: res
+            id: send-2
+            ok: false
+            error:
+              code: ATTACHMENT_NOT_READY
+              message: 附件处理尚未完成。
+              retryable: true
+              retry_after_ms: 1000
+        - name: invalidRequest
+          payload:
+            type: res
+            id: req-1
+            ok: false
+            error:
+              code: INVALID_REQUEST
+              message: 请求字段不符合协议约束。
+    RunStartedEvent:
+      name: RunStartedEvent
+      title: run.started 事件
+      summary: Run 生命周期开始。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/RunStartedEvent'
+      examples:
+        - name: runStarted
+          payload:
+            type: event
+            event: run.started
+            seq: 1
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 1
+              timestamp: '2026-07-30T08:00:00Z'
+              model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+              thinking: hidden
+    MessageStartedEvent:
+      name: MessageStartedEvent
+      title: message.started 事件
+      summary: Assistant Message 生命周期开始。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/MessageStartedEvent'
+      examples:
+        - name: messageStarted
+          payload:
+            type: event
+            event: message.started
+            seq: 2
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 2
+              timestamp: '2026-07-30T08:00:00Z'
+              role: assistant
+    MessageUpdatedEvent:
+      name: MessageUpdatedEvent
+      title: message.updated 事件
+      summary: 发送文本、thinking 或 toolcall 的结构化内容增量。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/MessageUpdatedEvent'
+      examples:
+        - name: textDelta
+          payload:
+            type: event
+            event: message.updated
+            seq: 3
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 3
+              content_index: 0
+              timestamp: '2026-07-30T08:00:01Z'
+              update:
+                type: text_delta
+                delta: 订单已发货
+    ToolStartedEvent:
+      name: ToolStartedEvent
+      title: tool.started 事件
+      summary: Tool Manager 开始执行工具。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/ToolStartedEvent'
+      examples:
+        - name: toolStarted
+          payload:
+            type: event
+            event: tool.started
+            seq: 4
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 4
+              timestamp: '2026-07-30T08:00:01Z'
+              tool_call_id: tool-call-01
+              tool_id: order-query
+              parameters:
+                truncated: false
+                value:
+                  order_id: '20260730001'
+    ToolUpdatedEvent:
+      name: ToolUpdatedEvent
+      title: tool.updated 事件
+      summary: 发送工具执行进度的脱敏投影。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/ToolUpdatedEvent'
+      examples:
+        - name: toolProgress
+          payload:
+            type: event
+            event: tool.updated
+            seq: 5
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 5
+              timestamp: '2026-07-30T08:00:02Z'
+              tool_call_id: tool-call-01
+              tool_id: order-query
+              update:
+                message: 正在查询订单
+                progress: 0.5
+    ToolCompletedEvent:
+      name: ToolCompletedEvent
+      title: tool.completed 事件
+      summary: 工具执行到达 done、error 或 aborted 终态。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/ToolCompletedEvent'
+      examples:
+        - name: toolCompleted
+          payload:
+            type: event
+            event: tool.completed
+            seq: 6
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 6
+              timestamp: '2026-07-30T08:00:02Z'
+              tool_call_id: tool-call-01
+              tool_id: order-query
+              status: done
+              result:
+                truncated: false
+                value:
+                  status: SHIPPED
+    MessageCompletedEvent:
+      name: MessageCompletedEvent
+      title: message.completed 事件
+      summary: 返回完整的权威 Assistant Message 终态。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/MessageCompletedEvent'
+      examples:
+        - name: messageCompleted
+          payload:
+            type: event
+            event: message.completed
+            seq: 7
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              message_id: message-01
+              run_seq: 7
+              timestamp: '2026-07-30T08:00:03Z'
+              message:
+                message_id: message-01
+                role: assistant
+                status: completed
+                content:
+                  - type: text
+                    text: 订单已发货
+                created_at: '2026-07-30T08:00:00Z'
+                completed_at: '2026-07-30T08:00:03Z'
+    RunCompletedEvent:
+      name: RunCompletedEvent
+      title: run.completed 事件
+      summary: Run 的最后一个事件和权威运行终态。
+      tags:
+        - name: Events
+      payload:
+        $ref: '#/components/schemas/RunCompletedEvent'
+      examples:
+        - name: runCompleted
+          payload:
+            type: event
+            event: run.completed
+            seq: 8
+            payload:
+              agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+              session_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+              run_id: run-01
+              run_seq: 8
+              timestamp: '2026-07-30T08:00:03Z'
+              outcome: done
+              stop_reason: stop
+              usage:
+                input_tokens: 230
+                output_tokens: 48
+                total_tokens: 278
     ClientRequestFrame:
       name: ClientRequestFrame
       title: 客户端请求 Frame
@@ -1210,8 +2122,6 @@ components:
             required:
               - max_attachments
           then:
-            required:
-              - completed_at
             properties:
               modalities:
                 maxItems: 1
@@ -2468,7 +3378,7 @@ components:
       oneOf:
         - $ref: '#/components/schemas/Error'
         - $ref: '#/components/schemas/RunInterruptedError'
-    SuccessResponseFrame:
+    ConnectSuccessResponseFrame:
       type: object
       additionalProperties: false
       required:
@@ -2485,7 +3395,162 @@ components:
           type: boolean
           const: true
         payload:
-          $ref: '#/components/schemas/SuccessPayload'
+          $ref: '#/components/schemas/ConnectResult'
+    ChatSendSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ChatSendResult'
+    ChatSteerSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ChatSteerResult'
+    ChatAbortSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ChatAbortResult'
+    ChatHistorySuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/HistoryResult'
+    SessionGetSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/SessionGetResult'
+    ModelsListSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ModelsListResult'
+    ModelSetSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ModelSetResult'
+    ThinkingSetSuccessResponseFrame:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - ok
+        - payload
+      properties:
+        type:
+          const: res
+        id:
+          $ref: '#/components/schemas/RequestId'
+        ok:
+          type: boolean
+          const: true
+        payload:
+          $ref: '#/components/schemas/ThinkingSetResult'
+    SuccessResponseFrame:
+      oneOf:
+        - $ref: '#/components/schemas/ConnectSuccessResponseFrame'
+        - $ref: '#/components/schemas/ChatSendSuccessResponseFrame'
+        - $ref: '#/components/schemas/ChatSteerSuccessResponseFrame'
+        - $ref: '#/components/schemas/ChatAbortSuccessResponseFrame'
+        - $ref: '#/components/schemas/ChatHistorySuccessResponseFrame'
+        - $ref: '#/components/schemas/SessionGetSuccessResponseFrame'
+        - $ref: '#/components/schemas/ModelsListSuccessResponseFrame'
+        - $ref: '#/components/schemas/ModelSetSuccessResponseFrame'
+        - $ref: '#/components/schemas/ThinkingSetSuccessResponseFrame'
     ErrorResponseFrame:
       type: object
       additionalProperties: false
@@ -3249,9 +4314,10 @@ x-method-contracts:
     RequestFrame.id 关联到下列 method 和成功 payload。调用方应在 pending map 中
     保存该映射，而不是根据 payload 形状猜测响应类型。连接成功后允许多个普通
     请求并发 in-flight，ResponseFrame 可以乱序并与 EventFrame 交错。
-    这是 CampusAgent 的规范性扩展；通用 AsyncAPI 生成器只能看到泛化 Frame
-    oneOf。生成强类型 SDK 时必须使用理解本扩展的模板，或在 SDK 中手工保留
-    下列 method -> payload decoder 映射；本文不声称零配置的通用代码生成。
+    标准 Operation、Message 和 reply 已将各 method 的请求、成功响应和共享错误
+    分开展示；本扩展进一步给出稳定的 method -> success payload 映射。生成强类型
+    SDK 时应使用理解本扩展的模板，或在 SDK 中手工保留下列 decoder 映射；本文
+    不声称零配置的通用代码生成能够实现全部运行时状态机。
   connect:
     requestSchema: '#/components/schemas/ConnectRequest'
     successPayloadSchema: '#/components/schemas/ConnectResult'

@@ -2,12 +2,14 @@
 
 | 属性 | 值 |
 |---|---|
-| 文档版本 | 1.7.0 |
+| 文档版本 | 1.8.0 |
 | 状态 | 目标协议接入指南，Java 尚未实现 |
-| 更新日期 | 2026-08-04 |
+| 更新日期 | 2026-08-05 |
 | 协议号 | 2 |
-| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.11.0 |
-| Manager 设计 | [`README.md`](README.md)，1.13.0 |
+| 规范性 Schema | [`chat-ws-v2.asyncapi.yaml`](chat-ws-v2.asyncapi.yaml)，2.12.0 |
+| 快速接入 | [`chat-ws-v2-developer-guide.md`](chat-ws-v2-developer-guide.md) |
+| 可浏览 HTML | [`chat-ws-v2-docs/index.html`](chat-ws-v2-docs/index.html) |
+| Manager 设计 | [`README.md`](README.md)，1.13.1 |
 | pi-mono-java 基线 | `1f7a5423219edfa4519d8719f1cc8a188ed72873` |
 
 ## 1. 先确定谁连接 Runtime
@@ -1297,6 +1299,7 @@ Session-scoped connect、run 独立生命周期、原子快照、历史 RunRecor
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.8.0 | 2026-08-05 | 同步内部 AsyncAPI 2.12.0：按 method 拆分具名请求和成功响应、以标准 reply 关联共享错误响应，并将八类事件分别暴露给文档工具；增加默认展开 JSON 示例的生成 HTML 和简化开发者指南；修正 `ModelInputPolicy(max_attachments=0)` 误要求无关 `completed_at` 字段的问题；同步 Manager 1.13.1 |
 | 1.7.0 | 2026-08-04 | 将本文明确为 mate-service 到 agent-service 的内部 Runtime 客户端指南；内部 URL 改为 `/agent-service/internal/v1/ws/chat`，保留 session_id 契约；链接独立的公共 Chat AsyncAPI/指南，明确两跳连接、请求、序列、心跳、背压和关闭互不复用；用受信 Session 亲和元数据替代最终用户 IP 假设，并将公共附件路径改为 chat_id；同步内部 AsyncAPI 2.11.0 和 Manager 1.13.0 |
 | 1.6.0 | 2026-08-03 | 将 thinking 配置明确为 reasoning content 可见性；第一版仅保留 hidden/full，删除 summary 级别、thinking_summary 事件和客户端摘要归并分支；同步 AsyncAPI 2.10.0 和 Manager 1.12.0 |
 | 1.5.1 | 2026-08-03 | 同步 Attachment Service 1.1.0：OBS Object Key 固定为 `attachment_id`，openGauss 拆分永久五字段主表与活动明细；解释 filename、检测 MIME、声明/实际大小、SHA-256、引用/过期、失败码和 Worker lease/retry 字段；冻结 filename 与 create-only 冲突 quarantine 门禁，并明确删除正文后只保留最小 tombstone；同步 AsyncAPI 2.9.1 和 Manager 1.11.1 |
