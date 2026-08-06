@@ -19,6 +19,7 @@
 - [CampusMate Attachment Service：OBS + openGauss 设计](./campusmate-attachment-service/README.md)
 - [OpenClaw 与 CampusAgent WebSocket 设计对比](./openclaw-campusagent-websocket-comparison/README.md)
 - [AgentRuntimeTemplate 不可变运行模板设计](./agent-runtime-template/README.md)
+- [CampusClaw 两节点高并发治理设计](./campusclaw-high-concurrency-governance/README.md)
 - [pi-mono Java 集中式 GaussDB 会话记忆系统 SR 设计](./memory-jsonl-to-gaussdb.md)
 
 ## 约定

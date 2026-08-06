@@ -1,0 +1,374 @@
+' pi-mono-java source baseline: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+' Design repository baseline: a3148bea154d9efe565ad6cb5d0e707b400b8e03
+' All target components in this file are target-only unless a comment marks observed behavior.
+
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java:115-186,422-459
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java:167-202,324-397
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java:114-162
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java:60-61,218-268
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java:209-276
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java:178-207
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/stream/EventStream.java:14-27,54-88
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/provider/openai/OpenAIResponsesProvider.java:113-175,250-350
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/SessionManager.java:277-400
+' Observed behavior: the current request path has no node-local admission gate and contains unbounded event buffers.
+' Design reason: show where concurrency multiplies and where memory, CPU, and downstream pressure can accumulate.
+@startuml observed_concurrency_hot_path
+title Observed CampusClaw Concurrency Hot Path
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #111827
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #374151
+
+actor "WebSocket Client" as client
+
+rectangle "Reactor Netty Request Path" as netty {
+  component "ChatWebSocketHandler.handle" as ws
+  component "Unbounded outbound sink\nplus 50 ms busy-loop emit" as outbound #FFDDDD
+}
+
+rectangle "Session Construction" as session_area {
+  component "SessionPool.getOrCreate\nget - create - put" as pool #FFDDDD
+  component "AgentSession.initialize\nmodel, tools, skills, files, prompt" as init #FFE9CC
+}
+
+rectangle "Agent Run" as run_area {
+  component "New agent virtual thread" as agent_vt
+  component "AgentLoop\nblocking stream consumption" as loop
+  component "Parallel tool virtual threads\nno global tool gate" as tools #FFE9CC
+}
+
+rectangle "Provider Stream" as provider_area {
+  component "New provider virtual thread" as provider_vt
+  component "New OpenAIClient per run" as client_per_run #FFE9CC
+  component "Unbounded EventStream" as event_stream #FFDDDD
+  component "Cumulative partial message\nrebuilt and serialized per delta" as cumulative #FFDDDD
+}
+
+database "Local JSONL\nflush on every append" as jsonl #FFE9CC
+
+client --> ws : connect and prompt
+ws --> pool : synchronous getOrCreate
+pool --> init : synchronous initialization
+init --> agent_vt : session.prompt
+agent_vt --> loop : execute one run
+loop --> provider_vt : streamSimple
+provider_vt --> client_per_run : build and close
+client_per_run --> event_stream : blocking response stream
+event_stream --> cumulative : every provider event
+cumulative --> outbound : full message_update JSON
+outbound --> client : WebSocket send
+loop --> tools : optional fan-out
+ws --> jsonl : terminal message append
+
+note right of pool
+  No resident-session cap.
+  Concurrent misses can build
+  duplicate session candidates.
+end note
+
+note right of event_stream
+  Slow production or consumption
+  has no byte or item budget.
+end note
+
+note bottom of outbound
+  A slow connection can retain
+  an unbounded number of frames.
+end note
+@enduml
+
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/controlplane/domain/NodeMetrics.java:8-46
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/controlplane/service/RuntimeScheduler.java:26-107
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/controlplane/service/NodeRegistry.java:30-175
+' Java divergence: current scheduling is sticky plus round-robin and current NodeRegistry is process-local.
+' Target-only design: two 4-vCPU, 8-GiB agent-service nodes each enforce authoritative local capacity.
+' Design reason: scheduler metrics can be stale, so local admission remains the final safety boundary.
+@startuml target_two_node_capacity_architecture
+title Target Two-Node High-Concurrency Architecture
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #111827
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #374151
+
+actor "Agent UI" as ui
+cloud "mate-service\npublic protocol, quota, affinity, scheduler" as mate
+
+node "VM A - agent-service\n4 vCPU / 8 GiB" as node_a {
+  component "Connection Admission\n600 connections" as conn_a
+  component "SessionLifecycleRegistry\n600 resident sessions" as session_a
+  component "Run Capacity Manager\n500 active + 100 waiting" as run_a
+  component "ManagedRunHub\nbounded delta fan-out" as hub_a
+  component "Immutable Template Cache" as template_a
+  component "Model / Tool / Store Bulkheads" as bulkhead_a
+  component "Runtime Metrics and Heartbeat" as metrics_a
+}
+
+node "VM B - agent-service\n4 vCPU / 8 GiB" as node_b {
+  component "Same authoritative limits" as limits_b
+  component "Independent active runs" as runs_b
+  component "Runtime Metrics and Heartbeat" as metrics_b
+}
+
+database "RuntimeSessionStore\nshared authoritative state" as store
+cloud "Model Manager and Provider\nexternal stream quota" as model
+cloud "Tool Manager\nexternal tool quota" as tool
+component "Metrics Backend\nand Alerting" as telemetry
+
+ui --> mate : public Chat WebSocket
+mate --> conn_a : new session when A has capacity
+mate --> limits_b : new session when B has capacity
+mate --> conn_a : existing session affinity
+mate --> limits_b : existing session affinity
+
+conn_a --> session_a
+session_a --> run_a
+template_a --> session_a : immutable shared template
+run_a --> hub_a
+run_a --> bulkhead_a
+bulkhead_a --> model : bounded stream
+bulkhead_a --> tool : bounded call
+session_a --> store : load and persist
+hub_a --> store : terminal and recovery state
+metrics_a --> telemetry
+metrics_b --> telemetry
+metrics_a ..> mate : heartbeat snapshot
+metrics_b ..> mate : heartbeat snapshot
+
+note bottom of run_a
+  A virtual thread starts only
+  after a run lease is granted.
+end note
+
+note bottom of node_b
+  Healthy-cluster target: 1000 active runs.
+  One-node-loss capacity: 500 active runs.
+end note
+
+note right of mate
+  Scheduling is advisory.
+  A selected node may still reject
+  stale or racing admission requests.
+end note
+@enduml
+
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/Agent.java:218-268
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/tool/ToolExecutionPipeline.java:187-207
+' Observed behavior: Agent already rejects a second run in one Agent and starts one new virtual thread per run.
+' Target-only design: admission uses an asynchronous bounded descriptor queue before creating the run virtual thread.
+' Design reason: virtual-thread count is not a capacity limit; count and byte leases protect memory and downstream resources.
+@startuml run_admission_and_execution
+title Run Admission, Execution, and Exact Lease Release
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #111827
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam sequenceMessageAlign center
+skinparam ArrowColor #374151
+
+actor "mate-service Bridge" as bridge
+participant "SessionLifecycleSlot" as slot
+participant "RunCapacityManager" as capacity
+queue "Bounded PendingRun Queue\n100 items / 64 MiB / 10 s" as queue
+database "RuntimeSessionStore" as store
+participant "Response/Event Fence" as fence
+participant "Virtual-Thread Executor" as executor
+participant "AgentLoop" as loop
+participant "Model Gate" as model_gate
+participant "Tool Gate" as tool_gate
+
+bridge -> slot : chat.send(session_id, idempotency_key)
+slot -> slot : reserve ADMITTING state
+
+alt another run is ADMITTING or ACTIVE
+  slot --> bridge : RUN_ACTIVE
+else session run slot reserved
+  slot -> capacity : acquireAsync(count=1, weighted bytes)
+  alt count and byte permits available
+    capacity --> slot : RunLease
+  else queue has item and byte capacity
+    capacity -> queue : enqueue immutable PendingRun
+    queue -> queue : wait no longer than 10 s
+    alt capacity becomes available
+      queue --> slot : RunLease
+    else timeout or cancellation
+      queue --> slot : admission rejected
+      slot -> slot : clear ADMITTING state
+      slot --> bridge : RUNTIME_OVERLOADED and retry_after_ms
+    end
+  else queue is full
+    capacity --> slot : admission rejected
+    slot -> slot : clear ADMITTING state
+    slot --> bridge : RUNTIME_OVERLOADED and retry_after_ms
+  end
+end
+
+slot -> store : atomically persist user message and run
+store --> slot : accepted run_id
+slot -> fence : install response-before-event fence
+fence --> bridge : accepted response
+fence -> executor : start one new virtual thread
+executor -> loop : execute run
+
+loop -> model_gate : acquire model-stream lease
+model_gate --> loop : stream lease
+loop -> loop : CPU bursts mount on a carrier
+loop -> model_gate : release on completion, error, or cancel
+
+opt tool calls
+  loop -> tool_gate : acquire global and per-run leases
+  tool_gate --> loop : up to 4 calls for this run
+  loop -> tool_gate : release every child lease
+end
+
+loop -> store : persist terminal result first
+loop -> fence : publish terminal event
+loop -> capacity : close RunLease exactly once
+loop -> slot : ACTIVE to READY
+@enduml
+
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/stream/EventStream.java:14-27,54-88
+' Source evidence: modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java:58-164
+' Source evidence: modules/agent-core/src/main/java/com/campusclaw/agent/loop/AgentLoop.java:255-276
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java:78-84,115-186,422-459
+' Java divergence: current streams and WebSocket sinks are unbounded and message_update carries a cumulative Message.
+' Target-only design: bounded typed deltas, aggregate byte accounting, and connection-only slow-consumer eviction.
+' Design reason: terminal state must survive a slow or disconnected client without allowing unbounded memory growth.
+@startuml bounded_stream_and_slow_consumer
+title Bounded Delta Streaming and Slow-Consumer Isolation
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #111827
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowColor #374151
+
+cloud "Model Provider" as provider
+component "Shared pooled model client" as model_client
+
+rectangle "Run-Local Stream Path" as run_path {
+  queue "Bounded model channel\n256 events AND 256 KiB" as model_channel
+  component "AssistantMessageAccumulator\nno full clone per delta" as accumulator
+  component "Typed delta coalescer\n50 ms OR 8 KiB" as coalescer
+  component "ManagedRunHub\nlatest snapshot + ordered run_seq" as hub
+  queue "Reserved control lane\nterminal events never dropped" as control_lane
+}
+
+database "RuntimeSessionStore\nterminal and recovery state" as store
+
+rectangle "Connection-Local Stream Path" as conn_path {
+  component "Connection subscriber" as subscriber
+  queue "Send buffer\n4 MiB per connection" as send_buffer
+  component "Node buffer budget\n256 MiB aggregate" as node_budget
+  component "WebSocket adapter" as adapter
+}
+
+actor "Fast Client" as fast
+actor "Slow Client" as slow
+
+provider --> model_client : streaming response
+model_client --> model_channel : block producer when full
+model_channel --> accumulator : consume in order
+accumulator --> coalescer : delta only
+coalescer --> hub : at most 20 frames per second
+accumulator --> control_lane : lifecycle and terminal
+control_lane --> hub
+hub --> store : persist terminal before publish
+hub --> subscriber : demand-aware subscription
+subscriber --> node_budget : reserve serialized bytes
+node_budget --> send_buffer : budget granted
+send_buffer --> adapter : ordered frame
+adapter --> fast : send succeeds
+adapter --> node_budget : release sent bytes
+
+send_buffer --> slow : send cannot keep up
+node_budget --> adapter : per-connection or node budget exhausted
+adapter --> slow : close 1013
+adapter --> subscriber : cancel only this subscription
+
+note right of hub
+  The run continues without
+  a physical connection.
+end note
+
+note bottom of model_channel
+  Internal backpressure is separate
+  from client connection pressure.
+end note
+
+note bottom of node_budget
+  The 4 MiB connection limit is not
+  eagerly reserved for every client.
+end note
+@enduml
+
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/SessionPool.java:39-72,167-202,324-397
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/session/AgentSession.java:106-162
+' Source evidence: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java:115-186
+' Java divergence: current get-or-create is not single-flight, initialization is synchronous, and disconnect aborts a streaming run.
+' Target-only design: one lifecycle slot owns initialization, connection generation, run state, eviction, and cleanup.
+' Design reason: a session must have one resident owner and one active writer even under reconnect and eviction races.
+@startuml session_lifecycle_single_flight
+title Session Single-Flight, Connection Fencing, and Safe Eviction
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontColor #111827
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam sequenceMessageAlign center
+skinparam ArrowColor #374151
+
+actor "Connection C1" as c1
+actor "Connection C2" as c2
+participant "SessionLifecycleRegistry" as registry
+participant "SessionLifecycleSlot" as slot
+participant "Session Init Gate\n2 active / 32 waiting" as init_gate
+participant "Virtual-Thread Init Task" as init_task
+participant "Immutable Template Cache" as cache
+database "RuntimeSessionStore" as store
+
+par concurrent create or resume
+  c1 -> registry : acquire(session_id, binding)
+  registry -> slot : computeIfAbsent
+  slot -> init_gate : initialize once
+else second caller
+  c2 -> registry : acquire(same session_id, same binding)
+  registry -> slot : return same slot
+  slot --> c2 : join the same readiness future
+end
+
+init_gate -> init_task : grant init lease
+init_task -> cache : acquire exact immutable template
+init_task -> store : restore bounded session snapshot
+init_task -> slot : publish READY once
+slot --> c1 : bind generation N
+slot --> c2 : bind generation N + 1
+slot --> c1 : close 4409 SESSION_REPLACED
+
+c2 -> slot : chat.send
+slot -> slot : READY to ADMITTING to ACTIVE
+... active run continues ...
+c2 -> slot : physical connection closes
+slot -> slot : remove subscriber only
+note right of slot
+  Disconnect is not abort.
+  Explicit chat.abort owns cancellation.
+end note
+
+slot -> slot : touch on command, event, and run transition
+alt no connection AND no active run AND idle timeout reached
+  slot -> store : flush final state
+  slot -> cache : release template reference
+  slot -> registry : remove exact slot and release resident lease
+else connected or active
+  slot -> slot : skip eviction
+end
+@enduml
