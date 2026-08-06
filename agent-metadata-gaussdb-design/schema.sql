@@ -1,9 +1,8 @@
--- SR-AGENT-DB-001 v0.13.0
--- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
--- The base DDL intentionally omits physical foreign keys so it can be used
--- with GaussDB Distributed. The service maintains logical relationships in
--- one transaction.
--- Replace {dbUser} with the target database user/schema before execution.
+-- SR-AGENT-DB-001 v0.14.0
+-- 目标：使用兼容 PostgreSQL 语法的 GaussDB 行存表。
+-- 基础 DDL 为兼容 GaussDB 分布式版，不创建物理外键。
+-- Service 在同一事务中维护逻辑关系。
+-- 执行前将 {dbUser} 替换为目标数据库用户或 Schema。
 
 DROP TABLE IF EXISTS "{dbUser}"."t_agent_models";
 DROP TABLE IF EXISTS "{dbUser}"."t_agent_definition";
@@ -159,8 +158,8 @@ CREATE INDEX idx_t_agent_binding_skills_skill_id
 CREATE INDEX idx_t_agent_binding_agents_bound_agent_id
     ON "{dbUser}"."t_agent_binding_agents" (bound_agent_id, agent_id);
 
--- Optional for a verified GaussDB centralized deployment that supports foreign
--- keys. Do not enable this block on GaussDB Distributed.
+-- 以下外键仅适用于已确认支持外键的 GaussDB 集中式部署。
+-- GaussDB 分布式版不得启用。
 --
 -- ALTER TABLE "{dbUser}"."t_agent_binding_models"
 --     ADD CONSTRAINT fk_t_agent_binding_models_agent

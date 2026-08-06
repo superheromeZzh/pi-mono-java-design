@@ -1,11 +1,11 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.13.0`<br>
+> 版本：`v0.14.0`<br>
 > 日期：`2026-08-06`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
 > 设计仓库分析基线：`9d1edabccd7eb0ab3ec47a4022109b8d3c2eeb81`<br>
-> Java 实现分析基线：`mate-service@56e4f054895457448341f54b4dd8ef96c965a0f9`<br>
+> Java 实现分析基线：`mate-service@0b6091e550c3a3d41ece214de1f598894801d431`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -32,16 +32,18 @@
 
 ### 2.2 Java 基线
 
-本次分析的 Java 提交为 `mate-service@56e4f054895457448341f54b4dd8ef96c965a0f9`，相关路径：
+本次分析的 Java 提交为 `mate-service@0b6091e550c3a3d41ece214de1f598894801d431`，相关路径：
 
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/AgentId.java`
-- `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/AgentDefinitionInitializationRequestVO.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ModelId.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ResourceIdRules.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/UpdateAgentRequestVO.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
 - `src/main/resources/mapper/AgentDefinitionMapper.xml`
 - `src/main/resources/db/schema.sql`
 
-该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列和 DTO 属性使用 `model_order` / `modelOrder`。Agent ID 输入通过组合校验注解统一限制为 `agent-` 加 32 位十六进制 UUID；可变 Request VO 和 DTO 使用 Lombok `@Data`。
+该基线只保留 `listAgents`、`getAgent`、`updateAgent` 三项 Service 能力，实现五表聚合、批量列表查询以及最后写入生效的模型替换。初始化、旧管理查询、旧运行时查询和乐观锁模型替换能力及其 Controller、VO、异常和 Mapper 语句均已删除。模型绑定顺序列和 DTO 属性使用 `model_order` / `modelOrder`；可变 Request VO 和 DTO 使用 Lombok `@Data`；Java 注释和 Javadoc 使用中文。
 
 本文只保存当前 JSON 字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。Agent 固定版本只存储和展示，不查询不存在的历史表。
 
@@ -78,9 +80,9 @@ PlantUML：[查看源码](./diagram.puml#L6)
 
 ### 4.1 Agent ID
 
-目标生成规则是 `agent-` 加 `SecureRandomUtils.generateUUID()` 返回的 32 位 UUID 字符串，例如 `agent-550e8400e29b41d4a716446655440000`。当前仓库尚无公开 Create Agent 接口和 `SecureRandomUtils` 实现，内部 `initializeAgent` 接收已经生成的元数据 ID；初始化元数据、Agent 绑定目标、更新请求、Controller 路径参数和 Service 标量参数统一使用 `@AgentId` 校验，等价正则为 `^agent-[0-9a-fA-F]{32}$`。未来落地 Create Agent 接口时由 Service 按目标规则生成 ID，请求方不传入 ID。
+资源 ID 统一采用类型前缀加 `SecureRandomUtils.generateUUID()` 返回的 32 位 UUID 字符串：Agent 使用 `agent-`，Model 使用 `model-`，Tool 使用 `tool-`，Skill 使用 `skill-`。例如：`agent-550e8400e29b41d4a716446655440000`。当前仓库没有 Create Agent 接口和 `SecureRandomUtils` 实现；未来落地创建接口时由各资源所属 Service 生成 ID，请求方不传入 ID。
 
-只有 `t_agent_definition.id` 在创建 Agent 时产生；各绑定表的 `agent_id` 和 `bound_agent_id` 均引用既有 Agent ID，不重新生成。数据库继续使用 `VARCHAR(64)`、`NOT NULL` 和主键保证非空及唯一，不把当前 38 位格式固化为列长度，以保留后续生成算法演进空间。
+Agent 路径参数和更新请求体使用 `@AgentId`，模型更新数组元素使用 `@ModelId`。Tool 和 Skill 没有写接口，Service 在列表及详情聚合时校验数据库中的 `toolId`、`skillId`，同时校验持久化的 Agent、Model 和绑定 Agent 标识；格式错误按数据损坏处理。只有资源主表在创建资源时产生 ID，各绑定表均引用既有 ID，不重新生成。数据库继续使用 `VARCHAR(64)`，不把当前长度固化为列长度，以保留生成算法演进空间。
 
 ### 4.2 System Prompt
 
@@ -108,7 +110,7 @@ GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https:
 
 主键为 `(agent_id, model_id)`，并对 `(agent_id, model_order)` 建唯一约束。模型绑定是唯一保存输入数组顺序的绑定；一个 Agent 至少需要一个模型，由 Service 在同一事务中保证。
 
-当前没有模型网关目录查询接口，因此只校验模型 ID 的非空、最大 64 字符和唯一性，不校验模型是否存在。
+模型 ID 必须符合 `^model-[0-9a-fA-F]{32}$` 且不可重复。当前没有模型网关目录查询接口，因此不校验模型是否存在。
 
 ### 5.2 Tool 绑定 `t_agent_binding_tools`
 
@@ -116,9 +118,13 @@ GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https:
 
 同一 Tool 只能出现在一个权限数组，权限引用必须对应已绑定 Tool。输出按 `tool_id` 排序。
 
+Tool ID 必须符合 `^tool-[0-9a-fA-F]{32}$`；当前三接口没有 Tool 写入请求，Service 在读取完整聚合时执行数据完整性校验。
+
 ### 5.3 Skill 绑定 `t_agent_binding_skills`
 
 主键为 `(agent_id, skill_id)`。`skill_version = NULL` 表示最新版本；不保存顺序，输出按 `skill_id` 排序。
+
+Skill ID 必须符合 `^skill-[0-9a-fA-F]{32}$`；当前三接口没有 Skill 写入请求，Service 在读取完整聚合时执行数据完整性校验。
 
 ### 5.4 Agent 绑定 `t_agent_binding_agents`
 
@@ -128,7 +134,9 @@ GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https:
 | `bound_agent_id` | `VARCHAR(64)` | 否 | 被绑定 Agent |
 | `bound_agent_version` | `BIGINT` | 是 | 空表示最新；非空时大于等于 1 |
 
-主键为 `(agent_id, bound_agent_id)`，禁止自绑定，并建立 `(bound_agent_id, agent_id)` 反向索引。Service 写入前校验目标 Agent 当前存在，拒绝重复绑定；固定版本不校验历史版本可用性。输出按 `bound_agent_id` 排序。
+主键为 `(agent_id, bound_agent_id)`，禁止自绑定，并建立 `(bound_agent_id, agent_id)` 反向索引；固定版本不校验历史版本可用性。输出按 `bound_agent_id` 排序。
+
+当前三接口不写入 Agent 绑定；读取时校验 `agent_id` 和 `bound_agent_id` 均符合 Agent ID 格式。未来增加写接口时，应在 Service 中继续校验目标 Agent 存在且不可重复绑定。
 
 ## 6. Service 与目标接口
 
@@ -148,7 +156,7 @@ GET  /mate-service/v1/agents/{agentId}
 POST /mate-service/v1/agents/{agentId}
 ```
 
-Controller 和 `resCode` / `resMsg` / `result` 统一包装由接入工程实现，不属于本次 Java Controller 修改范围。
+Controller 和 `resCode` / `resMsg` / `result` 统一包装由接入工程实现。Java 仓库不保留旧 Controller，Service 接口严格只有上述三个方法。
 
 ### 6.1 List Agents
 
@@ -182,23 +190,23 @@ Service 结果：
 {
   "agentId": "agent-550e8400e29b41d4a716446655440000",
   "bindingModels": [
-    "model-a",
-    "model-b"
+    "model-550e8400e29b41d4a716446655440000",
+    "model-550e8400e29b41d4a716446655440001"
   ]
 }
 ```
 
-路径与请求体 `agentId` 必须一致，并符合 `agent-` 加 32 位十六进制 UUID 的格式。`bindingModels` 必填、非空、元素不可重复，单个模型 ID 最大 64 字符。
+路径与请求体 `agentId` 必须一致，并符合 `agent-` 加 32 位十六进制 UUID 的格式。`bindingModels` 必填、非空、元素不可重复，每个元素必须符合 `model-` 加 32 位十六进制 UUID 的格式。
 
 更新采用最后写入生效：事务中锁定 Agent 当前行，删除旧模型绑定，按请求顺序插入新绑定，然后基于锁定行的当前版本将 `version` 递增一次。客户端不提交期望版本；即使模型列表未变化，成功请求仍递增一次版本。
 
-稳定错误码为：`AGENT_INVALID_PARAMETER`、`AGENT_NOT_FOUND`、`AGENT_BINDING_TARGET_NOT_FOUND`、`AGENT_CONFLICT`、`AGENT_VERSION_CONFLICT`、`AGENT_DATA_CORRUPTION`。
+稳定错误码为：`AGENT_INVALID_PARAMETER`、`AGENT_NOT_FOUND`、`AGENT_DATA_CORRUPTION`。
 
 ## 7. GaussDB 与事务
 
 初始化 DDL 使用 `"{dbUser}"."t_xx"` Schema 限定名、行存兼容类型、主键、唯一约束、`CHECK` 和普通索引；COMMENT 使用简洁中文。每张表的 `DROP TABLE IF EXISTS` 必须紧邻并位于对应 `CREATE TABLE` 之前。脚本适用于初始化或重建，不作为生产增量迁移脚本。
 
-GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系。Service 在事务内维护主表和绑定表；集中式部署确认支持外键后，可启用 DDL 末尾的可选外键块。
+GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系。当前 Service 在事务内锁定主表、替换模型绑定并递增版本；集中式部署确认支持外键后，可启用 DDL 末尾的可选外键块。
 
 读取完整聚合与列表使用 `REPEATABLE_READ` 只读事务。不要用一个 Join 同时连接多个一对多绑定表，否则会产生笛卡尔行数放大。
 
@@ -210,6 +218,9 @@ GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系�
 - Mapper：只使用 DTO、标量条件和受影响行数。
 - 不引入 PO、DO 或 Entity。
 - 可变 Request VO 和 DTO 使用 Lombok `@Data`；只读 Response VO 使用 `@Getter` 和不可变字段。
+- Java 注释和 Javadoc 使用中文；标识符、注解名、固定字面量和产品名按需保留英文。
+
+Mapper 只保留三个接口可达的操作：主表查询、分页、行锁和版本递增；Model 绑定查询、删除和批量插入；Tool、Skill、Agent 绑定仅保留单个 Agent 查询和页内 Agent 集合批量查询。`AgentBindingMapper`、`AgentToolBindingMapper`、`AgentSkillBindingMapper` 不提供 `insertBatch`。
 
 模型绑定类命名为 `AgentModelBindingDTO` 和 `AgentModelBindingMapper`，与 `AgentToolBindingDTO`、`AgentSkillBindingDTO` 风格一致。
 
@@ -228,6 +239,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.14.0` | 2026-08-06 | Service 严格收敛为列表、详情、更新三个方法；删除旧 Controller、VO、异常和不可达 Mapper 语句；Model、Tool、Skill ID 增加前缀加 32 位 UUID 校验；Java 与 SQL 代码注释改为中文 |
 | `v0.13.0` | 2026-08-06 | Agent ID 统一约束为 `agent-` 加 32 位十六进制 UUID；请求 VO、Controller 和 Service 使用 `@AgentId`；可变 Request VO 和 DTO 统一使用 `@Data` |
 | `v0.12.2` | 2026-08-06 | 恢复逐表 `DROP TABLE IF EXISTS` 后立即 `CREATE TABLE` 的 DDL 结构，并增加自动化顺序检查 |
 | `v0.12.1` | 2026-08-06 | 将模型绑定顺序列由 `sort_order` 更名为 `model_order`，DTO 属性同步更名为 `modelOrder`；排序语义和外部 JSON 保持不变 |

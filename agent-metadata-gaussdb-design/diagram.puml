@@ -1,7 +1,7 @@
-' Generated for SR-AGENT-DB-001 v0.13.0 on 2026-08-06.
+' Generated for SR-AGENT-DB-001 v0.14.0 on 2026-08-06.
 ' Run from this directory: plantuml -tsvg diagram.puml
 ' Design baseline: 9d1edabccd7eb0ab3ec47a4022109b8d3c2eeb81.
-' Java baseline: mate-service@56e4f054895457448341f54b4dd8ef96c965a0f9.
+' Java baseline: mate-service@0b6091e550c3a3d41ece214de1f598894801d431.
 
 @startuml agent_metadata_gaussdb_model
 !pragma layout elk
@@ -23,20 +23,23 @@ skinparam classAttributeIconSize 0
 ' - binding_models is at line 11; binding_agents is at lines 37-42.
 ' - mate-service baseline path and symbols:
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java
-'   AgentDefinitionServiceImpl.initializeAgent and replaceModels.
+'   AgentDefinitionServiceImpl.listAgents, getAgent, and updateAgent.
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/AgentId.java
 '   AgentId composed validation annotation.
+'   src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ResourceIdRules.java
+'   ResourceIdRules identifier patterns.
 ' - mate-service baseline DDL: src/main/resources/db/schema.sql.
 ' Observed behavior: AgentId validates agent- plus 32 hexadecimal characters.
-' Observed behavior: the Java baseline groups all DROP TABLE statements before
-' the CREATE TABLE statements in its initialization DDL.
+' Observed behavior: only model bindings have write Mapper operations.
+' Observed behavior: each DROP TABLE statement immediately precedes its CREATE.
 ' Design reason: pair each table drop with its create statement to follow the
 ' required deployment-script convention without changing table structure.
 ' Product constraint: all eight system_prompt fields are required and nonblank.
 ' Product constraint: only binding_models preserves input array order.
 ' Product constraint: Agent IDs use agent- plus a 32-character hexadecimal UUID.
-' Design reason: Agent targets must exist when bindings are written, while a
-' pinned target version is stored without historical-version validation.
+' Product constraint: Model, Tool, and Skill IDs use typed prefixes plus UUIDs.
+' Target-only rule: future Agent binding writes must validate current targets;
+' pinned target versions do not require historical-version validation.
 ' GaussDB divergence: physical foreign keys are optional because GaussDB
 ' Distributed does not support them; the base DDL uses logical relationships.
 ' DDL convention: each DROP TABLE IF EXISTS immediately precedes CREATE TABLE.
@@ -104,17 +107,19 @@ end note
 
 note right of t_agent_binding_models
 Only model bindings preserve array order.
-model_id is VARCHAR(64).
+model_id uses model- plus 32 hex characters.
 At least one row is required per Agent.
 end note
 
 note bottom of t_agent_binding_tools
+tool_id uses tool- plus 32 hex characters.
 NULL tool_version means latest.
 NULL permission means inherit.
 Every permission Tool must also be bound.
 end note
 
 note bottom of t_agent_binding_skills
+skill_id uses skill- plus 32 hex characters.
 NULL skill_version means latest.
 Rows are returned by skill_id.
 end note
