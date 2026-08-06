@@ -1,51 +1,47 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.10.0`<br>
-> 日期：`2026-08-05`<br>
-> 状态：目标设计（target-only）<br>
-> 仓库基线：`8e17fa77f69bc7d31f640b6536170cf10d99da36`（输入 JSON 使用下述工作区 SHA-256）<br>
-> Java / 数据库实现基线：无
+> 版本：`v0.12.0`<br>
+> 日期：`2026-08-06`<br>
+> 状态：目标设计 / Java Service 同步实现<br>
+> 设计仓库分析基线：`910e8e2deddc871595abb05182e3c6efd21f244c`<br>
+> Java 实现分析基线：`mate-service@89aff57d4d1e196a45dadc44a5532cb5c042b207`<br>
+> 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
 
-基于当前 [`AGENT元数据设计.json`](../AGENT元数据设计.json)，最终使用 4 张表：
+基于当前 [`AGENT元数据设计.json`](../AGENT元数据设计.json)，Agent 当前元数据使用 5 张表：
 
-1. `t_agent_definition`：基本字段、System Prompt 展开字段和 JSONB `use_cases`。
-2. `t_agent_models`：`model[]`，保留数组顺序。
+1. `t_agent_definition`：标量字段、System Prompt 展开字段和 `use_cases`。
+2. `t_agent_binding_models`：`binding_models[]`，保留数组顺序。
 3. `t_agent_binding_tools`：合并 `binding_tools[]` 与 `permission`。
-4. `t_agent_binding_skills`：`binding_skills[]`，不保存数组顺序。
+4. `t_agent_binding_skills`：`binding_skills[]`，按 Skill ID 稳定输出。
+5. `t_agent_binding_agents`：`binding_agents[]`，按目标 Agent ID 稳定输出。
 
-本版采用以下字段规则：
+模型绑定全链路统一使用：元数据 `binding_models`、Java `bindingModels`、数据库 `t_agent_binding_models`、数据层 `AgentModelBindingDTO` / `AgentModelBindingMapper`。不保留 `model` 或 `models` 兼容别名。
 
-- 主表主键使用 `id`，与元数据顶层 `id` 对齐。
-- `enabled` 使用 `BOOLEAN NOT NULL DEFAULT TRUE`。
-- `name`、`display_name` 都使用 `VARCHAR(128)`。
-- System Prompt 展开为 `role`、`objective`、`instructions`、`tool_policy`、`safety`、`completion`、`response_style`、`example`，全部使用 `TEXT NOT NULL`。
-- `model_id`、`tool_id`、`skill_id` 统一使用 `VARCHAR(64)`。
-- `use_cases` 使用主表 `JSONB`。
-- 只有模型表保留 `sort_order`。
-- Tool 绑定和权限合并为一行。
+完整初始化 DDL 维护在 [`schema.sql`](./schema.sql)，本文不重复嵌入完整 SQL。
 
-完整 DDL：[`schema.sql`](./schema.sql)。
+## 2. 来源证据与设计边界
 
-## 2. 输入基线与设计边界
+### 2.1 输入元数据
 
-当前工作区 JSON 的 SHA-256：
+- 基本字段、状态和名称：[`AGENT元数据设计.json` 第 2–10 行](../AGENT元数据设计.json#L2)。
+- 模型绑定和 System Prompt：[`第 11–21 行`](../AGENT元数据设计.json#L11)。
+- Use Cases、Tool、Skill、Agent 绑定及权限：[`第 22–53 行`](../AGENT元数据设计.json#L22)。
 
-```text
-db8a715adda3496e9c43a659cb6e41da293195811fcec06e10021c3b28da0318
-```
+### 2.2 Java 基线
 
-字段来源：
+分析的原始 Java 提交为 `mate-service@89aff57d4d1e196a45dadc44a5532cb5c042b207`，相关路径：
 
-- `id`、`type`、`version`、时间字段：[第 2–6 行](../AGENT元数据设计.json#L2)。
-- `enabled`：[第 7 行](../AGENT元数据设计.json#L7)。
-- `name`、`display_name`、`description`、`model`：[第 8–11 行](../AGENT元数据设计.json#L8)。
-- `system_prompt`：[第 12–21 行](../AGENT元数据设计.json#L12)。
-- `use_cases`、Tool/Skill 绑定与权限：[第 22–47 行](../AGENT元数据设计.json#L22)。
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
+- `src/main/resources/mapper/AgentDefinitionMapper.xml`
+- `src/main/resources/db/schema.sql`
 
-本文只保存当前 JSON 中的字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。
+该基线的已观察行为是四表聚合、`model` 字段、单 Agent 查询和带期望版本的模型替换。五表结构、`binding_models`、Agent 绑定、列表查询、新详情查询及最后写入生效更新属于本版架构变更；不是上述基线已有行为。
+
+本文只保存当前 JSON 字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。Agent 固定版本只存储和展示，不查询不存在的历史表。
 
 ## 3. 表关系
 
@@ -53,307 +49,162 @@ db8a715adda3496e9c43a659cb6e41da293195811fcec06e10021c3b28da0318
 
 PlantUML：[查看源码](./diagram.puml#L6)
 
-所有子表通过 `agent_id` 逻辑关联 `t_agent_definition.id`。表名统一使用小写 snake_case 和 `t_` 前缀。
+所有绑定表通过 `agent_id` 逻辑关联 `t_agent_definition.id`。表名统一使用小写 snake_case 和 `t_` 前缀。
 
 ## 4. 主表 `t_agent_definition`
 
-### 4.1 字段映射
-
-| JSON 字段 | 数据库字段 | 类型 | 可空 | 说明 |
+| JSON 字段 | 数据库字段 | 类型 | 可空 | 规则 |
 |---|---|---|---:|---|
-| `id` | `id` | `VARCHAR(64)` | 否 | 主键；与元数据对齐 |
+| `id` | `id` | `VARCHAR(64)` | 否 | 主键 |
 | `type` | `type` | `VARCHAR(16)` | 否 | 固定为 `agent` |
-| `version` | `version` | `BIGINT` | 否 | 从 1 开始的乐观锁版本 |
-| `enabled` | `enabled` | `BOOLEAN` | 否 | 是否允许新的运行时调用；默认启用 |
-| `name` | `name` | `VARCHAR(128)` | 否 | 内部稳定名称；唯一 |
-| `display_name` | `display_name` | `VARCHAR(128)` | 否 | 与 `name` 类型一致 |
-| `description` | `description` | `TEXT` | 否 | Agent 描述 |
-| `system_prompt.role` | `role` | `TEXT` | 否 | 身份、能力与责任范围 |
-| `system_prompt.objective` | `objective` | `TEXT` | 否 | 长期目标和成功条件 |
-| `system_prompt.instructions` | `instructions` | `TEXT` | 否 | 工作原则和行为要求 |
-| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 否 | Tool 使用与结果验证规则 |
-| `system_prompt.safety` | `safety` | `TEXT` | 否 | 安全边界 |
-| `system_prompt.completion` | `completion` | `TEXT` | 否 | 完成与自检要求 |
-| `system_prompt.response_style` | `response_style` | `TEXT` | 否 | 默认输出风格 |
-| `system_prompt.example` | `example` | `TEXT` | 否 | 输出或行为示例 |
-| `use_cases` | `use_cases` | `JSONB` | 否 | 使用场景字符串数组 |
+| `version` | `version` | `BIGINT` | 否 | 从 1 开始 |
+| `enabled` | `enabled` | `BOOLEAN` | 否 | 默认启用 |
+| `name` | `name` | `VARCHAR(128)` | 否 | 唯一；管理前端只读 |
+| `display_name` | `display_name` | `VARCHAR(128)` | 否 | 管理前端只读 |
+| `description` | `description` | `TEXT` | 否 | 管理前端只读 |
+| `system_prompt.role` | `role` | `TEXT` | 否 | 非空白 |
+| `system_prompt.objective` | `objective` | `TEXT` | 否 | 非空白 |
+| `system_prompt.instructions` | `instructions` | `TEXT` | 否 | 非空白 |
+| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 否 | 非空白 |
+| `system_prompt.safety` | `safety` | `TEXT` | 否 | 非空白 |
+| `system_prompt.completion` | `completion` | `TEXT` | 否 | 非空白 |
+| `system_prompt.response_style` | `response_style` | `TEXT` | 否 | 非空白 |
+| `system_prompt.example` | `example` | `TEXT` | 否 | 非空白 |
+| `use_cases` | `use_cases` | `JSONB` | 否 | JSON 数组 |
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
-| `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 最后更新时间 |
+| `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 更新时间 |
 
-### 4.2 `system_prompt` 约束与展示规则
+### 4.1 System Prompt
 
-`system_prompt` 是结构化对象。它的 8 个字段全部属于本产品定义中的必填字段，数据库均使用 `TEXT NOT NULL`；API 和应用层还应拒绝空字符串和纯空白内容。
+八个 System Prompt 字段全部是产品必填项：数据库使用 `TEXT NOT NULL` 和 `CHECK (btrim(field) <> '')`，Request VO 使用 `@NotBlank`。本版不设置数据库或 Java 最大长度，避免在没有产品阈值时截断有效提示词。
 
-管理前端固定展示角色、目标、指令、Tool 策略、安全规则、完成条件、响应风格和示例 8 个必填输入项，不根据字段值动态显隐。Runtime 按上述固定顺序组装完整 System Prompt；详情页按同一顺序展示，保证编辑、预览和实际运行语义一致。
+管理前端固定展示完整的八字段提示词，不按空值动态显隐；当前管理前端只允许修改模型绑定，因此 System Prompt 只读展示。该约束是本产品决策，不等同于 Anthropic Managed Agents 只提供单一 `system` 字段的接口模型。
 
-这是本产品为了保证 Agent 定义完整性而采用的产品约束，不是 Anthropic Managed Agents 的字段模型。源 JSON 和目标 API 使用 `system_prompt` 对象，数据库为了字段约束和独立更新将其展开为 8 列。
+### 4.2 Use Cases
 
-### 4.3 `enabled` 语义
+`use_cases` 使用 `JSONB NOT NULL DEFAULT '[]'::jsonb`，并约束 `jsonb_typeof(use_cases) = 'array'`。相较保留原始 JSON 文本，本场景更关注解析后的字符串数组，JSONB 更适合读取、校验以及后续操作符或索引扩展。
 
-`enabled` 是 Agent 的可用状态，不是权限字段：
+应用层继续校验每项为非空字符串且不可重复；当前没有确定数组数量和单项长度上限。
 
-- `TRUE`：Agent 可被新的运行时请求选择和调用。
-- `FALSE`：管理面仍可查询和更新，但运行时不得接受新的调用。
-- 禁用不删除 Agent、模型、Tool、Skill 或权限配置。
-- 已经开始的任务是否中止不由该字段隐式决定；V1 只在新调用入口校验。
+GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https://support.huaweicloud.com/intl/en-us/distributed-devg-v8-gaussdb/gaussdb-12-0327.html)。
 
-数据库使用 `NOT NULL DEFAULT TRUE`。`DEFAULT TRUE` 用于兼容存量 Agent，API 创建和更新时仍应传递明确的布尔值。启停更新必须与其他可编辑字段一样更新 `version` 和 `updated_at`。
+## 5. 绑定表
 
-当前仍是 target-only 设计，没有已部署数据库基线；因此本版直接以新表名提供完整建表 DDL，不提供旧表在线更名脚本。
+### 5.1 模型绑定 `t_agent_binding_models`
 
-`enabled` 只有两个取值，当前 Agent 元数据规模有限，因此不建立单列 B-tree 索引。管理列表继续使用 `idx_t_agent_definition_updated_at` 排序；如果后续出现大量数据且以启用状态分页，可基于实际执行计划增加 `(enabled, updated_at DESC, id)` 复合索引。
-
-### 4.4 `use_cases` JSONB
-
-保存形式与元数据一致：
-
-```json
-[
-  "代码审查",
-  "安全风险分析",
-  "技术方案设计"
-]
-```
-
-数据库约束：
-
-```sql
-use_cases JSONB NOT NULL DEFAULT '[]'::jsonb,
-CONSTRAINT ck_t_agent_definition_use_cases
-    CHECK (jsonb_typeof(use_cases) = 'array')
-```
-
-应用层继续校验：
-
-- 每个元素必须为非空字符串。
-- 元素不能重复。
-- 限制数组数量和单项长度。
-
-`use_cases` 通常随 Agent 整体读取，当前也没有按单个场景执行关系查询的需求，因此不再单独建表。
-
-## 5. 模型表 `t_agent_models`
-
-| 字段 | 类型 | 约束 |
+| 字段 | 类型 | 规则 |
 |---|---|---|
-| `agent_id` | `VARCHAR(64)` | 逻辑关联 `t_agent_definition.id` |
-| `model_id` | `VARCHAR(64)` | 模型网关 Model ID |
+| `agent_id` | `VARCHAR(64)` | 逻辑关联主表 |
+| `model_id` | `VARCHAR(64)` | 模型网关 ID；非空白 |
 | `sort_order` | `INTEGER` | 从 0 开始 |
 
-约束：
+主键为 `(agent_id, model_id)`，并对 `(agent_id, sort_order)` 建唯一约束。模型绑定是唯一保存输入数组顺序的绑定；一个 Agent 至少需要一个模型，由 Service 在同一事务中保证。
 
-```text
-PRIMARY KEY (agent_id, model_id)
-UNIQUE (agent_id, sort_order)
-```
+当前没有模型网关目录查询接口，因此只校验模型 ID 的非空、最大 64 字符和唯一性，不校验模型是否存在。
 
-模型是唯一保留顺序的子表。`sort_order` 用于还原 `model[]`，但当前元数据没有定义数组顺序是默认模型或 fallback 顺序，Runtime 不应自行推断。
+### 5.2 Tool 绑定 `t_agent_binding_tools`
 
-一个 Agent 至少需要一个模型。该跨表约束由应用在同一事务中校验。
+`binding_tools[]` 与 `permission.deny/ask/allow` 合并保存。主键为 `(agent_id, tool_id)`；`tool_version = NULL` 表示最新版本，`permission = NULL` 表示继承 Tool 权限。
 
-## 6. Tool 绑定与权限表 `t_agent_binding_tools`
+同一 Tool 只能出现在一个权限数组，权限引用必须对应已绑定 Tool。输出按 `tool_id` 排序。
 
-### 6.1 合并结构
+### 5.3 Skill 绑定 `t_agent_binding_skills`
 
-`binding_tools[]` 和 `permission.deny/ask/allow` 合并为：
+主键为 `(agent_id, skill_id)`。`skill_version = NULL` 表示最新版本；不保存顺序，输出按 `skill_id` 排序。
 
-| 字段 | 类型 | 可空 | 说明 |
+### 5.4 Agent 绑定 `t_agent_binding_agents`
+
+| 字段 | 类型 | 可空 | 规则 |
 |---|---|---:|---|
-| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `t_agent_definition.id` |
-| `tool_id` | `VARCHAR(64)` | 否 | Tool ID |
-| `tool_version` | `BIGINT` | 是 | 固定版本；`NULL` 表示最新版本 |
-| `permission` | `VARCHAR(8)` | 是 | `deny` / `ask` / `allow`；`NULL` 表示继承 Tool 权限 |
+| `agent_id` | `VARCHAR(64)` | 否 | 当前 Agent |
+| `bound_agent_id` | `VARCHAR(64)` | 否 | 被绑定 Agent |
+| `bound_agent_version` | `BIGINT` | 是 | 空表示最新；非空时大于等于 1 |
 
-主键：
+主键为 `(agent_id, bound_agent_id)`，禁止自绑定，并建立 `(bound_agent_id, agent_id)` 反向索引。Service 写入前校验目标 Agent 当前存在，拒绝重复绑定；固定版本不校验历史版本可用性。输出按 `bound_agent_id` 排序。
+
+## 6. Service 与目标接口
+
+Java Service 提供：
 
 ```text
-PRIMARY KEY (agent_id, tool_id)
+listAgents(ListAgentRequestVO) -> ListAgentResultResponseVO
+getAgent(String agentId) -> AgentInfoResponseVO
+updateAgent(String agentId, UpdateAgentRequestVO) -> void
 ```
 
-不保存 `sort_order`。查询并重建 `binding_tools[]` 时按 `tool_id` 稳定排序。
+目标 Controller 契约：
 
-### 6.2 JSON 到数据库的转换
+```text
+GET  /mate-service/v1/agents
+GET  /mate-service/v1/agents/{agentId}
+POST /mate-service/v1/agents/{agentId}
+```
 
-元数据示例：
+Controller 和 `resCode` / `resMsg` / `result` 统一包装由接入工程实现，不属于本次 Java Controller 修改范围。
+
+### 6.1 List Agents
+
+请求参数：`pageIndex`、`pageSize`、`name`、`displayName`、`enabled`、`version`。
+
+- `pageIndex` 从 1 开始，默认 1。
+- `pageSize` 默认 20，最大 100。
+- `name`、`displayName` 为大小写不敏感的字面包含查询。
+- `enabled`、`version` 精确匹配。
+- 主表按 `updated_at DESC, id ASC` 稳定分页。
+
+Service 先查询总数和当前页主表，再按页内 Agent ID 分别批量读取四种绑定，避免逐 Agent 查询造成 N+1。
+
+Service 结果：
 
 ```json
 {
-  "binding_tools": [
-    {
-      "tool_id": "repository.read",
-      "version": 3
-    },
-    {
-      "tool_id": "repository.write"
-    }
-  ],
-  "permission": {
-    "deny": [
-      "repository.write"
-    ],
-    "ask": [],
-    "allow": [
-      "repository.read"
-    ]
-  }
+  "data": [],
+  "total": 0,
+  "pageIndex": 1
 }
 ```
 
-转换结果：
+### 6.2 Get Agent
 
-| `tool_id` | `tool_version` | `permission` |
-|---|---:|---|
-| `repository.read` | `3` | `allow` |
-| `repository.write` | `NULL` | `deny` |
+`AgentInfo` 展示完整 Agent 元数据，顶层使用 `agentId`，其余字段包括 `bindingModels`、`systemPrompt`、`useCases`、`bindingTools`、`bindingSkills`、`bindingAgents`、`permission` 和时间字段。新接口及嵌套对象固定使用 camelCase。
 
-导入规则：
+### 6.3 Update Agent
 
-1. 先按 `binding_tools` 创建 Tool 行。
-2. 再把 `deny`、`ask`、`allow` 写入对应行的 `permission`。
-3. 同一个 Tool 只能出现在一个权限数组中。
-4. 权限数组中的 Tool 必须已经存在于 `binding_tools`；否则拒绝元数据。
-5. 没有出现在任何权限数组的已绑定 Tool，`permission = NULL`，运行时继承 Tool 元数据的权限。
-
-合并后的设计不能保存“未绑定但预先声明权限”的 Tool；这是本版明确约束。
-
-### 6.3 数据库约束
-
-```sql
-CHECK (tool_version IS NULL OR tool_version >= 1)
-CHECK (permission IS NULL OR permission IN ('deny', 'ask', 'allow'))
+```json
+{
+  "agentId": "agent-coder",
+  "bindingModels": [
+    "model-a",
+    "model-b"
+  ]
+}
 ```
 
-## 7. Skill 绑定表 `t_agent_binding_skills`
+路径与请求体 `agentId` 必须一致。`bindingModels` 必填、非空、元素不可重复，单个模型 ID 最大 64 字符。
 
-| 字段 | 类型 | 可空 | 说明 |
-|---|---|---:|---|
-| `agent_id` | `VARCHAR(64)` | 否 | 逻辑关联 `t_agent_definition.id` |
-| `skill_id` | `VARCHAR(64)` | 否 | Skill ID |
-| `skill_version` | `BIGINT` | 是 | 固定版本；`NULL` 表示最新版本 |
+更新采用最后写入生效：事务中锁定 Agent 当前行，删除旧模型绑定，按请求顺序插入新绑定，然后基于锁定行的当前版本将 `version` 递增一次。客户端不提交期望版本；即使模型列表未变化，成功请求仍递增一次版本。
 
-主键为 `(agent_id, skill_id)`，不保存 `sort_order`。输出 `binding_skills[]` 时按 `skill_id` 稳定排序。
+稳定错误码为：`AGENT_INVALID_PARAMETER`、`AGENT_NOT_FOUND`、`AGENT_BINDING_TARGET_NOT_FOUND`、`AGENT_CONFLICT`、`AGENT_VERSION_CONFLICT`、`AGENT_DATA_CORRUPTION`。
 
-## 8. GaussDB 兼容性
+## 7. GaussDB 与事务
 
-DDL 使用行存表、`VARCHAR`、`TEXT`、`JSONB`、`BIGINT`、`INTEGER`、`TIMESTAMPTZ`、主键、唯一约束、`CHECK` 和普通索引。
+初始化 DDL 使用 `"{dbUser}"."t_xx"` Schema 限定名、行存兼容类型、主键、唯一约束、`CHECK` 和普通索引；COMMENT 使用简洁中文。脚本先删除相关表再创建，适用于初始化或重建，不作为生产增量迁移脚本。
 
-- openGauss 支持 JSONB 类型、操作符和索引，见 [openGauss JSONB](https://docs.opengauss.org/en/docs/latest-lite/sql_reference/json-jsonb-functions-and-operators.html)。
-- openGauss / GaussDB 集中式的 `CREATE TABLE` 语法支持主键、唯一、`CHECK` 和外键等表约束，见 [openGauss CREATE TABLE](https://docs.opengauss.org/en/docs/latest/sql_reference/create_table.html)。
-- 华为官方迁移文档说明 GaussDB Distributed 不支持外键约束，见 [UGO GaussDB Distributed 外键限制](https://support.huaweicloud.com/intl/en-us/usermanual-ugo/intl-usermanual-ugo.pdf)。
+GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系。Service 在事务内维护主表和绑定表；集中式部署确认支持外键后，可启用 DDL 末尾的可选外键块。
 
-因此 [`schema.sql`](./schema.sql) 的基础 DDL 不声明物理外键。服务必须在同一事务内维护：
+读取完整聚合与列表使用 `REPEATABLE_READ` 只读事务。不要用一个 Join 同时连接多个一对多绑定表，否则会产生笛卡尔行数放大。
 
-```text
-t_agent_models.agent_id         -> t_agent_definition.id
-t_agent_binding_tools.agent_id  -> t_agent_definition.id
-t_agent_binding_skills.agent_id -> t_agent_definition.id
-```
+## 8. 对象分层
 
-如果最终使用支持外键的集中式 GaussDB，可启用 DDL 末尾的可选外键。
+- Request/Response VO：Service 或 Controller 边界对象，字段校验位于 Request VO。
+- DTO：Mapper 与数据库交互对象。
+- Service：负责 VO/DTO 转换、跨字段和跨表校验、事务与聚合。
+- Mapper：只使用 DTO、标量条件和受影响行数。
+- 不引入 PO、DO 或 Entity。
 
-## 9. 初始化和更新
+模型绑定类命名为 `AgentModelBindingDTO` 和 `AgentModelBindingMapper`，与 `AgentToolBindingDTO`、`AgentSkillBindingDTO` 风格一致。
 
-### 9.1 初始化
-
-```text
-BEGIN
-  INSERT t_agent_definition
-  INSERT t_agent_models
-  INSERT t_agent_binding_tools
-  INSERT t_agent_binding_skills
-COMMIT
-```
-
-初始化校验：
-
-- `version = 1`。
-- `type = 'agent'`。
-- `enabled` 必须为布尔值；存量数据迁移时默认设为 `TRUE`。
-- `name` 唯一。
-- 至少一个模型。
-- Tool/Skill 版本为空或大于等于 1。
-- Tool 权限只引用已绑定 Tool。
-
-### 9.2 更新 `display_name`
-
-```sql
-UPDATE t_agent_definition
-SET display_name = :display_name,
-    version = version + 1,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = :id
-  AND version = :expected_version;
-```
-
-受影响一行表示成功；零行表示 Agent 不存在或版本冲突。
-
-### 9.3 更新 `enabled`
-
-```sql
-UPDATE t_agent_definition
-SET enabled = :enabled,
-    version = version + 1,
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = :id
-  AND version = :expected_version;
-```
-
-禁用接口不执行物理删除。管理查询返回禁用 Agent；运行时读取必须增加 `enabled = TRUE` 条件。受影响行为和版本冲突处理与更新 `display_name` 相同。
-
-### 9.4 更新 `model`
-
-```text
-BEGIN
-  SELECT id, version
-  FROM t_agent_definition
-  WHERE id = :id
-  FOR UPDATE
-
-  verify version = expected_version
-  verify model list is not empty and model IDs are unique
-
-  DELETE FROM t_agent_models WHERE agent_id = :id
-  INSERT every model with zero-based sort_order
-
-  UPDATE t_agent_definition
-  SET version = version + 1,
-      updated_at = CURRENT_TIMESTAMP
-  WHERE id = :id
-COMMIT
-```
-
-一次请求同时修改启停状态、展示名和模型时，`version` 只增加一次。
-
-## 10. 查询完整 Agent
-
-查询步骤：
-
-1. 管理面按 `t_agent_definition.id` 查询主表，不过滤 `enabled`；运行时增加 `enabled = TRUE`。
-2. 查询 `t_agent_models`，按 `sort_order` 还原 `model[]`。
-3. 查询 `t_agent_binding_tools`，按 `tool_id` 排序并生成 `binding_tools[]`。
-4. 按非空 `permission` 分组，生成 `deny`、`ask`、`allow`。
-5. 查询 `t_agent_binding_skills`，按 `skill_id` 排序生成 `binding_skills[]`。
-6. `use_cases` 直接读取主表 JSONB。
-7. 把 `role` 等 8 列按固定结构重组为 `system_prompt`。
-
-不建议把三个一对多子表放进同一个 Join，否则会产生行数相乘。
-
-## 11. 表和索引清单
-
-| 对象 | 用途 |
-|---|---|
-| `t_agent_definition` | Agent 当前标量字段、启停状态、System Prompt 展开字段和 Use Cases |
-| `uk_t_agent_definition_name` | 保证 `name` 唯一 |
-| `idx_t_agent_definition_display_name` | 展示名查询 |
-| `idx_t_agent_definition_updated_at` | 管理列表排序 |
-| `t_agent_models` | 有序模型列表 |
-| `idx_t_agent_models_model_id` | 按模型反查 Agent |
-| `t_agent_binding_tools` | Tool 绑定与权限 |
-| `idx_t_agent_binding_tools_tool_id` | 按 Tool 反查 Agent |
-| `idx_t_agent_binding_tools_permission` | 按权限反查 Agent |
-| `t_agent_binding_skills` | Skill 绑定 |
-| `idx_t_agent_binding_skills_skill_id` | 按 Skill 反查 Agent |
-
-## 12. 图表生成与验证
+## 9. 图表生成与验证
 
 图源维护在 [`diagram.puml`](./diagram.puml#L6)，内容只使用英文和 ASCII：
 
@@ -364,17 +215,19 @@ plantuml -tsvg diagram.puml
 
 SVG 是生成物，不手工修改。
 
-## 13. 版本历史
+## 10. 版本历史
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.12.0` | 2026-08-06 | 模型全链路统一为 `binding_models` / `bindingModels` / `t_agent_binding_models`；新增 Agent 绑定表；增加列表、详情和模型更新 Service 设计；System Prompt 增加非空白检查且不限制长度；DDL、Java 实现和图表同步 |
+| `v0.11.0` | 2026-08-06 | 初始化 DDL 改为 `"{dbUser}"` Schema 限定和先删后建；COMMENT 统一为简洁中文；记录管理前端只允许修改模型配置 |
 | `v0.10.0` | 2026-08-05 | 以输入元数据的 `system_prompt` 对象为准，恢复 8 个数据库展开列并全部设为 `TEXT NOT NULL`；前端固定展示全部字段；同步源 JSON、README、DDL 和图表 |
-| `v0.9.0` | 2026-08-05 | 删除 README 中重复的 SQL 语句章节，`schema.sql` 作为唯一完整 DDL 来源，并顺延章节编号 |
-| `v0.8.0` | 2026-08-04 | 将八个 System Prompt 子列收敛为单一必填 `system TEXT`；增加非空白约束；前端改为固定的完整 Prompt 编辑器；保留旧 `system_prompt` 对象的导入组装规则 |
-| `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type`；在 SQL 章节补充表和字段 COMMENT 语句 |
-| `v0.6.0` | 2026-08-04 | 在表关系后增加 SQL 语句章节，集中展示四张目标表的可执行建表 DDL |
-| `v0.5.0` | 2026-08-04 | 表名统一采用 `t_` 前缀和小写 snake_case；四张表分别更名为 `t_agent_definition`、`t_agent_models`、`t_agent_binding_tools`、`t_agent_binding_skills`，同步调整约束名和索引名 |
-| `v0.4.0` | 2026-07-29 | 增加 `enabled BOOLEAN NOT NULL DEFAULT TRUE`；定义管理面、运行时、乐观锁和存量迁移语义 |
-| `v0.3.0` | 2026-07-29 | 主表 ID 对齐元数据；`display_name` 改为 `VARCHAR(128)`；System Prompt 列去掉 `system_` 前缀；Model/Tool/Skill ID 统一为 `VARCHAR(64)`；`use_cases` 改为主表 JSONB；仅 Model 保留顺序；合并 Tool 绑定与权限 |
-| `v0.2.0` | 2026-07-29 | 按当前 Agent JSON 收敛为 1 张主表和 5 张数组子表；增加 GaussDB DDL |
-| `v0.1.0` | 2026-07-28 | 初版包含研发 Preset、管理 Override、有效版本、管理 API、审计与 Outbox 等扩展设计 |
+| `v0.9.0` | 2026-08-05 | 删除 README 中重复的 SQL 语句章节，`schema.sql` 作为唯一完整 DDL 来源 |
+| `v0.8.0` | 2026-08-04 | 将八个 System Prompt 子列收敛为单一必填 `system TEXT`，后续版本已撤销 |
+| `v0.7.0` | 2026-08-04 | 定义 System Prompt 必填、可空和前端展示规则；将 `resource_type` 更名为 `type` |
+| `v0.6.0` | 2026-08-04 | 增加 SQL 语句章节，后续改由独立 `schema.sql` 维护 |
+| `v0.5.0` | 2026-08-04 | 表名统一采用 `t_` 前缀和小写 snake_case |
+| `v0.4.0` | 2026-07-29 | 增加 `enabled BOOLEAN NOT NULL DEFAULT TRUE` 及管理面、运行时语义 |
+| `v0.3.0` | 2026-07-29 | 主表 ID 对齐元数据；统一 ID 长度；`use_cases` 改为 JSONB；合并 Tool 绑定与权限 |
+| `v0.2.0` | 2026-07-29 | 按 Agent JSON 收敛关系表并增加 GaussDB DDL |
+| `v0.1.0` | 2026-07-28 | 初版扩展设计 |

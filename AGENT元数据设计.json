@@ -8,7 +8,7 @@
     "name":"agent名称",
     "display_name":"agent展示名称",
     "description":"agent描述",
-    "model":["model标识"],
+    "binding_models":["model标识"],
     "system_prompt":{
         "role":"定义agent的身份、专业能力和责任范围",
         "objective":"定义长期稳定的目标以及什么属于成功结果",
@@ -31,6 +31,12 @@
     "binding_skills":[
         {
             "skill_id":"技能标识",
+            "version":"固定的版本。如果省略, 则默认为最新版本"
+        }
+    ],
+    "binding_agents":[
+        {
+            "agent_id":"agent标识",
             "version":"固定的版本。如果省略, 则默认为最新版本"
         }
     ],
