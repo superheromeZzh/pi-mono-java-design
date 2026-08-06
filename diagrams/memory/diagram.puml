@@ -1,6 +1,6 @@
 @startuml memory-architecture
 !pragma layout smetana
-title Java GaussDB Storage With SQLite-Aligned Schema
+title CampusClaw GaussDB Session Storage
 skinparam backgroundColor #FFFFFF
 skinparam componentStyle rectangle
 
@@ -10,26 +10,28 @@ skinparam componentStyle rectangle
 ' - packages/agent/src/harness/session/repository.ts: SessionRepository
 ' - packages/storage/sqlite-node/src/sqlite/repo.ts: SqliteSessionBackend
 ' - packages/storage/sqlite-node/src/sqlite/migrations.ts: applyMigrations
-' Observed behavior: one serialized repository owns SQLite session operations.
-' Target adaptation: replace the driver and SQL dialect without changing table or column names.
-' Design reason: the user requires physical SQLite schema alignment and no database extensions.
+' Observed behavior: pi runs a local SQLite migration runner and records completed IDs.
+' Target-only architecture change: the CampusClaw release path owns centralized GaussDB DDL.
+' Product constraint: target table names use the t_ prefix.
+' Target-only Java default: use MyBatis Spring Boot Starter 3.0.4 with DTO mappers.
+' Design reason: schema lifecycle is outside each AgentService runtime instance.
 
 actor "Agent Runtime" as runtime
+actor "CampusClaw Database Release Platform" as release
 
 package "Java Session Layer" {
   [Memory Session Application Service] as app
   [Session Repository] as repository
   [Session Storage] as storage
-  [Migration Runner] as migration
   [Repository Serial Queue] as queue
 }
 
-package "GaussDB JDBC Adapter" {
-  [JDBC Transaction Manager] as tx
-  [SQLite-Aligned SQL] as sql
+package "GaussDB Persistence Adapter" {
+  [Spring Transaction Manager] as tx
+  [MyBatis Session Mappers] as sql
 }
 
-database "Centralized GaussDB\nSQLite-aligned tables" as db
+database "Centralized GaussDB\nCampusClaw Session tables" as db
 
 runtime --> app
 app --> repository : create open list delete fork
@@ -37,37 +39,48 @@ app --> storage : append read branch context
 repository --> queue : serialize operations
 storage --> queue : serialize operations
 queue --> tx : execute transaction
-migration --> tx : apply 001 and 002
 tx --> sql
 sql --> db
+release --> db : apply DDL before application rollout
 
 note right of db
-Tables and columns match SQLite.
-Only SQLite WITHOUT ROWID syntax is removed.
-Native semantic types and explicit lengths are used.
+The application schema has seven Session tables.
+Table names use the t_ prefix.
+Columns, keys, indexes, and transaction behavior
+preserve the mapped pi Session semantics.
 IDs use VARCHAR(128), types use VARCHAR(64),
-cwd uses VARCHAR(512), sequences BIGINT, time TIMESTAMPTZ(3), and JSON JSONB.
+cwd uses VARCHAR(512), sequences use BIGINT,
+time uses TIMESTAMPTZ(3), and JSON uses JSONB.
+end note
+
+note bottom of release
+This release component is target-only.
+It is the only schema upgrade authority.
+The concrete migration product is not selected here.
+Its history and lock metadata are outside the Session schema.
 end note
 
 note bottom of sql
-No revision, operation, checksum,
-foreign key, check, or search table.
+AgentService does not create a migrations table
+and does not execute DDL at startup.
 end note
 
 @enduml
 
 @startuml memory-write-transaction
-title SQLite-Aligned GaussDB Write Transactions
+title CampusClaw GaussDB Session Write Transactions
 skinparam backgroundColor #FFFFFF
 
 ' Source evidence:
 ' - badlogic/pi-mono@f0deb8dd8e9611e89b5bc4145ca92c03ae6ed4ee
-' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: create and appendEntry
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: SqliteSessionConnection.create
+' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: SqliteSessionConnection.appendEntry
 ' - packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts: appendEntryToBranchCache
-' - packages/storage/sqlite-node/src/sqlite/repo.ts: delete
-' Observed behavior: create, append, and delete use explicit SQLite transaction order.
-' Target adaptation: execute the same table writes through JDBC and GaussDB SQL syntax.
-' Design reason: do not add revision, idempotency, row-lock protocol, or cascade delete.
+' - packages/storage/sqlite-node/src/sqlite/repo.ts: SqliteSessionBackend.delete
+' Observed behavior: pi create, append, and delete use an explicit transaction order.
+' Target adaptation: preserve the row semantics and order with CampusClaw table names.
+' Product constraint: target table names use the t_ prefix.
+' Design reason: do not add revision, idempotency, row locks, or cascade delete.
 
 actor "Agent Runtime" as runtime
 participant "Session Service" as service
@@ -79,25 +92,25 @@ service -> queue : enqueue
 queue -> db : begin
 
 alt create session
-  queue -> db : insert sessions
-  queue -> db : insert session_sequences
-  queue -> db : insert session_materialized
+  queue -> db : insert t_sessions
+  queue -> db : insert t_session_sequences
+  queue -> db : insert t_session_materialized
 else append entry
-  queue -> db : select session_sequences.next_seq
-  queue -> db : insert session_entries
-  queue -> db : update session_sequences
-  queue -> db : update session_materialized
-  queue -> db : insert entry_materialized when required
-  queue -> db : update sessions.active_leaf_id
-  queue -> db : update branch_entries and branch_tips
+  queue -> db : select t_session_sequences.next_seq
+  queue -> db : insert t_session_entries
+  queue -> db : update t_session_sequences
+  queue -> db : update t_session_materialized
+  queue -> db : insert t_entry_materialized when required
+  queue -> db : update t_sessions.active_leaf_id
+  queue -> db : update t_branch_entries and t_branch_tips
 else delete session
-  queue -> db : delete branch_tips
-  queue -> db : delete branch_entries
-  queue -> db : delete session_entries
-  queue -> db : delete entry_materialized
-  queue -> db : delete session_materialized
-  queue -> db : delete session_sequences
-  queue -> db : delete sessions
+  queue -> db : delete t_branch_tips
+  queue -> db : delete t_branch_entries
+  queue -> db : delete t_session_entries
+  queue -> db : delete t_entry_materialized
+  queue -> db : delete t_session_materialized
+  queue -> db : delete t_session_sequences
+  queue -> db : delete t_sessions
 end
 
 alt every statement succeeds
@@ -113,7 +126,7 @@ service --> runtime : result
 @enduml
 
 @startuml memory-data-model
-title SQLite-Aligned GaussDB Data Model
+title CampusClaw GaussDB Session Data Model
 top to bottom direction
 
 skinparam backgroundColor #FFFFFF
@@ -130,19 +143,14 @@ skinparam classBackgroundColor #F7F9FC
 ' - packages/agent/src/harness/session/repository.ts: createTimestamp
 ' - packages/storage/sqlite-node/src/sqlite/storage/session-entries.ts: encodeEntry
 ' - packages/storage/sqlite-node/src/sqlite/storage/session-materialized.ts: serializeSummary
-' Observed behavior: the final SQLite core schema has exactly eight logical tables.
-' Target adaptation: preserve names, columns, nullability, keys, and indexes.
-' Target-only product constraint: IDs use VARCHAR(128), types use VARCHAR(64), and cwd uses VARCHAR(512).
-' Type adaptation: sequences use BIGINT, timestamps use TIMESTAMPTZ(3), and JSON documents use JSONB.
-' Design reason: omit SQLite WITHOUT ROWID and add no other database structure.
+' Observed behavior: pi has seven Session tables and one SQLite migration ledger.
+' Target-only architecture change: CampusClaw maps only the seven Session tables.
+' Product constraint: target table names use the t_ prefix.
+' Target adaptation: preserve columns, nullability, key semantics, and index columns.
+' Type adaptation: use bounded VARCHAR, BIGINT, TIMESTAMPTZ(3), and JSONB.
+' Design reason: the centralized database release path owns schema upgrade metadata.
 
-class "migrations" as migrations <<table>> {
-  id : varchar(128) [PK]
-  --
-  applied_at : timestamptz(3)
-}
-
-class "sessions" as sessions <<table>> {
+class "t_sessions" as sessions <<table>> {
   id : varchar(128) [PK]
   --
   created_at : timestamptz(3)
@@ -152,24 +160,24 @@ class "sessions" as sessions <<table>> {
   active_leaf_id : varchar(128) [nullable]
 }
 
-class "session_entries" as session_entries <<table>> {
+class "t_session_entries" as session_entries <<table>> {
   session_id : varchar(128) [PK]
   id : varchar(128) [PK]
   --
-  entry_seq : bigint [UQ]
+  entry_seq : bigint [UQ with session_id]
   parent_id : varchar(128) [nullable]
   type : varchar(64)
   timestamp : timestamptz(3)
   payload : jsonb
 }
 
-class "session_sequences" as session_sequences <<table>> {
+class "t_session_sequences" as session_sequences <<table>> {
   session_id : varchar(128) [PK]
   --
   next_seq : bigint
 }
 
-class "branch_entries" as branch_entries <<cache>> {
+class "t_branch_entries" as branch_entries <<cache>> {
   session_id : varchar(128) [PK]
   branch_id : varchar(128) [PK]
   entry_id : varchar(128) [PK]
@@ -177,20 +185,20 @@ class "branch_entries" as branch_entries <<cache>> {
   entry_seq : bigint
 }
 
-class "branch_tips" as branch_tips <<cache>> {
+class "t_branch_tips" as branch_tips <<cache>> {
   session_id : varchar(128) [PK]
   tip_id : varchar(128) [PK]
   --
-  branch_id : varchar(128) [UQ]
+  branch_id : varchar(128) [UQ with session_id]
 }
 
-class "session_materialized" as session_materialized <<projection>> {
+class "t_session_materialized" as session_materialized <<projection>> {
   session_id : varchar(128) [PK]
   --
   payload : jsonb
 }
 
-class "entry_materialized" as entry_materialized <<projection>> {
+class "t_entry_materialized" as entry_materialized <<projection>> {
   session_id : varchar(128) [PK]
   entry_seq : bigint [PK]
   type : varchar(64) [PK]
@@ -214,19 +222,14 @@ Payload uses JSONB and timestamp uses TIMESTAMPTZ(3).
 end note
 
 note bottom of branch_entries
-branch_entries and branch_tips are derived caches.
-Migration 002 clears both cache generations.
-end note
-
-note bottom of migrations
-Records database upgrade scripts that already completed.
-Existing IDs are skipped; no checksum or version column.
+t_branch_entries and t_branch_tips are derived caches.
+They can be rebuilt from t_session_entries.parent_id.
 end note
 
 @enduml
 
 @startuml memory-context-rebuild
-title SQLite-Aligned GaussDB Context Rebuild
+title CampusClaw GaussDB Context Rebuild
 skinparam backgroundColor #FFFFFF
 
 ' Source evidence:
@@ -234,9 +237,10 @@ skinparam backgroundColor #FFFFFF
 ' - packages/storage/sqlite-node/src/sqlite/storage/index.ts: readPathToRootOrCompaction
 ' - packages/storage/sqlite-node/src/sqlite/storage/branch-cache.ts: rebuildCachedBranch
 ' - packages/agent/src/harness/session/session.ts: buildSessionContext
-' Observed behavior: SQLite reads a validated cached branch and trims it at compaction.
-' Target adaptation: run equivalent queries against tables with the same names.
-' Design reason: context semantics must not change with the database engine.
+' Observed behavior: pi reads a validated cached branch and trims it at compaction.
+' Target adaptation: run equivalent queries against CampusClaw t_ tables.
+' Product constraint: target table names use the t_ prefix.
+' Design reason: context semantics do not change with the database engine.
 
 actor "Agent Runtime" as runtime
 participant "Session Service" as service
@@ -246,12 +250,12 @@ participant "Context Rebuilder" as rebuild
 
 runtime -> service : loadContext(sessionId)
 service -> queue : enqueue read
-queue -> db : read sessions.active_leaf_id
-queue -> db : read and validate branch_entries and branch_tips
+queue -> db : read t_sessions.active_leaf_id
+queue -> db : read and validate t_branch_entries and t_branch_tips
 alt cache valid
   db --> queue : cached root-to-tip path
 else cache missing or invalid
-  queue -> db : recursive session_entries.parent_id query
+  queue -> db : recursive t_session_entries.parent_id query
   queue -> db : replace branch cache in savepoint
   db --> queue : repaired root-to-tip path
 end
