@@ -4,8 +4,8 @@
 > 版本：`v0.14.0`<br>
 > 日期：`2026-08-06`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
-> 设计仓库分析基线：`9d1edabccd7eb0ab3ec47a4022109b8d3c2eeb81`<br>
-> Java 实现分析基线：`mate-service@0b6091e550c3a3d41ece214de1f598894801d431`<br>
+> 设计仓库分析基线：`80f50502eca969e4541ea82825a90542de13e084`<br>
+> Java 实现分析基线：`mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -32,11 +32,10 @@
 
 ### 2.2 Java 基线
 
-本次分析的 Java 提交为 `mate-service@0b6091e550c3a3d41ece214de1f598894801d431`，相关路径：
+本次分析的 Java 提交为 `mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5`，相关路径：
 
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/AgentDefinitionService.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
-- `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/AgentId.java`
-- `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ModelId.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ResourceIdRules.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/UpdateAgentRequestVO.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
@@ -82,7 +81,7 @@ PlantUML：[查看源码](./diagram.puml#L6)
 
 资源 ID 统一采用类型前缀加 `SecureRandomUtils.generateUUID()` 返回的 32 位 UUID 字符串：Agent 使用 `agent-`，Model 使用 `model-`，Tool 使用 `tool-`，Skill 使用 `skill-`。例如：`agent-550e8400e29b41d4a716446655440000`。当前仓库没有 Create Agent 接口和 `SecureRandomUtils` 实现；未来落地创建接口时由各资源所属 Service 生成 ID，请求方不传入 ID。
 
-Agent 路径参数和更新请求体使用 `@AgentId`，模型更新数组元素使用 `@ModelId`。Tool 和 Skill 没有写接口，Service 在列表及详情聚合时校验数据库中的 `toolId`、`skillId`，同时校验持久化的 Agent、Model 和绑定 Agent 标识；格式错误按数据损坏处理。只有资源主表在创建资源时产生 ID，各绑定表均引用既有 ID，不重新生成。数据库继续使用 `VARCHAR(64)`，不把当前长度固化为列长度，以保留生成算法演进空间。
+Agent 路径参数、更新请求体和模型更新数组元素直接使用 Jakarta `@NotBlank` 与 `@Pattern`，正则引用 `ResourceIdRules` 中的公共常量，不定义只包装标准约束的自定义注解。Tool 和 Skill 没有写接口，Service 在列表及详情聚合时校验数据库中的 `toolId`、`skillId`，同时校验持久化的 Agent、Model 和绑定 Agent 标识；格式错误按数据损坏处理。只有资源主表在创建资源时产生 ID，各绑定表均引用既有 ID，不重新生成。数据库继续使用 `VARCHAR(64)`，不把当前长度固化为列长度，以保留生成算法演进空间。
 
 ### 4.2 System Prompt
 
@@ -218,6 +217,7 @@ GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系�
 - Mapper：只使用 DTO、标量条件和受影响行数。
 - 不引入 PO、DO 或 Entity。
 - 可变 Request VO 和 DTO 使用 Lombok `@Data`；只读 Response VO 使用 `@Getter` 和不可变字段。
+- 必填资源标识使用公共正则常量配合 Jakarta `@NotBlank` 与 `@Pattern`，不增加只包装标准约束的组合注解。
 - Java 注释和 Javadoc 使用中文；标识符、注解名、固定字面量和产品名按需保留英文。
 
 Mapper 只保留三个接口可达的操作：主表查询、分页、行锁和版本递增；Model 绑定查询、删除和批量插入；Tool、Skill、Agent 绑定仅保留单个 Agent 查询和页内 Agent 集合批量查询。`AgentBindingMapper`、`AgentToolBindingMapper`、`AgentSkillBindingMapper` 不提供 `insertBatch`。

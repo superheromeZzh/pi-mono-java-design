@@ -1,7 +1,7 @@
 ' Generated for SR-AGENT-DB-001 v0.14.0 on 2026-08-06.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Design baseline: 9d1edabccd7eb0ab3ec47a4022109b8d3c2eeb81.
-' Java baseline: mate-service@0b6091e550c3a3d41ece214de1f598894801d431.
+' Design baseline: 80f50502eca969e4541ea82825a90542de13e084.
+' Java baseline: mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5.
 
 @startuml agent_metadata_gaussdb_model
 !pragma layout elk
@@ -24,12 +24,12 @@ skinparam classAttributeIconSize 0
 ' - mate-service baseline path and symbols:
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java
 '   AgentDefinitionServiceImpl.listAgents, getAgent, and updateAgent.
-'   src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/AgentId.java
-'   AgentId composed validation annotation.
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ResourceIdRules.java
 '   ResourceIdRules identifier patterns.
+'   src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/UpdateAgentRequestVO.java
+'   UpdateAgentRequestVO standard Jakarta identifier constraints.
 ' - mate-service baseline DDL: src/main/resources/db/schema.sql.
-' Observed behavior: AgentId validates agent- plus 32 hexadecimal characters.
+' Observed behavior: Jakarta Pattern validates typed resource ID formats.
 ' Observed behavior: only model bindings have write Mapper operations.
 ' Observed behavior: each DROP TABLE statement immediately precedes its CREATE.
 ' Design reason: pair each table drop with its create statement to follow the
