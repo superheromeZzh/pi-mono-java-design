@@ -1,103 +1,972 @@
 openapi: 3.1.0
 info:
-  title: CampusAgent Internal Runtime HTTP API
-  version: 1.0.0
-  description: Target-only HTTP representation of internal Runtime WebSocket v2.
+  title: CampusAgent 内部 Runtime HTTP API
+  version: 1.1.0
+  description: |
+    CampusAgent Runtime 面向 mate-service Runtime bridge 和获授权内部 SDK 的
+    HTTP API。它是一组 Session、Run、Event、History 和 Model 资源接口，
+    不是 WebSocket Frame RPC 的单接口包装。
+  contact:
+    name: CampusAgent
+  license:
+    name: MIT
+    identifier: MIT
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 servers:
   - url: https://agent-service.internal/agent-service/internal/v1
-security: [{ internalGateway: [] }]
+    description: 生产内部 Gateway
+  - url: http://localhost:3000/agent-service/internal/v1
+    description: 本地开发
+security:
+  - internalGateway: []
+tags:
+  - name: Sessions
+    description: Runtime Session 生命周期
+  - name: Runs
+    description: 用户消息、异步 Run 与运行控制
+  - name: Events
+    description: Run 实时事件和补拉
+  - name: History
+    description: 数据库权威 Message 与 RunRecord 历史
+  - name: Models
+    description: Session-scoped 模型发现和配置
+x-source-evidence:
+  status: target-only design; pi-mono-java HTTP API is not implemented
+  repository: https://github.com/superheromeZzh/pi-mono-java
+  commit: 1f7a5423219edfa4519d8719f1cc8a188ed72873
+  sourceContract: chat-ws-v2.asyncapi.yaml@2.12.0
+  observedPaths:
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ServerMode.java
+      symbols: WebSocket handshake at baseline lines 377-391
+    - path: modules/coding-agent-cli/src/main/java/com/campusclaw/codingagent/mode/server/ChatWebSocketHandler.java
+      symbols: connection lifecycle and v1 commands at baseline lines 115-227; cumulative message updates at lines 422-459
+    - path: modules/ai/src/main/java/com/campusclaw/ai/stream/AssistantMessageEvent.java
+      symbols: structured provider stream events at baseline lines 44-164
+x-http-design:
+  operationCount: 13
+  eventTransports: [text/event-stream, application/json]
+  connectionStateRemoved: true
+  canonicalEventCursor: run_seq
+  eventJournal: target architecture change
 paths:
   /sessions/{session_id}:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
     put:
-      summary: Create or resume a Runtime Session
-      operationId: upsertSession
-      parameters: [{ $ref: '#/components/parameters/IfNoneMatch' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SessionUpsertRequest' } } } }
+      tags: [Sessions]
+      summary: 幂等创建 Runtime Session
+      operationId: createSession
+      description: |
+        调用方预先分配 session_id。相同 immutable binding 的重试返回原资源；
+        相同 session_id 携带不同 agent_id 或初始 model_id 返回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreateRequest'
       responses:
-        '200': { description: Resumed, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
-        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        '200':
+          description: 相同绑定的幂等重试
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResource' }
+        '201':
+          description: Session 已创建
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResource' }
+        '409': { $ref: '#/components/responses/Conflict' }
         default: { $ref: '#/components/responses/Problem' }
     get:
-      summary: Get session state
+      tags: [Sessions]
+      summary: 读取 Session 状态
       operationId: getSession
       responses:
-        '200': { description: Session, content: { application/json: { schema: { $ref: '#/components/schemas/Session' } } } }
+        '200':
+          description: Session、当前模型及可选 active-run 快照
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResource' }
+        '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Sessions]
+      summary: 幂等请求删除 Session
+      operationId: deleteSession
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: 已停止接受新操作并进入异步清理
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionDeletionAccepted' }
+        '204':
+          description: Session 已删除或同一删除已完成
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
   /sessions/{session_id}/runs:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }]
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
     post:
-      summary: Start a chat run
+      tags: [Runs]
+      summary: 提交用户消息并创建异步 Run
       operationId: createRun
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatSendRequest' } } } }
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunCreateRequest' }
       responses:
-        '202': { description: Accepted, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }
+        '202':
+          description: 用户消息、幂等结果和 active-run 已原子提交
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunAccepted' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
         default: { $ref: '#/components/responses/Problem' }
-  /sessions/{session_id}/history:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }]
     get:
-      summary: Read authoritative history
-      operationId: getHistory
-      parameters: [{ $ref: '#/components/parameters/Limit' }, { name: cursor, in: query, schema: { type: string } }]
+      tags: [Runs]
+      summary: 分页列出 Session 的 Run
+      operationId: listRuns
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: state
+          in: query
+          schema:
+            $ref: '#/components/schemas/RunState'
       responses:
-        '200': { description: History page, content: { application/json: { schema: { $ref: '#/components/schemas/HistoryPage' } } } }
+        '200':
+          description: Run 分页
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunList' }
+        '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Problem' }
+
   /sessions/{session_id}/runs/{run_id}:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/RunId'
+      - $ref: '#/components/parameters/TraceParent'
     get:
-      summary: Get run status and snapshot
+      tags: [Runs]
+      summary: 读取 Run 快照或终态
       operationId: getRun
-      responses: { '200': { description: Run, content: { application/json: { schema: { $ref: '#/components/schemas/Run' } } } }, default: { $ref: '#/components/responses/Problem' } }
-  /sessions/{session_id}/runs/{run_id}/events:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
-    get:
-      summary: Poll ordered run events
-      operationId: getRunEvents
-      parameters: [{ name: after_seq, in: query, schema: { type: integer, minimum: 0, default: 0 } }, { $ref: '#/components/parameters/Limit' }]
       responses:
-        '200': { description: Event page, headers: { ETag: { schema: { type: string } }, Retry-After: { schema: { type: integer } } }, content: { application/json: { schema: { $ref: '#/components/schemas/EventPage' } } } }
+        '200':
+          description: Run 权威资源
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RunResource' }
+        '404': { $ref: '#/components/responses/NotFound' }
         default: { $ref: '#/components/responses/Problem' }
+
   /sessions/{session_id}/runs/{run_id}/steers:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/RunId'
+      - $ref: '#/components/parameters/TraceParent'
     post:
-      summary: Steer an active run
+      tags: [Runs]
+      summary: 向 active Run 追加文本指导
       operationId: steerRun
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SteerRequest' } } } }
-      responses: { '202': { description: Accepted }, default: { $ref: '#/components/responses/Problem' } }
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SteerRequest' }
+      responses:
+        '202':
+          description: Steering 已接受
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SteerAccepted' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
   /sessions/{session_id}/runs/{run_id}/abort:
-    parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/RunId' }]
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/RunId'
+      - $ref: '#/components/parameters/TraceParent'
     post:
-      summary: Abort a run idempotently
+      tags: [Runs]
+      summary: 幂等请求终止 Run
       operationId: abortRun
-      responses: { '202': { description: Accepted }, '204': { description: Already terminal }, default: { $ref: '#/components/responses/Problem' } }
-  /agents/{agent_id}/models:
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Abort 已接受或返回原幂等结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AbortAccepted' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sessions/{session_id}/runs/{run_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/RunId'
+      - $ref: '#/components/parameters/TraceParent'
     get:
-      summary: List models available to an agent
-      operationId: listModels
-      parameters: [{ name: agent_id, in: path, required: true, schema: { $ref: '#/components/schemas/AgentId' } }]
-      responses: { '200': { description: Models, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Model' } } } } } } }, default: { $ref: '#/components/responses/Problem' } }
+      tags: [Events]
+      summary: 消费或补拉 Run 有序事件
+      operationId: getRunEvents
+      description: |
+        Accept=text/event-stream 时返回 SSE，SSE id 等于 payload.run_seq；
+        Accept=application/json 时按 after_run_seq 返回事件页。
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          description: SSE 恢复游标；与 after_run_seq 同时提供时必须相等。
+          schema: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        - name: after_run_seq
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: SSE 流或 JSON 事件页
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-cache }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              x-sse-event-schema:
+                $ref: '#/components/schemas/RunEvent'
+            application/json:
+              schema: { $ref: '#/components/schemas/RunEventPage' }
+        '410': { $ref: '#/components/responses/Gone' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sessions/{session_id}/history:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
+    get:
+      tags: [History]
+      summary: 读取权威持久历史
+      operationId: getSessionHistory
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit200'
+        - name: run_id
+          in: query
+          schema: { $ref: '#/components/schemas/RunId' }
+        - name: through_history_seq
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: 按 history_seq 从旧到新排列的 Message 和 RunRecord
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistoryResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sessions/{session_id}/models:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
+    get:
+      tags: [Models]
+      summary: 列出 Session 可用模型
+      operationId: listSessionModels
+      responses:
+        '200':
+          description: 当前 Agent、调用身份和部署策略共同允许的模型
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelsListResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sessions/{session_id}/model:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
+    put:
+      tags: [Models]
+      summary: 切换 Session 当前模型
+      operationId: setSessionModel
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelChangeRequest' }
+      responses:
+        '200':
+          description: 模型已切换
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelSetResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sessions/{session_id}/thinking:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/TraceParent'
+    put:
+      tags: [Models]
+      summary: 修改默认 thinking 披露级别
+      operationId: setSessionThinking
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ThinkingChangeRequest' }
+      responses:
+        '200':
+          description: 默认披露级别已更新
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ThinkingSetResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        default: { $ref: '#/components/responses/Problem' }
+
 components:
-  securitySchemes: { internalGateway: { type: http, scheme: bearer, description: Existing internal gateway context; exact format is deployment-specific. } }
+  securitySchemes:
+    internalGateway:
+      type: http
+      scheme: bearer
+      bearerFormat: deployment-specific
+      description: 公司现有内部 Gateway 服务认证；私有 Header、claim 和密钥格式不属于本规范。
   parameters:
-    SessionId: { name: session_id, in: path, required: true, schema: { $ref: '#/components/schemas/SessionId' } }
-    RunId: { name: run_id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
-    IfNoneMatch: { name: If-None-Match, in: header, schema: { type: string } }
-    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 256 } }
-    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
-  responses: { Problem: { description: Problem response, content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } } } }
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/SessionId' }
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/RunId' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 作用域为 session_id 与 operationId；副作用请求超时后必须原值重试。
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    TraceParent:
+      name: traceparent
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 55
+        maxLength: 128
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 最近一次 Session 响应的强 ETag。
+      schema: { type: string, minLength: 3, maxLength: 128 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, minLength: 1, maxLength: 1024 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Limit200:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+  headers:
+    ETag:
+      description: 资源强版本标识。
+      schema: { type: string }
+    Location:
+      description: 已创建、已接受或异步状态资源的位置。
+      schema: { type: string, format: uri-reference }
+  responses:
+    Problem:
+      description: 结构化错误
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Session 或 Run 不存在
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: active Run、绑定或幂等冲突
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Gone:
+      description: Event Journal 已无法从请求游标继续
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: If-Match 与当前 Session 版本不一致
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unprocessable:
+      description: 附件未就绪、无效或不符合模型输入策略
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
   schemas:
-    SessionId: { type: string, pattern: '^[0-9A-Za-z-]{16,128}$' }
-    AgentId: { type: string, pattern: '^agent_[0-9A-Za-z]{24}$' }
-    ModelId: { type: string, pattern: '^model_[0-9A-Za-z]{24}$' }
-    AttachmentId: { type: string, pattern: '^attachment_[0-9A-Za-z]{24}$' }
-    SessionUpsertRequest: { type: object, required: [agent_id, model_id], properties: { agent_id: { $ref: '#/components/schemas/AgentId' }, model_id: { $ref: '#/components/schemas/ModelId' }, mode: { type: string, enum: [create, resume], default: resume } } }
-    ChatSendRequest: { type: object, properties: { text: { type: string, minLength: 1, maxLength: 1048576 }, attachment_ids: { type: array, maxItems: 10, items: { $ref: '#/components/schemas/AttachmentId' } } }, anyOf: [{ required: [text] }, { required: [attachment_ids] }] }
-    SteerRequest: { type: object, required: [text], properties: { text: { type: string, minLength: 1, maxLength: 1048576 } } }
-    Session: { type: object, required: [session_id, agent_id, model_id, state], properties: { session_id: { $ref: '#/components/schemas/SessionId' }, agent_id: { $ref: '#/components/schemas/AgentId' }, model_id: { $ref: '#/components/schemas/ModelId' }, state: { type: string, enum: [idle, running, interrupted, deleted] }, active_run_id: { type: string, nullable: true }, version: { type: integer, minimum: 0 } } }
-    Run: { type: object, required: [run_id, session_id, state], properties: { run_id: { type: string }, session_id: { $ref: '#/components/schemas/SessionId' }, state: { type: string, enum: [queued, running, completed, aborted, interrupted, failed] }, next_seq: { type: integer, minimum: 0 }, created_at: { type: string, format: date-time }, completed_at: { type: string, format: date-time, nullable: true } } }
-    Event: { type: object, required: [seq, type], properties: { seq: { type: integer, minimum: 1 }, type: { type: string }, payload: { type: object, additionalProperties: true } } }
-    EventPage: { type: object, required: [items, next_after_seq, terminal], properties: { items: { type: array, items: { $ref: '#/components/schemas/Event' } }, next_after_seq: { type: integer }, terminal: { type: boolean }, retry_after_ms: { type: integer, minimum: 0 } } }
-    HistoryPage: { type: object, required: [items], properties: { items: { type: array, items: { type: object, additionalProperties: true } }, next_cursor: { type: string, nullable: true } } }
-    Model: { type: object, required: [model_id, name], properties: { model_id: { $ref: '#/components/schemas/ModelId' }, name: { type: string }, reasoning: { type: boolean } } }
-    Problem: { type: object, required: [type, title, status, code], properties: { type: { type: string, format: uri-reference }, title: { type: string }, status: { type: integer }, code: { type: string }, detail: { type: string }, request_id: { type: string } } }
+    SessionId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/SessionId'
+    AgentId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/AgentId'
+    ModelId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ModelId'
+    RunId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/RunId'
+    MessageId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/MessageId'
+    AttachmentId:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/AttachmentId'
+    ThinkingLevel:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ThinkingLevel'
+    ModelSummary:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ModelSummary'
+    SessionSummary:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/SessionSummary'
+    ModelsListResult:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ModelsListResult'
+    ModelSetResult:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ModelSetResult'
+    ThinkingSetResult:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ThinkingSetResult'
+    SafeErrorDetails:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/SafeErrorDetails'
+    Timestamp:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/Timestamp'
+    TextContent:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/TextContent'
+    ThinkingContent:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ThinkingContent'
+    ToolCallContent:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ToolCallContent'
+    ToolResultContent:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ToolResultContent'
+    AttachmentContent:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/AttachmentContent'
+    OpenContentState:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/OpenContentState'
+    ActiveTool:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ActiveTool'
+    Usage:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/Usage'
+    RunTerminalError:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/RunTerminalError'
+    ProjectedMessage:
+      type: object
+      additionalProperties: false
+      required: [message_id, role, status, content, created_at]
+      properties:
+        message_id: { $ref: '#/components/schemas/MessageId' }
+        role: { type: string, enum: [user, assistant, tool] }
+        status: { type: string, enum: [streaming, completed, aborted, error, interrupted] }
+        content:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/TextContent'
+              - $ref: '#/components/schemas/ThinkingContent'
+              - $ref: '#/components/schemas/ToolCallContent'
+              - $ref: '#/components/schemas/ToolResultContent'
+              - $ref: '#/components/schemas/AttachmentContent'
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        completed_at: { $ref: '#/components/schemas/Timestamp' }
+      allOf:
+        - if:
+            properties: { role: { const: user } }
+            required: [role]
+          then:
+            properties:
+              status: { const: completed }
+              content:
+                oneOf:
+                  - type: array
+                    minItems: 1
+                    maxItems: 1
+                    prefixItems:
+                      - $ref: '#/components/schemas/TextContent'
+                    items: false
+                  - type: array
+                    minItems: 1
+                    maxItems: 32
+                    items: { $ref: '#/components/schemas/AttachmentContent' }
+                  - type: array
+                    minItems: 2
+                    maxItems: 33
+                    prefixItems:
+                      - $ref: '#/components/schemas/TextContent'
+                    items: { $ref: '#/components/schemas/AttachmentContent' }
+        - if:
+            properties: { status: { const: streaming } }
+            required: [status]
+          then:
+            properties:
+              role: { const: assistant }
+              completed_at: false
+          else:
+            required: [completed_at]
+            properties:
+              completed_at: { $ref: '#/components/schemas/Timestamp' }
+    TerminalProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          required: [completed_at]
+          properties:
+            status: { type: string, enum: [completed, aborted, error, interrupted] }
+    StreamingProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/ProjectedMessage'
+        - type: object
+          properties:
+            role: { const: assistant }
+            status: { const: streaming }
+            completed_at: false
+    TerminalAssistantProjectedMessage:
+      allOf:
+        - $ref: '#/components/schemas/TerminalProjectedMessage'
+        - type: object
+          properties:
+            role: { const: assistant }
+    ActiveRunSnapshot:
+      type: object
+      additionalProperties: false
+      required: [run_id, run_seq, history_seq, model_id, thinking, message_snapshot, open_contents, active_tools]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        run_seq: { type: integer, minimum: 0 }
+        history_seq: { type: integer, minimum: 0 }
+        model_id: { $ref: '#/components/schemas/ModelId' }
+        thinking: { $ref: '#/components/schemas/ThinkingLevel' }
+        message_snapshot:
+          oneOf:
+            - $ref: '#/components/schemas/StreamingProjectedMessage'
+            - type: 'null'
+        open_contents:
+          type: object
+          propertyNames: { pattern: '^(0|[1-9][0-9]*)$' }
+          additionalProperties: { $ref: '#/components/schemas/OpenContentState' }
+        active_tools:
+          type: array
+          items: { $ref: '#/components/schemas/ActiveTool' }
+    RunRecord:
+      type: object
+      additionalProperties: false
+      required: [run_id, outcome, completed_at]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        outcome: { type: string, enum: [done, aborted, error, interrupted] }
+        completed_at: { $ref: '#/components/schemas/Timestamp' }
+        usage: { $ref: '#/components/schemas/Usage' }
+        stop_reason: { type: string, maxLength: 256 }
+        error: { $ref: '#/components/schemas/RunTerminalError' }
+    HistoryMessageItem:
+      type: object
+      additionalProperties: false
+      required: [type, history_seq, run_id, message]
+      properties:
+        type: { const: message }
+        history_seq: { type: integer, minimum: 1 }
+        run_id: { $ref: '#/components/schemas/RunId' }
+        message: { $ref: '#/components/schemas/TerminalProjectedMessage' }
+    HistoryRunItem:
+      type: object
+      additionalProperties: false
+      required: [type, history_seq, run]
+      properties:
+        type: { const: run }
+        history_seq: { type: integer, minimum: 1 }
+        run: { $ref: '#/components/schemas/RunRecord' }
+    HistoryItem:
+      oneOf:
+        - $ref: '#/components/schemas/HistoryMessageItem'
+        - $ref: '#/components/schemas/HistoryRunItem'
+      discriminator:
+        propertyName: type
+        mapping:
+          message: '#/components/schemas/HistoryMessageItem'
+          run: '#/components/schemas/HistoryRunItem'
+    HistoryResult:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/HistoryItem' }
+        next_cursor: { type: string, minLength: 1, maxLength: 1024 }
+        has_more: { type: boolean }
+    SessionCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [agent_id, model_id]
+      properties:
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        model_id: { $ref: '#/components/schemas/ModelId' }
+      examples:
+        - agent_id: agent_011CZkYqphY8vELVzwCUpqiQ
+          model_id: model_011CZq2GkV8aD4NwP7sLmXfR
+    SessionResource:
+      type: object
+      additionalProperties: false
+      required: [session_id, agent_id, model, session, version, active_run]
+      properties:
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        model: { $ref: '#/components/schemas/ModelSummary' }
+        session: { $ref: '#/components/schemas/SessionSummary' }
+        version: { type: integer, minimum: 1 }
+        active_run:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+    SessionDeletionAccepted:
+      type: object
+      additionalProperties: false
+      required: [session_id, state, accepted, idempotent]
+      properties:
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        state: { type: string, const: deleting }
+        accepted: { type: boolean, const: true }
+        idempotent: { type: boolean }
+    RunCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          maxLength: 262144
+        attachment_ids:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/AttachmentId' }
+        thinking: { $ref: '#/components/schemas/ThinkingLevel' }
+      anyOf:
+        - required: [message]
+          properties:
+            message: { minLength: 1 }
+        - required: [attachment_ids]
+          properties:
+            attachment_ids: { minItems: 1 }
+      examples:
+        - message: 查询订单 20260730001
+        - message: 分析附件中的订单数据
+          attachment_ids: [attachment_011CZm8VpK4rNs6WtY2hDqfB]
+    RunAccepted:
+      type: object
+      additionalProperties: false
+      required: [run_id, user_message_id, accepted, idempotent]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        user_message_id: { $ref: '#/components/schemas/MessageId' }
+        accepted: { type: boolean, const: true }
+        idempotent: { type: boolean }
+    RunState:
+      type: string
+      enum: [queued, running, done, aborted, error, interrupted]
+    RunResource:
+      type: object
+      additionalProperties: false
+      required: [run_id, session_id, state, model_id, thinking]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        state: { $ref: '#/components/schemas/RunState' }
+        model_id: { $ref: '#/components/schemas/ModelId' }
+        thinking: { $ref: '#/components/schemas/ThinkingLevel' }
+        active_snapshot:
+          oneOf:
+            - $ref: '#/components/schemas/ActiveRunSnapshot'
+            - type: 'null'
+        terminal_record:
+          oneOf:
+            - $ref: '#/components/schemas/RunRecord'
+            - type: 'null'
+      allOf:
+        - if:
+            properties: { state: { const: running } }
+            required: [state]
+          then:
+            required: [active_snapshot]
+            properties:
+              active_snapshot: { $ref: '#/components/schemas/ActiveRunSnapshot' }
+        - if:
+            properties: { state: { enum: [done, aborted, error, interrupted] } }
+            required: [state]
+          then:
+            required: [terminal_record]
+            properties:
+              terminal_record: { $ref: '#/components/schemas/RunRecord' }
+    RunList:
+      type: object
+      additionalProperties: false
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RunResource' }
+        next_cursor: { type: string, minLength: 1, maxLength: 1024 }
+        has_more: { type: boolean }
+    SteerRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message: { type: string, minLength: 1, maxLength: 262144 }
+    SteerAccepted:
+      type: object
+      additionalProperties: false
+      required: [run_id, user_message_id, accepted, idempotent]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        user_message_id: { $ref: '#/components/schemas/MessageId' }
+        accepted: { type: boolean }
+        idempotent: { type: boolean }
+    AbortAccepted:
+      type: object
+      additionalProperties: false
+      required: [run_id, accepted, idempotent]
+      properties:
+        run_id: { $ref: '#/components/schemas/RunId' }
+        accepted: { type: boolean }
+        idempotent: { type: boolean }
+    ModelChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [model_id]
+      properties:
+        model_id: { $ref: '#/components/schemas/ModelId' }
+    ThinkingChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [level]
+      properties:
+        level: { $ref: '#/components/schemas/ThinkingLevel' }
+    RunStartedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/RunStartedPayload'
+    MessageStartedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/MessageStartedPayload'
+    MessageUpdatedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/MessageUpdatedPayload'
+    ToolStartedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ToolStartedPayload'
+    ToolUpdatedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ToolUpdatedPayload'
+    ToolCompletedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/ToolCompletedPayload'
+    MessageCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [agent_id, session_id, run_id, message_id, run_seq, timestamp, message]
+      properties:
+        agent_id: { $ref: '#/components/schemas/AgentId' }
+        session_id: { $ref: '#/components/schemas/SessionId' }
+        run_id: { $ref: '#/components/schemas/RunId' }
+        message_id: { $ref: '#/components/schemas/MessageId' }
+        run_seq: { type: integer, minimum: 1 }
+        timestamp: { $ref: '#/components/schemas/Timestamp' }
+        message: { $ref: '#/components/schemas/TerminalAssistantProjectedMessage' }
+    RunCompletedPayload:
+      $ref: './chat-ws-v2.asyncapi.yaml#/components/schemas/RunCompletedPayload'
+    HttpRunStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: run.started }
+        payload: { $ref: '#/components/schemas/RunStartedPayload' }
+    HttpMessageStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: message.started }
+        payload: { $ref: '#/components/schemas/MessageStartedPayload' }
+    HttpMessageUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: message.updated }
+        payload: { $ref: '#/components/schemas/MessageUpdatedPayload' }
+    HttpToolStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: tool.started }
+        payload: { $ref: '#/components/schemas/ToolStartedPayload' }
+    HttpToolUpdatedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: tool.updated }
+        payload: { $ref: '#/components/schemas/ToolUpdatedPayload' }
+    HttpToolCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: tool.completed }
+        payload: { $ref: '#/components/schemas/ToolCompletedPayload' }
+    HttpMessageCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: message.completed }
+        payload: { $ref: '#/components/schemas/MessageCompletedPayload' }
+    HttpRunCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [event, payload]
+      properties:
+        event: { type: string, const: run.completed }
+        payload: { $ref: '#/components/schemas/RunCompletedPayload' }
+    RunEvent:
+      description: |
+        payload.run_seq 是 Run 内的唯一权威游标。SSE event 行等于 event，
+        id 行等于 payload.run_seq，data 行是本对象的 JSON。
+      oneOf:
+        - $ref: '#/components/schemas/HttpRunStartedEvent'
+        - $ref: '#/components/schemas/HttpMessageStartedEvent'
+        - $ref: '#/components/schemas/HttpMessageUpdatedEvent'
+        - $ref: '#/components/schemas/HttpToolStartedEvent'
+        - $ref: '#/components/schemas/HttpToolUpdatedEvent'
+        - $ref: '#/components/schemas/HttpToolCompletedEvent'
+        - $ref: '#/components/schemas/HttpMessageCompletedEvent'
+        - $ref: '#/components/schemas/HttpRunCompletedEvent'
+      discriminator:
+        propertyName: event
+        mapping:
+          run.started: '#/components/schemas/HttpRunStartedEvent'
+          message.started: '#/components/schemas/HttpMessageStartedEvent'
+          message.updated: '#/components/schemas/HttpMessageUpdatedEvent'
+          tool.started: '#/components/schemas/HttpToolStartedEvent'
+          tool.updated: '#/components/schemas/HttpToolUpdatedEvent'
+          tool.completed: '#/components/schemas/HttpToolCompletedEvent'
+          message.completed: '#/components/schemas/HttpMessageCompletedEvent'
+          run.completed: '#/components/schemas/HttpRunCompletedEvent'
+    RunEventPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_after_run_seq, has_more, terminal]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RunEvent' }
+        next_after_run_seq: { type: integer, minimum: 0 }
+        has_more: { type: boolean }
+        terminal: { type: boolean }
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          x-known-values:
+            - INVALID_REQUEST
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - AGENT_NOT_FOUND
+            - SESSION_NOT_FOUND
+            - SESSION_BINDING_CONFLICT
+            - MODEL_NOT_ALLOWED
+            - IDEMPOTENCY_CONFLICT
+            - RUN_ACTIVE
+            - RUN_NOT_FOUND
+            - INVALID_ATTACHMENT
+            - ATTACHMENT_NOT_READY
+            - ATTACHMENT_NOT_SUPPORTED
+            - EVENT_CURSOR_EXPIRED
+            - PRECONDITION_FAILED
+            - RATE_LIMITED
+            - MANAGER_AUTH_FAILED
+            - MANAGER_UNAVAILABLE
+        detail:
+          type: string
+          maxLength: 2048
+        instance:
+          type: string
+          format: uri-reference
+        request_id:
+          type: string
+          maxLength: 128
+        retryable:
+          type: boolean
+          default: false
+        retry_after_ms:
+          type: integer
+          minimum: 0
+        details:
+          $ref: '#/components/schemas/SafeErrorDetails'
+      dependentRequired:
+        retry_after_ms: [retryable]
