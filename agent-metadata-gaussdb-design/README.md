@@ -86,7 +86,7 @@ Agent 路径参数和更新请求体使用 `@AgentId`，模型更新数组元素
 
 ### 4.2 System Prompt
 
-八个 System Prompt 字段全部是产品必填项：数据库使用 `TEXT NOT NULL` 和 `CHECK (btrim(field) <> '')`，Request VO 使用 `@NotBlank`。本版不设置数据库或 Java 最大长度，避免在没有产品阈值时截断有效提示词。
+八个 System Prompt 字段全部是产品必填项：数据库使用 `TEXT NOT NULL` 和 `CHECK (btrim(field) <> '')`。当前三个接口不写 System Prompt，因此不保留对应 Request VO；未来增加写入口时，应在 Request VO 使用 `@NotBlank`。本版不设置数据库或 Java 最大长度，避免在没有产品阈值时截断有效提示词。
 
 管理前端固定展示完整的八字段提示词，不按空值动态显隐；当前管理前端只允许修改模型绑定，因此 System Prompt 只读展示。该约束是本产品决策，不等同于 Anthropic Managed Agents 只提供单一 `system` 字段的接口模型。
 
@@ -94,7 +94,7 @@ Agent 路径参数和更新请求体使用 `@AgentId`，模型更新数组元素
 
 `use_cases` 使用 `JSONB NOT NULL DEFAULT '[]'::jsonb`，并约束 `jsonb_typeof(use_cases) = 'array'`。相较保留原始 JSON 文本，本场景更关注解析后的字符串数组，JSONB 更适合读取、校验以及后续操作符或索引扩展。
 
-应用层继续校验每项为非空字符串且不可重复；当前没有确定数组数量和单项长度上限。
+Service 聚合读取时校验每项为非空字符串且不可重复；当前没有确定数组数量和单项长度上限。
 
 GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https://support.huaweicloud.com/intl/en-us/distributed-devg-v8-gaussdb/gaussdb-12-0327.html)。
 
