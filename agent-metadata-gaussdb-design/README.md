@@ -1,11 +1,11 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.12.1`<br>
+> 版本：`v0.12.2`<br>
 > 日期：`2026-08-06`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
-> 设计仓库分析基线：`0207761ffcf98c93b90dc87d773cb40c6dda4f76`<br>
-> Java 实现分析基线：`mate-service@ba71cd4c325f9887f508b212b7084ac44532b4cf`<br>
+> 设计仓库分析基线：`57bde2c779d401f84288ba664bc56010a7797d88`<br>
+> Java 实现分析基线：`mate-service@2e06063702bed1cfebe76ddea1d215a849d6bbb9`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -32,14 +32,14 @@
 
 ### 2.2 Java 基线
 
-本次分析的 Java 提交为 `mate-service@ba71cd4c325f9887f508b212b7084ac44532b4cf`，相关路径：
+本次分析的 Java 提交为 `mate-service@2e06063702bed1cfebe76ddea1d215a849d6bbb9`，相关路径：
 
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
 - `src/main/resources/mapper/AgentDefinitionMapper.xml`
 - `src/main/resources/db/schema.sql`
 
-该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列使用 `sort_order`，对应 DTO 属性为 `sortOrder`。本版将二者更名为 `model_order` 和 `modelOrder`，属于命名清晰化，不改变排序语义或对外 JSON。
+该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列和 DTO 属性已使用 `model_order` / `modelOrder`。基线 DDL 将全部 `DROP TABLE IF EXISTS` 集中放在文件顶部，本版恢复逐表删除后立即创建的部署脚本结构；表结构和对外 JSON 不变。
 
 本文只保存当前 JSON 字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。Agent 固定版本只存储和展示，不查询不存在的历史表。
 
@@ -188,7 +188,7 @@ Service 结果：
 
 ## 7. GaussDB 与事务
 
-初始化 DDL 使用 `"{dbUser}"."t_xx"` Schema 限定名、行存兼容类型、主键、唯一约束、`CHECK` 和普通索引；COMMENT 使用简洁中文。脚本先删除相关表再创建，适用于初始化或重建，不作为生产增量迁移脚本。
+初始化 DDL 使用 `"{dbUser}"."t_xx"` Schema 限定名、行存兼容类型、主键、唯一约束、`CHECK` 和普通索引；COMMENT 使用简洁中文。每张表的 `DROP TABLE IF EXISTS` 必须紧邻并位于对应 `CREATE TABLE` 之前。脚本适用于初始化或重建，不作为生产增量迁移脚本。
 
 GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系。Service 在事务内维护主表和绑定表；集中式部署确认支持外键后，可启用 DDL 末尾的可选外键块。
 
@@ -219,6 +219,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.12.2` | 2026-08-06 | 恢复逐表 `DROP TABLE IF EXISTS` 后立即 `CREATE TABLE` 的 DDL 结构，并增加自动化顺序检查 |
 | `v0.12.1` | 2026-08-06 | 将模型绑定顺序列由 `sort_order` 更名为 `model_order`，DTO 属性同步更名为 `modelOrder`；排序语义和外部 JSON 保持不变 |
 | `v0.12.0` | 2026-08-06 | 模型全链路统一为 `binding_models` / `bindingModels` / `t_agent_binding_models`；新增 Agent 绑定表；增加列表、详情和模型更新 Service 设计；System Prompt 增加非空白检查且不限制长度；DDL、Java 实现和图表同步 |
 | `v0.11.0` | 2026-08-06 | 初始化 DDL 改为 `"{dbUser}"` Schema 限定和先删后建；COMMENT 统一为简洁中文；记录管理前端只允许修改模型配置 |

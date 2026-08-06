@@ -1,17 +1,12 @@
--- SR-AGENT-DB-001 v0.12.1
+-- SR-AGENT-DB-001 v0.12.2
 -- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
 -- The base DDL intentionally omits physical foreign keys so it can be used
 -- with GaussDB Distributed. The service maintains logical relationships in
 -- one transaction.
 -- Replace {dbUser} with the target database user/schema before execution.
 
-DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_agents";
-DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_skills";
-DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_tools";
-DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_models";
 DROP TABLE IF EXISTS "{dbUser}"."t_agent_models";
 DROP TABLE IF EXISTS "{dbUser}"."t_agent_definition";
-
 CREATE TABLE "{dbUser}"."t_agent_definition" (
     id              VARCHAR(64)  NOT NULL,
     type            VARCHAR(16)  NOT NULL DEFAULT 'agent',
@@ -70,6 +65,7 @@ COMMENT ON COLUMN "{dbUser}"."t_agent_definition"."use_cases" IS '使用场景';
 COMMENT ON COLUMN "{dbUser}"."t_agent_definition"."created_at" IS '创建时间';
 COMMENT ON COLUMN "{dbUser}"."t_agent_definition"."updated_at" IS '更新时间';
 
+DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_models";
 CREATE TABLE "{dbUser}"."t_agent_binding_models" (
     agent_id    VARCHAR(64) NOT NULL,
     model_id    VARCHAR(64) NOT NULL,
@@ -85,6 +81,7 @@ COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."agent_id" IS 'Agent 标�
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."model_id" IS '模型标识';
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."model_order" IS '模型排序';
 
+DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_tools";
 CREATE TABLE "{dbUser}"."t_agent_binding_tools" (
     agent_id     VARCHAR(64) NOT NULL,
     tool_id      VARCHAR(64) NOT NULL,
@@ -106,6 +103,7 @@ COMMENT ON COLUMN "{dbUser}"."t_agent_binding_tools"."tool_id" IS '工具标识'
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_tools"."tool_version" IS '工具版本，NULL 表示最新版本';
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_tools"."permission" IS '工具权限，NULL 表示继承';
 
+DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_skills";
 CREATE TABLE "{dbUser}"."t_agent_binding_skills" (
     agent_id      VARCHAR(64) NOT NULL,
     skill_id      VARCHAR(64) NOT NULL,
@@ -122,6 +120,7 @@ COMMENT ON COLUMN "{dbUser}"."t_agent_binding_skills"."agent_id" IS 'Agent 标�
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_skills"."skill_id" IS '技能标识';
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_skills"."skill_version" IS '技能版本，NULL 表示最新版本';
 
+DROP TABLE IF EXISTS "{dbUser}"."t_agent_binding_agents";
 CREATE TABLE "{dbUser}"."t_agent_binding_agents" (
     agent_id            VARCHAR(64) NOT NULL,
     bound_agent_id      VARCHAR(64) NOT NULL,
