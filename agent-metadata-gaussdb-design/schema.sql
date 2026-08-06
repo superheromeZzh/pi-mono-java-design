@@ -1,4 +1,4 @@
--- SR-AGENT-DB-001 v0.12.2
+-- SR-AGENT-DB-001 v0.13.0
 -- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
 -- The base DDL intentionally omits physical foreign keys so it can be used
 -- with GaussDB Distributed. The service maintains logical relationships in

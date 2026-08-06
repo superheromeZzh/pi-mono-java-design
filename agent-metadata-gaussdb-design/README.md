@@ -1,11 +1,11 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.12.2`<br>
+> 版本：`v0.13.0`<br>
 > 日期：`2026-08-06`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
-> 设计仓库分析基线：`57bde2c779d401f84288ba664bc56010a7797d88`<br>
-> Java 实现分析基线：`mate-service@2e06063702bed1cfebe76ddea1d215a849d6bbb9`<br>
+> 设计仓库分析基线：`9d1edabccd7eb0ab3ec47a4022109b8d3c2eeb81`<br>
+> Java 实现分析基线：`mate-service@56e4f054895457448341f54b4dd8ef96c965a0f9`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -32,14 +32,16 @@
 
 ### 2.2 Java 基线
 
-本次分析的 Java 提交为 `mate-service@2e06063702bed1cfebe76ddea1d215a849d6bbb9`，相关路径：
+本次分析的 Java 提交为 `mate-service@56e4f054895457448341f54b4dd8ef96c965a0f9`，相关路径：
 
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/AgentId.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/AgentDefinitionInitializationRequestVO.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
 - `src/main/resources/mapper/AgentDefinitionMapper.xml`
 - `src/main/resources/db/schema.sql`
 
-该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列和 DTO 属性已使用 `model_order` / `modelOrder`。基线 DDL 将全部 `DROP TABLE IF EXISTS` 集中放在文件顶部，本版恢复逐表删除后立即创建的部署脚本结构；表结构和对外 JSON 不变。
+该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列和 DTO 属性使用 `model_order` / `modelOrder`。Agent ID 输入通过组合校验注解统一限制为 `agent-` 加 32 位十六进制 UUID；可变 Request VO 和 DTO 使用 Lombok `@Data`。
 
 本文只保存当前 JSON 字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。Agent 固定版本只存储和展示，不查询不存在的历史表。
 
@@ -55,7 +57,7 @@ PlantUML：[查看源码](./diagram.puml#L6)
 
 | JSON 字段 | 数据库字段 | 类型 | 可空 | 规则 |
 |---|---|---|---:|---|
-| `id` | `id` | `VARCHAR(64)` | 否 | 主键 |
+| `id` | `id` | `VARCHAR(64)` | 否 | 主键；应用层格式为 `agent-` 加 32 位十六进制 UUID |
 | `type` | `type` | `VARCHAR(16)` | 否 | 固定为 `agent` |
 | `version` | `version` | `BIGINT` | 否 | 从 1 开始 |
 | `enabled` | `enabled` | `BOOLEAN` | 否 | 默认启用 |
@@ -74,13 +76,19 @@ PlantUML：[查看源码](./diagram.puml#L6)
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 更新时间 |
 
-### 4.1 System Prompt
+### 4.1 Agent ID
+
+目标生成规则是 `agent-` 加 `SecureRandomUtils.generateUUID()` 返回的 32 位 UUID 字符串，例如 `agent-550e8400e29b41d4a716446655440000`。当前仓库尚无公开 Create Agent 接口和 `SecureRandomUtils` 实现，内部 `initializeAgent` 接收已经生成的元数据 ID；初始化元数据、Agent 绑定目标、更新请求、Controller 路径参数和 Service 标量参数统一使用 `@AgentId` 校验，等价正则为 `^agent-[0-9a-fA-F]{32}$`。未来落地 Create Agent 接口时由 Service 按目标规则生成 ID，请求方不传入 ID。
+
+只有 `t_agent_definition.id` 在创建 Agent 时产生；各绑定表的 `agent_id` 和 `bound_agent_id` 均引用既有 Agent ID，不重新生成。数据库继续使用 `VARCHAR(64)`、`NOT NULL` 和主键保证非空及唯一，不把当前 38 位格式固化为列长度，以保留后续生成算法演进空间。
+
+### 4.2 System Prompt
 
 八个 System Prompt 字段全部是产品必填项：数据库使用 `TEXT NOT NULL` 和 `CHECK (btrim(field) <> '')`，Request VO 使用 `@NotBlank`。本版不设置数据库或 Java 最大长度，避免在没有产品阈值时截断有效提示词。
 
 管理前端固定展示完整的八字段提示词，不按空值动态显隐；当前管理前端只允许修改模型绑定，因此 System Prompt 只读展示。该约束是本产品决策，不等同于 Anthropic Managed Agents 只提供单一 `system` 字段的接口模型。
 
-### 4.2 Use Cases
+### 4.3 Use Cases
 
 `use_cases` 使用 `JSONB NOT NULL DEFAULT '[]'::jsonb`，并约束 `jsonb_typeof(use_cases) = 'array'`。相较保留原始 JSON 文本，本场景更关注解析后的字符串数组，JSONB 更适合读取、校验以及后续操作符或索引扩展。
 
@@ -172,7 +180,7 @@ Service 结果：
 
 ```json
 {
-  "agentId": "agent-coder",
+  "agentId": "agent-550e8400e29b41d4a716446655440000",
   "bindingModels": [
     "model-a",
     "model-b"
@@ -180,7 +188,7 @@ Service 结果：
 }
 ```
 
-路径与请求体 `agentId` 必须一致。`bindingModels` 必填、非空、元素不可重复，单个模型 ID 最大 64 字符。
+路径与请求体 `agentId` 必须一致，并符合 `agent-` 加 32 位十六进制 UUID 的格式。`bindingModels` 必填、非空、元素不可重复，单个模型 ID 最大 64 字符。
 
 更新采用最后写入生效：事务中锁定 Agent 当前行，删除旧模型绑定，按请求顺序插入新绑定，然后基于锁定行的当前版本将 `version` 递增一次。客户端不提交期望版本；即使模型列表未变化，成功请求仍递增一次版本。
 
@@ -201,6 +209,7 @@ GaussDB Distributed 不支持物理外键，因此基础 DDL 使用逻辑关系�
 - Service：负责 VO/DTO 转换、跨字段和跨表校验、事务与聚合。
 - Mapper：只使用 DTO、标量条件和受影响行数。
 - 不引入 PO、DO 或 Entity。
+- 可变 Request VO 和 DTO 使用 Lombok `@Data`；只读 Response VO 使用 `@Getter` 和不可变字段。
 
 模型绑定类命名为 `AgentModelBindingDTO` 和 `AgentModelBindingMapper`，与 `AgentToolBindingDTO`、`AgentSkillBindingDTO` 风格一致。
 
@@ -219,6 +228,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.13.0` | 2026-08-06 | Agent ID 统一约束为 `agent-` 加 32 位十六进制 UUID；请求 VO、Controller 和 Service 使用 `@AgentId`；可变 Request VO 和 DTO 统一使用 `@Data` |
 | `v0.12.2` | 2026-08-06 | 恢复逐表 `DROP TABLE IF EXISTS` 后立即 `CREATE TABLE` 的 DDL 结构，并增加自动化顺序检查 |
 | `v0.12.1` | 2026-08-06 | 将模型绑定顺序列由 `sort_order` 更名为 `model_order`，DTO 属性同步更名为 `modelOrder`；排序语义和外部 JSON 保持不变 |
 | `v0.12.0` | 2026-08-06 | 模型全链路统一为 `binding_models` / `bindingModels` / `t_agent_binding_models`；新增 Agent 绑定表；增加列表、详情和模型更新 Service 设计；System Prompt 增加非空白检查且不限制长度；DDL、Java 实现和图表同步 |
