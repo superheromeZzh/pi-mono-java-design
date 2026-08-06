@@ -1,11 +1,11 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.12.0`<br>
+> 版本：`v0.12.1`<br>
 > 日期：`2026-08-06`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
-> 设计仓库分析基线：`910e8e2deddc871595abb05182e3c6efd21f244c`<br>
-> Java 实现分析基线：`mate-service@89aff57d4d1e196a45dadc44a5532cb5c042b207`<br>
+> 设计仓库分析基线：`0207761ffcf98c93b90dc87d773cb40c6dda4f76`<br>
+> Java 实现分析基线：`mate-service@ba71cd4c325f9887f508b212b7084ac44532b4cf`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -32,14 +32,14 @@
 
 ### 2.2 Java 基线
 
-分析的原始 Java 提交为 `mate-service@89aff57d4d1e196a45dadc44a5532cb5c042b207`，相关路径：
+本次分析的 Java 提交为 `mate-service@ba71cd4c325f9887f508b212b7084ac44532b4cf`，相关路径：
 
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
 - `src/main/resources/mapper/AgentDefinitionMapper.xml`
 - `src/main/resources/db/schema.sql`
 
-该基线的已观察行为是四表聚合、`model` 字段、单 Agent 查询和带期望版本的模型替换。五表结构、`binding_models`、Agent 绑定、列表查询、新详情查询及最后写入生效更新属于本版架构变更；不是上述基线已有行为。
+该基线已经实现五表聚合、`bindingModels`、Agent 绑定、列表与详情查询，以及最后写入生效的模型替换；模型绑定顺序列使用 `sort_order`，对应 DTO 属性为 `sortOrder`。本版将二者更名为 `model_order` 和 `modelOrder`，属于命名清晰化，不改变排序语义或对外 JSON。
 
 本文只保存当前 JSON 字段，不增加多租户、历史版本、审计、Outbox、Session 或 Memory 表。Agent 固定版本只存储和展示，不查询不存在的历史表。
 
@@ -96,9 +96,9 @@ GaussDB JSON/JSONB 类型参考：[Huawei Cloud GaussDB JSON/JSONB Types](https:
 |---|---|---|
 | `agent_id` | `VARCHAR(64)` | 逻辑关联主表 |
 | `model_id` | `VARCHAR(64)` | 模型网关 ID；非空白 |
-| `sort_order` | `INTEGER` | 从 0 开始 |
+| `model_order` | `INTEGER` | 从 0 开始 |
 
-主键为 `(agent_id, model_id)`，并对 `(agent_id, sort_order)` 建唯一约束。模型绑定是唯一保存输入数组顺序的绑定；一个 Agent 至少需要一个模型，由 Service 在同一事务中保证。
+主键为 `(agent_id, model_id)`，并对 `(agent_id, model_order)` 建唯一约束。模型绑定是唯一保存输入数组顺序的绑定；一个 Agent 至少需要一个模型，由 Service 在同一事务中保证。
 
 当前没有模型网关目录查询接口，因此只校验模型 ID 的非空、最大 64 字符和唯一性，不校验模型是否存在。
 
@@ -219,6 +219,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.12.1` | 2026-08-06 | 将模型绑定顺序列由 `sort_order` 更名为 `model_order`，DTO 属性同步更名为 `modelOrder`；排序语义和外部 JSON 保持不变 |
 | `v0.12.0` | 2026-08-06 | 模型全链路统一为 `binding_models` / `bindingModels` / `t_agent_binding_models`；新增 Agent 绑定表；增加列表、详情和模型更新 Service 设计；System Prompt 增加非空白检查且不限制长度；DDL、Java 实现和图表同步 |
 | `v0.11.0` | 2026-08-06 | 初始化 DDL 改为 `"{dbUser}"` Schema 限定和先删后建；COMMENT 统一为简洁中文；记录管理前端只允许修改模型配置 |
 | `v0.10.0` | 2026-08-05 | 以输入元数据的 `system_prompt` 对象为准，恢复 8 个数据库展开列并全部设为 `TEXT NOT NULL`；前端固定展示全部字段；同步源 JSON、README、DDL 和图表 |

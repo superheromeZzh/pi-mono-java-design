@@ -1,7 +1,7 @@
-' Generated for SR-AGENT-DB-001 v0.12.0 on 2026-08-06.
+' Generated for SR-AGENT-DB-001 v0.12.1 on 2026-08-06.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Design baseline: 910e8e2deddc871595abb05182e3c6efd21f244c.
-' Java baseline: mate-service@89aff57d4d1e196a45dadc44a5532cb5c042b207.
+' Design baseline: 0207761ffcf98c93b90dc87d773cb40c6dda4f76.
+' Java baseline: mate-service@ba71cd4c325f9887f508b212b7084ac44532b4cf.
 
 @startuml agent_metadata_gaussdb_model
 !pragma layout elk
@@ -25,10 +25,10 @@ skinparam classAttributeIconSize 0
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java
 '   AgentDefinitionServiceImpl.initializeAgent and replaceModels.
 ' - mate-service baseline DDL: src/main/resources/db/schema.sql.
-' Observed behavior: the Java baseline aggregates four tables and persists the
-' model list in t_agent_models.
-' Architecture change: the target design renames model storage to
-' t_agent_binding_models and adds t_agent_binding_agents.
+' Observed behavior: the Java baseline stores model binding order in sort_order
+' and maps it to AgentModelBindingDTO.sortOrder.
+' Design reason: model_order and modelOrder make the ordered value explicit in
+' cross-table SQL and Java mapping without changing external JSON behavior.
 ' Product constraint: all eight system_prompt fields are required and nonblank.
 ' Product constraint: only binding_models preserves input array order.
 ' Design reason: Agent targets must exist when bindings are written, while a
@@ -60,7 +60,7 @@ class t_agent_definition <<current Agent>> {
 class t_agent_binding_models <<binding_models>> {
   agent_id: VARCHAR PK
   model_id: VARCHAR PK
-  sort_order: INTEGER UK
+  model_order: INTEGER UK
 }
 
 class t_agent_binding_tools <<binding_tools and permission>> {

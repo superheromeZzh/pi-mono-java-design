@@ -1,4 +1,4 @@
--- SR-AGENT-DB-001 v0.12.0
+-- SR-AGENT-DB-001 v0.12.1
 -- Target: GaussDB row-store tables with PostgreSQL-compatible syntax.
 -- The base DDL intentionally omits physical foreign keys so it can be used
 -- with GaussDB Distributed. The service maintains logical relationships in
@@ -73,17 +73,17 @@ COMMENT ON COLUMN "{dbUser}"."t_agent_definition"."updated_at" IS '更新时间'
 CREATE TABLE "{dbUser}"."t_agent_binding_models" (
     agent_id    VARCHAR(64) NOT NULL,
     model_id    VARCHAR(64) NOT NULL,
-    sort_order  INTEGER     NOT NULL,
+    model_order INTEGER     NOT NULL,
     CONSTRAINT pk_t_agent_binding_models PRIMARY KEY (agent_id, model_id),
-    CONSTRAINT uk_t_agent_binding_models_order UNIQUE (agent_id, sort_order),
-    CONSTRAINT ck_t_agent_binding_models_order CHECK (sort_order >= 0),
+    CONSTRAINT uk_t_agent_binding_models_order UNIQUE (agent_id, model_order),
+    CONSTRAINT ck_t_agent_binding_models_order CHECK (model_order >= 0),
     CONSTRAINT ck_t_agent_binding_models_id CHECK (btrim(model_id) <> '')
 );
 
 COMMENT ON TABLE "{dbUser}"."t_agent_binding_models" IS 'Agent 模型绑定';
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."agent_id" IS 'Agent 标识';
 COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."model_id" IS '模型标识';
-COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."sort_order" IS '模型排序';
+COMMENT ON COLUMN "{dbUser}"."t_agent_binding_models"."model_order" IS '模型排序';
 
 CREATE TABLE "{dbUser}"."t_agent_binding_tools" (
     agent_id     VARCHAR(64) NOT NULL,
