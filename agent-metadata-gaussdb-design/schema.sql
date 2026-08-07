@@ -1,4 +1,4 @@
--- SR-AGENT-DB-001 v0.14.0
+-- SR-AGENT-DB-001 v0.15.0
 -- 目标：使用兼容 PostgreSQL 语法的 GaussDB 行存表。
 -- 基础 DDL 为兼容 GaussDB 分布式版，不创建物理外键。
 -- Service 在同一事务中维护逻辑关系。
@@ -14,14 +14,14 @@ CREATE TABLE "{dbUser}"."t_agent_definition" (
     name            VARCHAR(128) NOT NULL,
     display_name    VARCHAR(128) NOT NULL,
     description     TEXT         NOT NULL,
-    role            TEXT         NOT NULL,
-    objective       TEXT         NOT NULL,
-    instructions    TEXT         NOT NULL,
-    tool_policy     TEXT         NOT NULL,
-    safety          TEXT         NOT NULL,
-    completion      TEXT         NOT NULL,
-    response_style  TEXT         NOT NULL,
-    example         TEXT         NOT NULL,
+    role            TEXT,
+    objective       TEXT,
+    instructions    TEXT,
+    tool_policy     TEXT,
+    safety          TEXT,
+    completion      TEXT,
+    response_style  TEXT,
+    example         TEXT,
     use_cases       JSONB        NOT NULL DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -31,14 +31,6 @@ CREATE TABLE "{dbUser}"."t_agent_definition" (
     CONSTRAINT ck_t_agent_definition_version CHECK (version >= 1),
     CONSTRAINT ck_t_agent_definition_name CHECK (btrim(name) <> ''),
     CONSTRAINT ck_t_agent_definition_display_name CHECK (btrim(display_name) <> ''),
-    CONSTRAINT ck_t_agent_definition_role CHECK (btrim(role) <> ''),
-    CONSTRAINT ck_t_agent_definition_objective CHECK (btrim(objective) <> ''),
-    CONSTRAINT ck_t_agent_definition_instructions CHECK (btrim(instructions) <> ''),
-    CONSTRAINT ck_t_agent_definition_tool_policy CHECK (btrim(tool_policy) <> ''),
-    CONSTRAINT ck_t_agent_definition_safety CHECK (btrim(safety) <> ''),
-    CONSTRAINT ck_t_agent_definition_completion CHECK (btrim(completion) <> ''),
-    CONSTRAINT ck_t_agent_definition_response_style CHECK (btrim(response_style) <> ''),
-    CONSTRAINT ck_t_agent_definition_example CHECK (btrim(example) <> ''),
     CONSTRAINT ck_t_agent_definition_use_cases CHECK (
         jsonb_typeof(use_cases) = 'array'
     )

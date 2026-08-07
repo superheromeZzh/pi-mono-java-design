@@ -1,11 +1,11 @@
 # Agent 元数据 GaussDB 表设计
 
 > 文档编号：`SR-AGENT-DB-001`<br>
-> 版本：`v0.14.0`<br>
-> 日期：`2026-08-06`<br>
+> 版本：`v0.15.0`<br>
+> 日期：`2026-08-07`<br>
 > 状态：目标设计 / Java Service 同步实现<br>
-> 设计仓库分析基线：`80f50502eca969e4541ea82825a90542de13e084`<br>
-> Java 实现分析基线：`mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5`<br>
+> 设计仓库分析基线：`4afb0e50b15365fec34b2e299e97c8fab7c25460`<br>
+> Java 实现分析基线：`mate-service@737bccfbe825ad6db025e90f5577fdf172bf975b`<br>
 > 输入 JSON 工作区 SHA-256：`b9aa4376e1b0859e698a69a487a2aca9c4bc73911d0f9fa5da89532229f6adf9`
 
 ## 1. 结论
@@ -20,6 +20,8 @@
 
 模型绑定全链路统一使用：元数据 `binding_models`、Java `bindingModels`、数据库 `t_agent_binding_models`、数据层 `AgentModelBindingDTO` / `AgentModelBindingMapper`。不保留 `model` 或 `models` 兼容别名。
 
+System Prompt 的八个细分字段均为可空软约束。数据库不强制非空或非空白；响应只返回具有值的细分字段，管理前端按实际返回字段动态展示。
+
 完整初始化 DDL 维护在 [`schema.sql`](./schema.sql)，本文不重复嵌入完整 SQL。
 
 ## 2. 来源证据与设计边界
@@ -32,15 +34,18 @@
 
 ### 2.2 Java 基线
 
-本次分析的 Java 提交为 `mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5`，相关路径：
+本次分析的 Java 提交为 `mate-service@737bccfbe825ad6db025e90f5577fdf172bf975b`，相关路径：
 
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/AgentDefinitionService.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/service/impl/AgentDefinitionServiceImpl.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/validation/ResourceIdRules.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/UpdateAgentRequestVO.java`
+- `src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/SystemPromptResponseVO.java`
 - `src/main/java/com/huawei/hicampus/mate/agentdefinition/mapper/AgentDefinitionMapper.java`
 - `src/main/resources/mapper/AgentDefinitionMapper.xml`
+- `src/main/resources/application.yml`
 - `src/main/resources/db/schema.sql`
+- `src/test/java/com/huawei/hicampus/mate/agentdefinition/vo/AgentInfoJsonTest.java`
 
 该基线只保留 `listAgents`、`getAgent`、`updateAgent` 三项 Service 能力，实现五表聚合、批量列表查询以及最后写入生效的模型替换。初始化、旧管理查询、旧运行时查询和乐观锁模型替换能力及其 Controller、VO、异常和 Mapper 语句均已删除。模型绑定顺序列和 DTO 属性使用 `model_order` / `modelOrder`；可变 Request VO 和 DTO 使用 Lombok `@Data`；Java 注释和 Javadoc 使用中文。
 
@@ -65,14 +70,14 @@ PlantUML：[查看源码](./diagram.puml#L6)
 | `name` | `name` | `VARCHAR(128)` | 否 | 唯一；管理前端只读 |
 | `display_name` | `display_name` | `VARCHAR(128)` | 否 | 管理前端只读 |
 | `description` | `description` | `TEXT` | 否 | 管理前端只读 |
-| `system_prompt.role` | `role` | `TEXT` | 否 | 非空白 |
-| `system_prompt.objective` | `objective` | `TEXT` | 否 | 非空白 |
-| `system_prompt.instructions` | `instructions` | `TEXT` | 否 | 非空白 |
-| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 否 | 非空白 |
-| `system_prompt.safety` | `safety` | `TEXT` | 否 | 非空白 |
-| `system_prompt.completion` | `completion` | `TEXT` | 否 | 非空白 |
-| `system_prompt.response_style` | `response_style` | `TEXT` | 否 | 非空白 |
-| `system_prompt.example` | `example` | `TEXT` | 否 | 非空白 |
+| `system_prompt.role` | `role` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.objective` | `objective` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.instructions` | `instructions` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.tool_policy` | `tool_policy` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.safety` | `safety` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.completion` | `completion` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.response_style` | `response_style` | `TEXT` | 是 | 可选；软约束 |
+| `system_prompt.example` | `example` | `TEXT` | 是 | 可选；软约束 |
 | `use_cases` | `use_cases` | `JSONB` | 否 | JSON 数组 |
 | `created_at` | `created_at` | `TIMESTAMPTZ` | 否 | 创建时间 |
 | `updated_at` | `updated_at` | `TIMESTAMPTZ` | 否 | 更新时间 |
@@ -85,9 +90,9 @@ Agent 路径参数、更新请求体和模型更新数组元素直接使用 Jaka
 
 ### 4.2 System Prompt
 
-八个 System Prompt 字段全部是产品必填项：数据库使用 `TEXT NOT NULL` 和 `CHECK (btrim(field) <> '')`。当前三个接口不写 System Prompt，因此不保留对应 Request VO；未来增加写入口时，应在 Request VO 使用 `@NotBlank`。本版不设置数据库或 Java 最大长度，避免在没有产品阈值时截断有效提示词。
+八个 System Prompt 字段是可选的提示词组成部分：数据库使用可空 `TEXT`，不设置 `NOT NULL` 或非空白 `CHECK`。当前三个接口不写 System Prompt，因此不保留对应 Request VO；未来增加写入口时，不对这些字段增加 `@NotBlank`，管理界面可以提示建议填写，但不得阻止保存。本版仍不设置数据库或 Java 最大长度。
 
-管理前端固定展示完整的八字段提示词，不按空值动态显隐；当前管理前端只允许修改模型绑定，因此 System Prompt 只读展示。该约束是本产品决策，不等同于 Anthropic Managed Agents 只提供单一 `system` 字段的接口模型。
+应用使用 Jackson `NON_NULL` 输出策略，值为 `NULL` 的细分字段不出现在响应 JSON 中，管理前端按实际返回字段动态展示。未来写入时建议把空白字符串规范化为 `NULL`，避免同时保存 `NULL`、空字符串和纯空白字符串；该规范化属于数据清理，不构成必填校验。
 
 ### 4.3 Use Cases
 
@@ -239,6 +244,7 @@ SVG 是生成物，不手工修改。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| `v0.15.0` | 2026-08-07 | System Prompt 八个细分字段改为可空软约束；删除数据库非空和非空白硬约束；响应省略空字段并由管理前端动态展示 |
 | `v0.14.0` | 2026-08-06 | Service 严格收敛为列表、详情、更新三个方法；删除旧 Controller、VO、异常和不可达 Mapper 语句；Model、Tool、Skill ID 增加前缀加 32 位 UUID 校验；Java 与 SQL 代码注释改为中文 |
 | `v0.13.0` | 2026-08-06 | Agent ID 统一约束为 `agent-` 加 32 位十六进制 UUID；请求 VO、Controller 和 Service 使用 `@AgentId`；可变 Request VO 和 DTO 统一使用 `@Data` |
 | `v0.12.2` | 2026-08-06 | 恢复逐表 `DROP TABLE IF EXISTS` 后立即 `CREATE TABLE` 的 DDL 结构，并增加自动化顺序检查 |

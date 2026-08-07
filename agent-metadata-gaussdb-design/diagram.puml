@@ -1,7 +1,7 @@
-' Generated for SR-AGENT-DB-001 v0.14.0 on 2026-08-06.
+' Generated for SR-AGENT-DB-001 v0.15.0 on 2026-08-07.
 ' Run from this directory: plantuml -tsvg diagram.puml
-' Design baseline: 80f50502eca969e4541ea82825a90542de13e084.
-' Java baseline: mate-service@0f1c9da6df34a8ea3d446bf2c338f6bcc634f6f5.
+' Design baseline: 4afb0e50b15365fec34b2e299e97c8fab7c25460.
+' Java baseline: mate-service@737bccfbe825ad6db025e90f5577fdf172bf975b.
 
 @startuml agent_metadata_gaussdb_model
 !pragma layout elk
@@ -28,13 +28,21 @@ skinparam classAttributeIconSize 0
 '   ResourceIdRules identifier patterns.
 '   src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/UpdateAgentRequestVO.java
 '   UpdateAgentRequestVO standard Jakarta identifier constraints.
+'   src/main/java/com/huawei/hicampus/mate/agentdefinition/vo/SystemPromptResponseVO.java
+'   AgentDefinitionServiceImpl.toSystemPrompt.
+'   src/test/java/com/huawei/hicampus/mate/agentdefinition/vo/AgentInfoJsonTest.java
+'   AgentInfoJsonTest optional system prompt serialization.
+'   src/main/resources/application.yml
+'   Jackson non-null serialization configuration.
 ' - mate-service baseline DDL: src/main/resources/db/schema.sql.
 ' Observed behavior: Jakarta Pattern validates typed resource ID formats.
+' Observed behavior: system_prompt columns are nullable TEXT fields.
+' Observed behavior: Jackson omits null system_prompt component fields.
 ' Observed behavior: only model bindings have write Mapper operations.
 ' Observed behavior: each DROP TABLE statement immediately precedes its CREATE.
 ' Design reason: pair each table drop with its create statement to follow the
 ' required deployment-script convention without changing table structure.
-' Product constraint: all eight system_prompt fields are required and nonblank.
+' Product constraint: all eight system_prompt fields are optional soft guidance.
 ' Product constraint: only binding_models preserves input array order.
 ' Product constraint: Agent IDs use agent- plus a 32-character hexadecimal UUID.
 ' Product constraint: Model, Tool, and Skill IDs use typed prefixes plus UUIDs.
@@ -52,14 +60,14 @@ class t_agent_definition <<current Agent>> {
   name: VARCHAR UK
   display_name: VARCHAR
   description: TEXT
-  role: TEXT
-  objective: TEXT
-  instructions: TEXT
-  tool_policy: TEXT
-  safety: TEXT
-  completion: TEXT
-  response_style: TEXT
-  example: TEXT
+  role: TEXT?
+  objective: TEXT?
+  instructions: TEXT?
+  tool_policy: TEXT?
+  safety: TEXT?
+  completion: TEXT?
+  response_style: TEXT?
+  example: TEXT?
   use_cases: JSONB
   created_at: TIMESTAMPTZ
   updated_at: TIMESTAMPTZ
@@ -102,7 +110,8 @@ name and display_name are VARCHAR(128).
 use_cases is a JSONB array.
 version starts at one.
 All eight system_prompt fields are
-TEXT, required, and nonblank.
+optional TEXT soft constraints.
+Null components are omitted from JSON.
 end note
 
 note right of t_agent_binding_models
